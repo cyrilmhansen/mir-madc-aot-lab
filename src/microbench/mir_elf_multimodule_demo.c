@@ -210,6 +210,8 @@ static int load_object(const char *path) {
   int64_t (*plus3)(int64_t);
   int64_t *factor;
   int64_t got;
+  int64_t plus3_got;
+  int ok;
   if (!bytes) return 2;
   loaded = MIR_object_load(bytes, n, resolver, NULL, err, sizeof err);
   if (!loaded) { fprintf(stderr, "MIR_object_load: %s\n", err); free(bytes); return 3; }
@@ -220,11 +222,13 @@ static int load_object(const char *path) {
           (void *)result, (void *)plus3, (void *)factor, dlsym(RTLD_DEFAULT, "labs"));
   if (plus3) fprintf(stderr, "plus3(-8)=%" PRId64 "\n", plus3(-8));
   got = result ? result(-8) : -1;
+  plus3_got = plus3 ? plus3(-8) : -1;
   printf("path=object-load result=%" PRId64 " plus3=%" PRId64 " factor=%" PRId64 "\n",
-         got, plus3 ? plus3(-8) : -1, factor ? *factor : -1);
+         got, plus3_got, factor ? *factor : -1);
+  ok = got == 30 && plus3_got == -5 && factor && *factor == 6;
   MIR_object_loaded_unload(loaded);
   free(bytes);
-  return got == 30 && plus3 && plus3(-8) == -5 && factor && *factor == 6 ? 0 : 4;
+  return ok ? 0 : 4;
 }
 
 int main(int argc, char **argv) {
