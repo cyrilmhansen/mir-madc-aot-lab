@@ -1,0 +1,19 @@
+GDB observation captured during the Linux AOT run (the original interactive/batch transcript was not persisted).
+
+Reproduction command, from the lab root:
+  gdb -q -batch -ex run -ex bt -ex 'info registers' --args \
+    results/linux-x86_64/artifacts/mir-elf-multimodule-demo load \
+    results/linux-x86_64/artifacts/multimodule.o
+
+Observed signal and stack:
+  Program received signal SIGSEGV, Segmentation fault.
+  RIP / frame 0: 0x7ffff7fb9080 in ?? ()
+  frame 1: load_object (...), at the call through `result` in the reproducer
+  frame 2: main (...)
+
+At the same run, the reproducer printed `plus3=0x7ffff7fb9080`; thus the
+faulting indirect target equals the loaded `demo_plus3` address. The resolver
+log separately records `resolve labs -> 0x7ffff7c48b80` (libc). ASLR means
+these addresses vary between runs. See multimodule-object-load.stderr for the
+persisted current-run resolver and symbol-address log, and
+multimodule-object-load.status for the SIGSEGV status (139).
