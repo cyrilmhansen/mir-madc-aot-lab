@@ -1,0 +1,4 @@
+10 DATA 11,22,33
+20 READ A,B,C
+30 PRINT A;",";B;",";C
+40 END

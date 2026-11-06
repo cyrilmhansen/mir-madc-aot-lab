@@ -1,4 +1,4 @@
-# BASIC to MIR/MADC native AOT: first experiment
+# BASIC to MIR/MADC native AOT: cycles 1 and 2
 
 ## Baselines and source provenance
 
@@ -81,15 +81,15 @@ and AOT output byte-for-byte against upstream expected output.
 | `loop.bas` | pass | pass | pass | `FOR`/`NEXT` loop |
 | `if_block.bas` | pass | pass | pass | conditional branches |
 | `string.bas` | pass | pass | pass | string input/output, with identical stdin |
-| `data_read.bas` | pass | pass | **fail** | AOT prints `0 0` / `0`; `DATA` is not serialized in MIR |
+| `data_read.bas` | pass | pass | **Cycle 1 fail; Cycle 2 pass** | Cycle 2 emits explicit runtime initialization calls |
 
-The `DATA` limitation is traced to upstream frontend state, not ELF relocation:
+The original Cycle 1 `DATA` limitation was traced to upstream frontend state, not ELF relocation:
 `basicc.c` accumulates `DATA` items in its process-local `data_vals` and assigns
 them to `basic_data_items` immediately before interpreter/JIT execution. Its
-MIR text writer emits no representation for that state. The separately linked
-runtime therefore sees its zero-initialized data globals. `DATA`, `READ`, and
-`RESTORE` need an explicit emitted data table or startup initialization before
-they can be supported in AOT.
+MIR text writer emitted no representation for that state, so the separately
+linked runtime saw zero-initialized globals. Cycle 2 resolves this by emitting
+runtime startup calls; it does not add a static ELF table or serialized data
+format.
 
 ## Measurements
 
@@ -121,9 +121,9 @@ Median AOT compile pipeline times (5 runs, sum of stage medians):
 | arith | 1.96 ms | 1.85 ms | 1,756.64 ms | 1,760.46 ms | 8,112 |
 | loop | 1.85 ms | 1.57 ms | 1,832.31 ms | 1,835.73 ms | 4,384 |
 
-The GCC stage recompiles the complete BASIC runtime for each sample; a cached
-runtime object or library should be used for a practical build pipeline. The
-numbers above include this deliberately simple prototype cost. The GCC
+These historical Cycle 1 figures include recompiling the complete runtime for
+each sample. Cycle 2 separates runtime construction and uses a reusable static
+archive; see the Cycle 2 measurements below. The GCC
 interpreter/JIT executable and AOT executable both depend dynamically on
 `libc.so.6` and `libm.so.6` here.
 
@@ -137,12 +137,12 @@ MADC source is copied into the BASIC tree.
 
 Recommend keeping option A, a separate `.mir` to `.o` adapter, for the next
 prototype stage. It gives a small, reviewable compatibility boundary and does
-not require changing the BASIC parser or code generator. The main integration
-work still required is a data-initialization representation and explicit
-handling of runtime MIR metaprogramming. Option B, adding object mode directly
-to `basicc.c`, can remove the intermediate MIR-text adapter later, but couples
-the BASIC frontend to MADC's object API and does not by itself solve those
-runtime-state issues. The current MADC object emitter is x86-64 ELF specific;
+not require changing the BASIC parser or code generator. Remaining integration
+work is the known GOSUB and external-prototype MIR emission failures, plus an
+explicit runtime choice for MIR metaprogramming. Option B, adding object mode directly to `basicc.c`, can
+remove the intermediate MIR-text adapter later, but couples the BASIC
+frontend to MADC's object API. The current MADC object emitter is x86-64 ELF
+specific;
 this prototype does not establish cross-generation support.
 
 ## Repository state
@@ -151,4 +151,101 @@ No MADC sources were changed and the submodule remains at
 `868847a76434058483bade03ead09ba6acb9d771`. No push was performed. The report,
 scripts, extracted BASIC subtree, and outputs are lab artifacts under
 `experiments/basic-aot/`; ignored upstream full-source build trees live under
-`vendor/`.
+`vendor/`. Cycle 2 changes are committed locally on
+`experiment/mir-aot-correctness-cycle3`.
+
+## Cycle 2 current result
+
+The current experiment adds process-owned `DATA` initialization to emitted
+MIR. Generated `main` calls `basic_data_init`, then appends every parsed
+numeric/string item in collection order before the first BASIC statement. The
+runtime copies strings and owns a dynamically grown table; `RESTORE` resets
+the cursor, `END` and implicit return free the table, and a new call to `main`
+initializes it again. The compiler's parse-time vector is only the source used
+to emit these calls; `READ` consumes the runtime table.
+
+Seven focused DATA fixtures and historical `data_read.bas` now match byte for
+byte in interpreter, JIT and native ELF modes. Coverage includes numeric,
+string and mixed entries, distributed statements, DATA after END, RESTORE,
+exhaustion, two calls in one process, REPL line replacement, and runtime table
+cleanup. See `scripts/validate-data.sh` and
+`results/data-validation/feature-matrix.tsv`.
+
+The GCC runtime is built as `runtime/libbasicrt.a`. Its cache signature includes
+runtime sources, headers, compiler version and flags; subsequent BASIC builds
+reuse the archive. AOT samples link with `--gc-sections`, so ordinary
+executables drop unused MIR metaprogramming functions. Tested AOT binaries have
+no MIR undefined symbols and depend only on libc and libm. Programs that
+invoke `MIRCTX`/`MIRFUNC` still require MIR at runtime and fail the strict
+native link. The AOT runtime build defines `BASIC_AOT_NO_MIR_RUNTIME` so the
+common shutdown helper does not retain an otherwise unused `MIR_finish`
+reference.
+
+The experiment patch is applied only to the ignored, locally built pinned MIR
+tree. `upstream/basic/` remains the pristine BASIC source snapshot. No upstream
+repository or MADC source was changed.
+
+## Cycle 2 validation and measurements
+
+Validation commands:
+
+```sh
+experiments/basic-aot/scripts/validate.sh
+experiments/basic-aot/scripts/validate-data.sh
+experiments/basic-aot/scripts/validate-features.sh
+python3 experiments/basic-aot/scripts/measure.py
+```
+
+All three validation scripts pass. The feature matrix marks `funcproc`, `fact`,
+`def_fn`, one- and two-dimensional arrays, and numeric file I/O as passing in
+all three modes. GOSUB works in interpreter/JIT, but the pinned historical
+`basicc -S` segfaults inside `MIR_output_insn` for `gosub.bas`; this was
+reproduced after rebuilding from pristine source, before the experiment patch
+was reapplied. This is a frontend/MIR text-emission defect, before the AOT
+adapter. External imports work in interpreter/JIT; emitted MIR places an
+external prototype after its first call, so the MADC MIR parser rejects it
+(`undeclared name EXT_ADD_p`). `CHAIN` is interpreter-only, EVAL requires live
+frontend state and is explicitly rejected in emitted modes, and MIR
+metaprogramming remains unsupported by the MIR-free ELF link. The official
+`RESUME --no-line-tracking` diagnostic passes; full error-handler resume
+behavior is not covered. File I/O validation uses numeric values; string
+`INPUT#` is not claimed.
+
+Measurements use Linux x86-64 on Skip (native host, not QEMU), GCC 16.2.1,
+double numeric mode, 30 fresh processes per execution mode and 30 repetitions
+per compile phase. AOT compilation is separated into frontend MIR, MADC object
+emission, and native linking against the already built archive. The one-time
+full runtime/archive build took 1.85 s; a cached build check took 225 ms,
+including CMake/compiler freshness checks. Tiny-program execution is dominated
+by process startup.
+
+| Program | Interpreter exit / first output (ms) | JIT exit / first output (ms) | AOT exit / first output (ms) | Median RSS I/J/AOT (KiB) | AOT executable bytes |
+|---|---:|---:|---:|---:|
+| hello | 1.045 / 0.953 | 1.229 / 1.105 | 0.671 / 0.649 | 3,610 / 4,172 / 2,018 | 17,384 |
+| arith | 1.158 / 1.034 | 1.437 / 1.328 | 0.686 / 0.634 | 3,540 / 4,182 / 2,204 | 19,192 |
+| loop | 1.068 / 0.942 | 1.326 / 1.222 | 0.661 / 0.630 | 3,598 / 4,270 / 2,212 | 17,944 |
+| data-restore | 1.089 / 1.016 | 1.376 / 1.221 | 0.726 / 0.703 | 3,596 / 4,310 / 2,282 | 19,192 |
+| funcproc | 1.087 / 0.988 | 1.373 / 1.272 | 0.666 / 0.640 | 3,598 / 4,146 / 2,244 | 18,184 |
+| array-2d | 1.191 / 1.116 | 2.234 / 2.049 | 0.737 / 0.713 | 3,736 / 4,674 / 2,220 | 30,112 |
+
+Median AOT phase times (30 repetitions, milliseconds):
+
+| Program | BASIC to MIR | MIR to ELF object | Native link with cached runtime | Sum of phase medians |
+|---|---:|---:|---:|---:|
+| hello | 1.678 | 1.288 | 14.482 | 17.448 |
+| arith | 1.628 | 1.670 | 14.980 | 18.278 |
+| loop | 1.613 | 1.537 | 15.540 | 18.690 |
+| data-restore | 1.558 | 1.564 | 15.302 | 18.424 |
+| funcproc | 1.598 | 1.552 | 15.563 | 18.712 |
+| array-2d | 1.781 | 2.962 | 15.046 | 19.790 |
+
+Raw phase output, RSS, first-output timing, artifact sizes and `ldd` results
+are in `results/measurements-cycle2/summary.json`. The archive is 270,480 bytes (about 264 KiB) on
+this host. A Valgrind check of the two-run native DATA harness terminated in
+the dynamic loader (`SIGILL` in `_dl_start`) before BASIC code began; it gives
+no memory-safety result.
+
+The separate MIR-text adapter remains the recommended integration boundary.
+Direct generation via `MIR_gen_object_emit` would couple the historical BASIC
+frontend to MADC's object API. The text path remains useful for inspection and
+comparison; no direct integration was attempted in this cycle.

@@ -1,0 +1,8 @@
+10 OPEN 1,"aot-fileio.dat"
+20 PRINT# 1,73
+40 CLOSE 1
+50 OPEN 1,"aot-fileio.dat"
+60 INPUT# 1,A
+70 PRINT A
+90 CLOSE 1
+100 END

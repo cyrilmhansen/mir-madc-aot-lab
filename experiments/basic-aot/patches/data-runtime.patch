@@ -1,0 +1,387 @@
+--- a/basic/src/basicc.c
++++ b/basic/src/basicc.c
+@@ -235,6 +235,10 @@
+ extern basic_num_t basic_read (void);
+ extern char *basic_read_str (void);
+ extern void basic_restore (void);
++extern void basic_data_init (void);
++extern void basic_data_add_num (basic_num_t);
++extern void basic_data_add_str (const char *);
++extern void basic_data_fini (void);
+ extern void basic_clear_array (void *, basic_num_t, basic_num_t);
+ extern void *basic_dim_alloc (void *, basic_num_t, basic_num_t);
+ extern char *basic_strdup (const char *);
+@@ -244,11 +248,8 @@
+   int is_str;
+   basic_num_t num;
+   char *str;
++  int line;
+ } BasicData;
+-
+-extern BasicData *basic_data_items;
+-extern size_t basic_data_len;
+-extern size_t basic_data_pos;
+ 
+ extern void basic_home (void);
+ extern void basic_vtab (basic_num_t);
+@@ -460,6 +461,10 @@
+   if (!strcmp (name, "basic_read")) return basic_read;
+   if (!strcmp (name, "basic_read_str")) return basic_read_str;
+   if (!strcmp (name, "basic_restore")) return basic_restore;
++  if (!strcmp (name, "basic_data_init")) return basic_data_init;
++  if (!strcmp (name, "basic_data_add_num")) return basic_data_add_num;
++  if (!strcmp (name, "basic_data_add_str")) return basic_data_add_str;
++  if (!strcmp (name, "basic_data_fini")) return basic_data_fini;
+   if (!strcmp (name, "basic_clear_array")) return basic_clear_array;
+   if (!strcmp (name, "basic_dim_alloc")) return basic_dim_alloc;
+ 
+@@ -642,7 +647,9 @@
+   profile_func_exit_proto, profile_func_exit_import, delay_proto, delay_import, beep_proto,
+   beep_import, sound_proto, sound_import, sound_off_proto, sound_off_import, system_proto,
+   system_import, system_out_proto, system_out_import, pool_reset_proto, pool_reset_import,
+-  free_proto, free_import, chain_proto, chain_import, eval_proto, eval_import;
++  free_proto, free_import, chain_proto, chain_import, eval_proto, eval_import,
++  data_init_proto, data_init_import, data_num_proto, data_num_import, data_str_proto,
++  data_str_import, data_fini_proto, data_fini_import;
+ 
+ /* AST for expressions */
+ typedef enum { N_NUM, N_VAR, N_BIN, N_NEG, N_NOT, N_STR, N_CALL, N_TAB } NodeKind;
+@@ -705,14 +712,17 @@
+ 
+ static DataVec data_vals;
+ 
+-static void data_vec_push (DataVec *v, BasicData d) {
++static int data_vec_push (DataVec *v, BasicData d) {
+   if (v->len == v->cap) {
+-    v->cap = v->cap ? 2 * v->cap : 16;
+-    BasicData *tmp = realloc (v->data, v->cap * sizeof (BasicData));
+-    if (tmp == NULL) return;
++    size_t cap = v->cap ? 2 * v->cap : 16;
++    if (cap < v->cap || cap > SIZE_MAX / sizeof (BasicData)) return 0;
++    BasicData *tmp = realloc (v->data, cap * sizeof (BasicData));
++    if (tmp == NULL) return 0;
+     v->data = tmp;
++    v->cap = cap;
+   }
+   v->data[v->len++] = d;
++  return 1;
+ }
+ 
+ static void data_vals_clear (void) {
+@@ -720,8 +730,47 @@
+   free (data_vals.data);
+   data_vals.data = NULL;
+   data_vals.len = data_vals.cap = 0;
+-  basic_data_items = NULL;
+-  basic_data_len = basic_data_pos = 0;
++}
++
++static void data_vals_remove_line (int line) {
++  for (size_t i = 0; i < data_vals.len;) {
++    if (data_vals.data[i].line != line) {
++      i++;
++      continue;
++    }
++    basic_free (data_vals.data[i].str);
++    memmove (&data_vals.data[i], &data_vals.data[i + 1],
++             (data_vals.len - i - 1) * sizeof (BasicData));
++    data_vals.len--;
++  }
++}
++
++static int data_vals_replace_line (int line, DataVec *pending) {
++  size_t first = data_vals.len, removed = 0;
++  for (size_t i = 0; i < data_vals.len; i++) {
++    if (data_vals.data[i].line == line) {
++      if (first == data_vals.len) first = i;
++      removed++;
++    }
++  }
++  if (pending->len > SIZE_MAX - (data_vals.len - removed)) return 0;
++  size_t new_len = data_vals.len - removed + pending->len;
++  if (new_len > SIZE_MAX / sizeof (BasicData)) return 0;
++  BasicData *new_data = new_len == 0 ? NULL : malloc (new_len * sizeof (*new_data));
++  if (new_len != 0 && new_data == NULL) return 0;
++  size_t dst = 0;
++  for (size_t i = 0; i < first; i++) new_data[dst++] = data_vals.data[i];
++  for (size_t i = 0; i < pending->len; i++) new_data[dst++] = pending->data[i];
++  for (size_t i = first; i < data_vals.len; i++)
++    if (data_vals.data[i].line != line) new_data[dst++] = data_vals.data[i];
++  for (size_t i = 0; i < data_vals.len; i++)
++    if (data_vals.data[i].line == line) basic_free (data_vals.data[i].str);
++  free (data_vals.data);
++  free (pending->data);
++  data_vals.data = new_data;
++  data_vals.len = data_vals.cap = new_len;
++  *pending = (DataVec) {0};
++  return 1;
+ }
+ 
+ /* Statement representation */
+@@ -2477,6 +2526,7 @@
+       d.is_str = 0;
+       d.num = BASIC_ZERO;
+       d.str = NULL;
++      d.line = p->line_no;
+       Token t = peek_token (p);
+       if (t.type == TOK_STRING) {
+         d.is_str = 1;
+@@ -2487,7 +2537,11 @@
+       } else {
+         d.num = parse_number (p);
+       }
+-      data_vec_push (&data_vals, d);
++      if (!data_vec_push (&data_vals, d)) {
++        basic_free (d.str);
++        safe_fprintf (stderr, "out of memory\n");
++        return 0;
++      }
+       if (peek_token (p).type != TOK_COMMA) break;
+       next_token (p);
+     }
+@@ -6081,6 +6135,10 @@
+     break;
+   }
+   case ST_END: {
++    if (g_func != NULL && strcmp (g_func->u.func->name, "main") == 0)
++      MIR_append_insn (g_ctx, g_func,
++                       MIR_new_call_insn (g_ctx, 2, MIR_new_ref_op (g_ctx, data_fini_proto),
++                                          MIR_new_ref_op (g_ctx, data_fini_import)));
+     MIR_append_insn (g_ctx, g_func, MIR_new_ret_insn (g_ctx, 1, MIR_new_int_op (g_ctx, 0)));
+     break;
+   }
+@@ -6166,6 +6224,7 @@
+                          int reduce_libs, int profile_p, int track_lines, const char *out_name,
+                          const char *src_name) {
+   int eval_p = 0;
++  int repl_mode = src_name != NULL && strcmp (src_name, "(repl)") == 0;
+   interp_mode = !jit && !asm_p && !obj_p && !bin_p && !code_p;
+   if (!interp_mode && contains_chain) {
+     safe_fprintf (stderr, "CHAIN only supported in interpreter mode\n");
+@@ -6191,6 +6250,10 @@
+         break;
+       }
+     }
++  }
++  if (eval_p && !interp_mode && (asm_p || obj_p || bin_p || code_p)) {
++    safe_fprintf (stderr, "EVAL requires the live BASIC frontend and is unsupported in emitted modules\n");
++    exit (1);
+   }
+   MIR_context_t ctx = MIR_init ();
+   MIR_module_t module = MIR_new_module (ctx, "BASIC");
+@@ -6612,6 +6675,15 @@
+   read_import = MIR_new_import (ctx, "basic_read");
+   read_str_proto = MIR_new_proto (ctx, "basic_read_str_p", 1, &p, 0);
+   read_str_import = MIR_new_import (ctx, "basic_read_str");
++  data_init_proto = MIR_new_proto (ctx, "basic_data_init_p", 0, NULL, 0);
++  data_init_import = MIR_new_import (ctx, "basic_data_init");
++  data_num_proto = MIR_new_proto (ctx, "basic_data_add_num_p", 0, NULL, 1,
++                                  BASIC_MIR_NUM_T, "value");
++  data_num_import = MIR_new_import (ctx, "basic_data_add_num");
++  data_str_proto = MIR_new_proto (ctx, "basic_data_add_str_p", 0, NULL, 1, MIR_T_P, "value");
++  data_str_import = MIR_new_import (ctx, "basic_data_add_str");
++  data_fini_proto = MIR_new_proto (ctx, "basic_data_fini_p", 0, NULL, 0);
++  data_fini_import = MIR_new_import (ctx, "basic_data_fini");
+   clear_array_proto = MIR_new_proto (ctx, "basic_clear_array_p", 0, NULL, 3, MIR_T_P, "base",
+                                      BASIC_MIR_NUM_T, "len", BASIC_MIR_NUM_T, "is_str");
+   clear_array_import = MIR_new_import (ctx, "basic_clear_array");
+@@ -6741,10 +6813,6 @@
+   g_prog = prog;
+   g_vars = (VarVec) {0};
+ 
+-  basic_data_items = data_vals.data;
+-  basic_data_len = data_vals.len;
+-  basic_data_pos = 0;
+-
+   /* return stack for GOSUB/RETURN */
+   MIR_reg_t ret_stack = MIR_new_func_reg (ctx, func->u.func, MIR_T_I64, "ret_stack");
+   MIR_reg_t ret_sp = MIR_new_func_reg (ctx, func->u.func, MIR_T_I64, "ret_sp");
+@@ -6755,6 +6823,24 @@
+   MIR_append_insn (ctx, func,
+                    MIR_new_insn (ctx, MIR_MOV, MIR_new_reg_op (ctx, ret_sp),
+                                  MIR_new_int_op (ctx, 0)));
++  MIR_append_insn (ctx, func,
++                   MIR_new_call_insn (ctx, 2, MIR_new_ref_op (ctx, data_init_proto),
++                                      MIR_new_ref_op (ctx, data_init_import)));
++  for (size_t i = 0; i < data_vals.len; i++) {
++    if (data_vals.data[i].is_str) {
++      MIR_append_insn (ctx, func,
++                       MIR_new_call_insn (
++                         ctx, 3, MIR_new_ref_op (ctx, data_str_proto),
++                         MIR_new_ref_op (ctx, data_str_import),
++                         MIR_new_str_op (ctx, (MIR_str_t) {strlen (data_vals.data[i].str) + 1,
++                                                          data_vals.data[i].str})));
++    } else {
++      MIR_append_insn (ctx, func,
++                       MIR_new_call_insn (ctx, 3, MIR_new_ref_op (ctx, data_num_proto),
++                                          MIR_new_ref_op (ctx, data_num_import),
++                                          emit_num_const (ctx, data_vals.data[i].num)));
++    }
++  }
+   g_var_init_anchor = DLIST_TAIL (MIR_insn_t, func->u.func->insns);
+ 
+   g_ret_stack = ret_stack;
+@@ -6813,6 +6899,9 @@
+       /* Strings are arena-allocated; no need to free previous value. */
+     }
+   /* ensure function returns 0 if no END */
++  MIR_append_insn (ctx, func,
++                   MIR_new_call_insn (ctx, 2, MIR_new_ref_op (ctx, data_fini_proto),
++                                      MIR_new_ref_op (ctx, data_fini_import)));
+   MIR_append_insn (ctx, func, MIR_new_ret_insn (ctx, 1, MIR_new_int_op (ctx, 0)));
+   MIR_finish_func (ctx);
+   basic_pool_free (labels);
+@@ -6843,7 +6932,7 @@
+       basic_pool_free (name);
+     }
+     MIR_finish (ctx);
+-    data_vals_clear ();
++    if (!repl_mode) data_vals_clear ();
+     return;
+   }
+   if (bin_p) {
+@@ -6887,7 +6976,7 @@
+     basic_pool_free (ctab_name);
+     basic_pool_free (exe_name);
+     MIR_finish (ctx);
+-    data_vals_clear ();
++    if (!repl_mode) data_vals_clear ();
+     return;
+   }
+   if (code_p) {
+@@ -6912,7 +7001,7 @@
+     }
+     MIR_gen_finish (ctx);
+     MIR_finish (ctx);
+-    data_vals_clear ();
++    if (!repl_mode) data_vals_clear ();
+     return;
+   }
+   MIR_load_module (ctx, module);
+@@ -6935,7 +7024,7 @@
+     m ();
+   }
+   MIR_finish (ctx);
+-  data_vals_clear ();
++  if (!repl_mode) data_vals_clear ();
+ }
+ 
+ static void basic_chain (const char *path) {
+@@ -7118,12 +7207,27 @@
+     long num = basic_num_to_int (num_tok.num);
+     if (peek_token (p).type == TOK_EOF) {
+       delete_line (prog, num);
++      data_vals_remove_line ((int) num);
+     } else {
+       Line l;
+-      Parser tmp;
+-      if (parse_line (&tmp, (char *) line, &l))
++      Parser tmp = {0};
++      DataVec saved_data = data_vals;
++      data_vals = (DataVec) {0};
++      int parsed = parse_line (&tmp, (char *) line, &l);
++      DataVec pending_data = data_vals;
++      data_vals = saved_data;
++      cleanup_parser (&tmp);
++      if (parsed) {
++        if (!data_vals_replace_line ((int) num, &pending_data)) {
++          for (size_t i = 0; i < pending_data.len; i++) basic_free (pending_data.data[i].str);
++          free (pending_data.data);
++          safe_fprintf (stderr, "out of memory\n");
++          return 0;
++        }
+         insert_or_replace_line (prog, l);
+-      else {
++      } else {
++        for (size_t i = 0; i < pending_data.len; i++) basic_free (pending_data.data[i].str);
++        free (pending_data.data);
+         /* error already reported by parse_line */
+       }
+     }
+--- a/basic/src/basic_runtime.c
++++ b/basic/src/basic_runtime.c
+@@ -605,6 +605,49 @@
+ BasicData *basic_data_items = NULL;
+ size_t basic_data_len = 0;
+ size_t basic_data_pos = 0;
++static size_t basic_data_cap = 0;
++
++void basic_data_fini (void) {
++  for (size_t i = 0; i < basic_data_len; i++)
++    if (basic_data_items[i].is_str) free (basic_data_items[i].str);
++  free (basic_data_items);
++  basic_data_items = NULL;
++  basic_data_len = basic_data_cap = basic_data_pos = 0;
++}
++
++void basic_data_init (void) { basic_data_fini (); }
++
++static void basic_data_oom (void) {
++  fputs ("BASIC: unable to allocate DATA table\n", stderr);
++  basic_data_fini ();
++  exit (EXIT_FAILURE);
++}
++
++static void basic_data_reserve (void) {
++  if (basic_data_len < basic_data_cap) return;
++  size_t cap = basic_data_cap ? basic_data_cap * 2 : 16;
++  if (cap < basic_data_cap || cap > SIZE_MAX / sizeof (*basic_data_items)) basic_data_oom ();
++  BasicData *items = realloc (basic_data_items, cap * sizeof (*basic_data_items));
++  if (items == NULL) basic_data_oom ();
++  basic_data_items = items;
++  basic_data_cap = cap;
++}
++
++void basic_data_add_num (basic_num_t value) {
++  basic_data_reserve ();
++  basic_data_items[basic_data_len++] = (BasicData) {.is_str = 0, .num = value, .str = NULL};
++}
++
++void basic_data_add_str (const char *value) {
++  if (value == NULL) value = "";
++  size_t len = strlen (value);
++  if (len == SIZE_MAX) basic_data_oom ();
++  basic_data_reserve ();
++  char *copy = malloc (len + 1);
++  if (copy == NULL) basic_data_oom ();
++  memcpy (copy, value, len + 1);
++  basic_data_items[basic_data_len++] = (BasicData) {.is_str = 1, .num = BASIC_ZERO, .str = copy};
++}
+ 
+ basic_num_t basic_read (void) {
+   if (basic_data_pos >= basic_data_len || basic_data_items[basic_data_pos].is_str)
+@@ -1368,6 +1411,7 @@
+ static size_t handle_len = 0;
+ 
+ void basic_runtime_fini (void) {
++  basic_data_fini ();
+   if (func_profiles != NULL) {
+     for (size_t i = 0; i < func_profiles_len; i++) free ((char *) func_profiles[i].name);
+   }
+@@ -1379,11 +1423,13 @@
+   func_stack = NULL;
+   line_profiles_len = func_profiles_len = func_stack_len = 0;
+   last_profile_line = -1;
++#ifndef BASIC_AOT_NO_MIR_RUNTIME
+   for (size_t i = 0; i < handle_len; ++i) {
+     if (handle_tab[i].kind == H_CTX) {
+       MIR_finish (handle_tab[i].ctx);
+     }
+   }
++#endif
+   free (handle_tab);
+   handle_tab = NULL;
+   handle_len = 0;
+--- a/basic/include/basic_runtime.h
++++ b/basic/include/basic_runtime.h
+@@ -21,6 +21,10 @@
+ 
+ void *basic_dim_alloc (void *base, basic_num_t len, basic_num_t is_str);
+ void basic_clear_array (void *base, basic_num_t len, basic_num_t is_str);
++void basic_data_init (void);
++void basic_data_add_num (basic_num_t value);
++void basic_data_add_str (const char *value);
++void basic_data_fini (void);
+ void basic_runtime_fini (void);
+ 
+ #endif /* BASIC_RUNTIME_H */

@@ -1,0 +1,8 @@
+10 DATA 1
+20 PRINT "not read yet"
+30 DATA 2,3
+40 READ A
+50 READ B
+60 READ C
+70 PRINT A;",";B;",";C
+80 END

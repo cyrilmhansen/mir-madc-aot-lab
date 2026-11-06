@@ -1,0 +1,4 @@
+10 READ A,B
+20 PRINT A;",";B
+30 END
+40 DATA 4,9

@@ -27,16 +27,13 @@ cmp "$OUT/string-interp.out" "$expected"
 cmp "$OUT/string-jit.out" "$expected"
 cmp "$OUT/string-aot.out" "$expected"
 
-# Retain the known limitation as an explicit check: baseline modes agree, but
-# DATA values are absent from `basicc -S` and the current AOT output is zeroed.
+# DATA/READ is serialized as generated startup calls by the experimental
+# frontend patch, and must agree across all three execution paths.
 expected="$ROOT/tests/expected/data_read.out"
 "$BASIC_C" "$ROOT/tests/programs/data_read.bas" > "$OUT/data_read-interp.out"
 "$BASIC_C" -j "$ROOT/tests/programs/data_read.bas" > "$OUT/data_read-jit.out"
 "$HERE/scripts/build-aot.sh" data_read > "$OUT/data_read-aot.out" 2> "$OUT/data_read-aot.err"
 cmp "$OUT/data_read-interp.out" "$expected"
 cmp "$OUT/data_read-jit.out" "$expected"
-if cmp -s "$OUT/data_read-aot.out" "$expected"; then
-  echo "DATA/READ unexpectedly passed; review the known limitation" >&2
-  exit 1
-fi
-printf 'PASS: hello arith loop if_block string; known unsupported AOT feature: DATA/READ\n'
+cmp "$OUT/data_read-aot.out" "$expected"
+printf 'PASS: hello arith loop if_block string data_read (interpreter/JIT/AOT)\n'
