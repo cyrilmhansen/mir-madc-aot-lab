@@ -181,3 +181,15 @@ claim that the original `-DASM` build works. MADC remains at baseline commit
 `experiment/mir-aot-correctness`. The Cycle 4 lab changes are recorded in the
 lab repository; no push was performed. The Cycle 3 six `test_cir_freeze`
 failures remain an independent baseline.
+
+## Cycle 5 outcome
+
+The former baseline behavior described above has been corrected at the parser
+boundary: MADC now refuses non-empty templates, clobbers, `asm goto`, and
+outputs without an explicit tied input. It no longer reports successful
+compilation for this `mulq` source. The supported libmpdec `MACHINE=uint128`
+configuration is fully validated: all 15 MADC units build and the complete
+four-way GCC/MADC library/test-runner matrix passes. See
+[`LIBMPDEC_CYCLE5.md`](LIBMPDEC_CYCLE5.md) for diagnostics, test counts,
+measurements, and commits. The original `-DASM` computation remains unsupported
+by MADC and was not rewritten in libmpdec.

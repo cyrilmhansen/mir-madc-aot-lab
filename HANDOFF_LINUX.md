@@ -155,3 +155,34 @@ rebuild, or generic benchmark campaign was run in Cycle 4.
 The Cycle 3 full-suite baseline remains: after the initial 180-second build
 timeout, the zstd-enabled suite completed with six `test_cir_freeze` C++
 failures (42/48 cases, 1,286/1,292 assertions). Treat those as independent.
+
+## Cycle 5 handoff
+
+The lab is still on `experiment/mir-aot-correctness-cycle3`. MADC is committed
+on `experiment/mir-aot-correctness` at
+`868847a76434058483bade03ead09ba6acb9d771`, based on the preserved
+`f541a7a54624869e29b01f2f30b174bc0329eea5`. The root lab commit updates only
+the gitlink and cycle5 report/artifacts; do not push without the owner's
+request.
+
+The full supported libmpdec `MACHINE=uint128` matrix passes. GCC x64 and GCC
+uint128 each pass 30 local and 296 official rows. All four GCC/MADC uint128
+library/test-runner combinations pass the same counts. MADC built 15/15 units,
+and the `mpd_qnew()` probe checks structure state, allocation sizes, safe
+buffer writes/reads, and two frees. Raw results and commands are in
+`docs/LIBMPDEC_CYCLE5.md` and `results/linux-x86_64-native/libmpdec-cycle5/`.
+
+The MADC parser now rejects non-empty GNU asm templates, clobbers, `asm goto`,
+and outputs without an explicit tied input. The `mulq` regression compiles and
+runs under GCC/Clang with `high=0`; MADC refuses it at `-O0/-O1/-O2`. Empty
+operand-only/tied-output forms and asm declaration-label fixtures pass. This is
+a refusal boundary, not extended-asm support.
+
+The native `.so` measurements verify one decimal multiply per process: median
+load 75.0 µs / operation 2.51 µs for GCC uint128, 100.3 µs / 5.56 µs for MADC
+uint128. The combined MADC `.o` also passes the CLI `MIR_object_load` path; 30
+fresh processes return the checked product. The reported 7.08 ms median
+includes MADC startup. A user-library `.bmir` JIT path was not constructible
+through this C-library flow. No new ARM64 claim was needed because codegen and
+the integrated MIR backend did not change. The six baseline C++ freeze-suite
+failures remain independent and were not rerun this cycle.
