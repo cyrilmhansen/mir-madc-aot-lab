@@ -525,3 +525,115 @@ The separate MIR-text adapter remains the recommended integration boundary.
 Direct generation via `MIR_gen_object_emit` would couple the historical BASIC
 frontend to MADC's object API. The text path remains useful for inspection and
 comparison; no direct integration was attempted in this cycle.
+
+## Cycle 5: string-returning C ABI
+
+### Runtime ownership findings
+
+MIR string literals are module-address-pool data and remain valid only while
+the DSO is loaded. C parameters are borrowed for the duration of the call.
+BASIC function parameters and locals are pointer values; a `LET` from a string
+variable or literal calls `basic_strdup`, while concatenation and string
+builtins such as `basic_upper` allocate through `basic_alloc_string` in the
+BASIC pool. `basic_free` is specifically `basic_pool_free`; it must not be
+used on a literal, arbitrary C pointer, or a returned string whose origin is
+unknown. The compiler does not attach ownership metadata to MIR_T_P results:
+a `DEF FN` can return its input pointer directly, while a `FUNCTION` may
+return a pool allocation. There is no universal ownership transfer rule.
+
+| Internal value category | Example | Lifetime / wrapper treatment |
+|---|---|---|
+| MIR literal | `"text"` in emitted MIR | DSO lifetime; never pass to `basic_free` |
+| Borrowed C argument | `const char *` passed to `BASIC_*` | Caller-owned; copy before returning |
+| BASIC parameter | `TEXT$` in a function | Aliases its input unless assignment creates a copy |
+| BASIC string variable | `LET S$ = TEXT$` | `basic_strdup` creates a pool copy; the variable slot itself is not ownership |
+| Pool allocation | `UPPER$`, concatenation | Pool allocation; free only when the target's return contract proves it |
+| BASIC function result | `DEF FNBORROWED$` vs `FUNCTION ECHO$` | Can be borrowed or pool-owned; MIR pointer type alone does not decide |
+| Public C result | `BASIC_UPPER` return | New `malloc` copy; caller frees with `free` |
+
+The new wrapper generator therefore requires an explicit per-export result
+annotation. Its CLI syntax is `--string-export PUBLIC=INTERNAL:ARGS:pool` or
+`...:borrowed`; arguments are `p` (`const char *`) or `d` (`double`). A
+`:pool` wrapper is used only when the BASIC source proves the result is an
+exact runtime-pool allocation. It copies to `malloc` storage and then calls
+`basic_free` on that proven pool result, including the allocation-failure
+path. A `:borrowed` wrapper copies and leaves the internal pointer untouched.
+It is used for the `DEF FNBORROWED$` fixture, which returns its argument.
+Neither wrapper exposes an internal pointer to C. Invalid non-NULL pointers
+cannot be probed safely in C; the internal function must return a valid
+NUL-terminated BASIC string.
+
+The fixture checks six pool-owned result shapes: literal, copied argument,
+local variable, concatenation, `UPPER$`, and empty string. A seventh
+`DEF FN` returns its input by reference and uses the borrowed annotation. The
+generated public API includes `BASIC_UPPER(const char *) -> char *` and a
+header at `include/basic-shared-api.h`. The C result is an independent
+`malloc` allocation, remains valid after `basic_module_fini()` and `dlclose()`,
+and must then be freed with `free()`. `basic_string_free()` delegates to
+`free()` but can only be called while the DSO is loaded. A NULL input returns
+NULL; an empty BASIC string returns an allocated one-byte empty C string;
+wrapper allocation failure returns NULL. BASIC strings remain NUL-terminated
+byte strings: embedded NUL data is not representable and uppercase behavior
+follows the runtime's byte/locale implementation, without a Unicode promise.
+
+### Pool lifetime and repeated calls
+
+Pool-owned exported results are returned to the BASIC free list after copying,
+but intermediate allocations inside a BASIC function can remain in the pool.
+Borrowed results are never freed. The pool is destroyed by explicit
+`basic_module_fini()`, not reset after each call, so persistent module state is
+not invalidated. This makes lifetime explicit and LeakSanitizer-clean, but it
+does not promise bounded memory for arbitrary string functions or indefinitely
+long module sessions. A future general solution should add ownership tracking
+or a scoped temporary allocator and define which allocations may escape into
+persistent BASIC state; resetting the whole pool per wrapper call is unsafe.
+
+The stress client executes 10,000 `BASIC_UPPER` calls, frees each C result,
+and then finalizes the module. RSS changed from 2,356 to 2,420 KiB in the
+normal build. The ASan/UBSan process changed from 17,072 to 19,836 KiB; that
+measurement includes sanitizer runtime overhead. Leak detection passes after
+fini and after three additional load/init/call/fini/unload cycles. The test
+also checks simultaneously live results, mutation, reverse-order frees,
+NULL arguments, a wrapper-allocation failure hook, direct C linking, and a C
+result that survives DSO unload.
+
+### Validation, ELF and timing
+
+Commands run after the wrapper changes:
+
+```sh
+experiments/basic-aot/scripts/validate.sh
+experiments/basic-aot/scripts/validate-data.sh
+experiments/basic-aot/scripts/validate-features.sh
+experiments/basic-aot/scripts/validate-shared.sh
+experiments/basic-aot/scripts/validate-shared-strings.sh
+```
+
+All pass. Interpreter, JIT and native fixture output match for literal,
+argument, local, concat, uppercase, empty and borrowed-return cases. The
+library is ELF64 `ET_DYN`, has no `TEXTREL`, depends on libc/libm, and `ldd -r`
+reports no unresolved symbol or MIR/JIT dependency. A linker version script
+exports only selected C wrappers, `basic_module_init/fini`, and
+`basic_string_free`; internal BASIC names containing `$` remain hidden.
+`libbasicdemo-strings.so` is 28,640 bytes. The numerical `libbasicdemo.so`
+remains 19,224 bytes. After rebuilding the normal (non-sanitized) runtime, the
+numeric shared benchmark was rerun: `SQUARE` measured 3.14 ns/call versus
+2.43 ns for the equivalent C call, with the same numeric ABI checks passing.
+The updated 30-process sample is
+[`results/shared/numeric-measurements-cycle5.json`](results/shared/numeric-measurements-cycle5.json);
+the original Cycle 4 measurements file was preserved.
+
+`scripts/measure-shared-strings.py` ran 30 fresh processes with 100,000 calls
+per process. Medians were 25.94 ns for the BASIC `UPPER$` wrapper including
+copy/allocation, 3.01 ns for a same-sized C malloc/copy/free, and 9.68 ns for
+a noinline-style C ASCII-uppercase/malloc/free loop. This is a microbenchmark,
+not a like-for-like algorithm comparison (the BASIC runtime uses its
+locale-aware conversion path). Raw samples are in
+[`results/shared/string-measurements.json`](results/shared/string-measurements.json).
+
+`BASIC_UPPER_INTO(input, output, capacity)` was not implemented. A useful
+contract would return required bytes including the NUL, write nothing for
+capacity zero, and if capacity is nonzero always terminate the output (empty
+string on insufficient capacity). It avoids result allocation but gives the
+caller buffer sizing and retry work; the current malloc-return API is simpler
+for C callers and supports results surviving module unload.
