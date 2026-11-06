@@ -526,6 +526,44 @@ Direct generation via `MIR_gen_object_emit` would couple the historical BASIC
 frontend to MADC's object API. The text path remains useful for inspection and
 comparison; no direct integration was attempted in this cycle.
 
+## Cycle 6: direct shared-object emission investigation
+
+### Pinned MIR emitter constraints (pre-implementation)
+
+The MADC-pinned API is in `madc/third_party/mir/mir-gen.h` and
+`mir-debug.h`. Object mode captures machine code and relocations through
+`MIR_gen_set_object_mode`, `MIR_gen`, and `MIR_gen_get_object`; the complete
+shared image is written with `MIR_gen_object_emit_executable(ctx, &params,
+&buf, &size)` and `params.shared_p = 1`. This path emits ELF64 `ET_DYN` on
+the current x86-64 Linux target; it is not a request for GCC/ld to link the
+image.
+
+For shared images the emitter exports defined nonlocal MIR symbols, places
+ABS64 address slots in `.rela.dyn`, uses `R_X86_64_RELATIVE` for internal
+addresses and `R_X86_64_64` for imports, and emits `DT_NEEDED` and optional
+`DT_RUNPATH` from the caller's parameter struct. There is no PLT/lazy binding;
+the image carries BIND_NOW. Its documented layout includes Full RELRO,
+`PT_GNU_STACK` without execute permission, and `DT_INIT_ARRAY` when the
+builder has initializers. The dynamic loader runs those entries at DSO load;
+the BASIC experiment will continue to use explicit lifecycle functions and
+will not add an initializer.
+
+The emitter records strong undefined MIR imports as strong dynamic symbols;
+the loader must resolve them when the consumer uses `RTLD_NOW`. Undefined
+weak references are distinct and can become address zero, so runtime imports
+must not be weakened as a workaround. The existing `.mir -> .o` adapter
+temporarily weakens imports only to satisfy `MIR_link`, then restores the MIR
+item bindings before machine-code capture; the direct-image path needs the
+same restored bindings so the emitter writes the original strength.
+
+`MIR_object_read()` is the merge reader for relocatable artifacts emitted by
+this MIR builder. It rebases the supported sections/symbols/relocations and
+is not a general-purpose reader for arbitrary GCC ELF objects. Therefore
+runtime objects and C ABI wrappers, if merged into an image, must first be
+emitted as MIR-compatible ET_REL objects (the proposed wrapper proof uses
+MADC itself). This constraint rules out feeding GCC's existing wrapper
+object into the merge reader.
+
 ## Cycle 5: string-returning C ABI
 
 ### Runtime ownership findings
@@ -637,3 +675,169 @@ capacity zero, and if capacity is nonzero always terminate the output (empty
 string on insufficient capacity). It avoids result allocation but gives the
 caller buffer sizing and retry work; the current malloc-return API is simpler
 for C callers and supports results surviving module unload.
+
+## Cycle 6: direct MIR shared-library emission
+
+### Emitter constraints and architecture
+
+The pinned MADC backend is `868847a76434058483bade03ead09ba6acb9d771` and
+the host is native Linux x86-64. `MIR_gen_object_emit_executable()` can emit a
+shared object from a generator context. For combining independently emitted
+objects, the useful route is `MIR_object_create()` → repeated
+`MIR_object_read()` of MIR/MADC ELF `ET_REL` files →
+`MIR_object_emit_executable()` with a zero-initialized
+`MIR_object_exec_params`, `shared_p = 1`, explicit `needed` entries and
+`runpath = "$ORIGIN"`. The resulting ELF is `ET_DYN`, has dynamic RELA
+relocations and a BIND_NOW policy, and carries the requested `DT_NEEDED` and
+`DT_RUNPATH`. Its program headers mark the stack non-executable and include
+GNU RELRO. Internal address-pool references use relative relocations; imports
+use symbol relocations. This emitter does not invoke a system linker.
+
+`MIR_object_read()` accepts MIR-emitted relocatable objects; it is not a reader
+for arbitrary GCC objects. Accordingly, wrapper C was compiled to `ET_REL`
+with MADC and `-fno-eval-shims`, while the reusable BASIC runtime was built as
+a PIC shared library with GCC. The BASIC DSO is assembled only from MIR/MADC
+objects. GCC is still used for the separate runtime DSO and the reference
+library. The runtime DSO has SONAME `libbasicrt.so`; a generated version
+script exports exactly the `basic_*` runtime functions referenced by the
+program/wrappers plus `basic_module_init/fini`. It depends on libc and libm.
+
+The MIR emitter places every global definition from merged inputs in the
+dynamic symbol table. To retain the Cycle 5 public ABI, the adapter
+`src/mir-objects-to-shared.c` applies ELF `STV_HIDDEN` to internal BASIC
+function names after emission, and verifies required undefined imports are
+strong global symbols. These names remain present as hidden `.dynsym` entries
+(and can appear in `nm -D`); `dlsym` cannot resolve them. `main` is already a
+local symbol. The selected public functions and wrappers remain default
+visibility. No linker-generated version script is applied to the direct MIR
+image.
+
+### Direct DSO and runtime behavior
+
+`scripts/build-shared-direct.sh` reproduces the complete Cycle 5 surface from
+`tests/shared/libbasicdemo-direct.bas`. It emits the BASIC `.mir`, converts it
+to `ET_REL`, compiles the generated C ownership wrappers with MADC, builds the
+PIC `libbasicrt.so`, merges the two MIR/MADC objects, then writes
+`libbasicdemo-mir.so` through `MIR_object_emit_executable()`. No GCC/ld command
+links that BASIC DSO. The existing GCC-linked DSO is also rebuilt as the
+reference path.
+
+The direct image exports `SQUARE`, `ADD`, `STRLEN`, `REPORT`, the selected
+`BASIC_*` string wrappers, and `basic_string_free`; the internal BASIC names
+are hidden. `basic_module_init/fini` are supplied by the `DT_NEEDED` runtime.
+The generated DSO contains no MIR/JIT dependency, has no `TEXTREL`, has
+`DT_NEEDED` entries for `libbasicrt.so`, libc and libm, and uses only the
+relative `$ORIGIN` RUNPATH. Its dynamic imports are strong. The emitted
+`.init_array` has zero size and there is no `DT_INIT`, `DT_FINI`,
+`DT_INIT_ARRAY` or `DT_FINI_ARRAY` dynamic tag; lifecycle remains explicit.
+The BASIC DSO has no ELF SONAME field, while the runtime dependency does.
+
+The required minimal case is also built independently by the adapter's
+`MIR_gen_object_emit_executable()` route from
+`tests/shared/direct-numeric.bas`, exporting only `SQUARE` and `ADD`. The
+result is a 9,840-byte ET_DYN with no BASIC runtime dependency; it passes both
+direct linking and `dlopen(RTLD_NOW | RTLD_LOCAL)` C clients. Its disassembly
+shows the two exports are only `mulsd`/`addsd` plus `ret`, with no runtime
+calls. The generated, non-exported local `main` does retain weak undefined
+startup helpers in `.dynsym`; this does not make either selected function
+dependent on them. Runtime-using exports use the separate merge path above,
+where required imports remain strong and missing runtime definitions fail at
+load time.
+
+Validation includes direct C linkage and a separate `dlopen(RTLD_NOW |
+RTLD_LOCAL)` client. It calls all the selected numeric and string APIs,
+including `REPORT`, checks `SQUARE`/`ADD` values, checks that an internal
+`UPPERTEST$` lookup fails, and compares output with the GCC-linked DSO. A
+malloc-owned `BASIC_UPPER` result remains valid after `basic_module_fini()`
+and `dlclose()`, then is freed with `free()`. To verify required imports, a
+test directory substitutes a DSO with the same `libbasicrt.so` SONAME but no
+BASIC exports; `dlopen(RTLD_NOW)` fails deterministically with an undefined
+`basic_*` symbol rather than reaching a later call. No weak-binding workaround
+is used. Runtime-dependent string wrappers, `STRLEN`, `REPORT`, explicit
+initialization/finalization, and the Cycle 5 pool/borrowed ownership policies
+all passed. This fixture does not exercise DATA-dependent exported functions;
+the generated `main` initializes its own DATA table, and the current explicit
+module initializer does not execute `main`.
+
+Reproduce and validate with:
+
+```sh
+experiments/basic-aot/scripts/build-shared-direct.sh
+experiments/basic-aot/scripts/validate-shared-direct.sh
+```
+
+The validation suite checks ELF64/x86-64/ET_DYN, selected default-visibility
+exports, hidden internals, strong runtime imports, `DT_NEEDED`, `$ORIGIN`, no
+TEXTREL, GNU RELRO, non-executable stack, no init/fini tags, direct linking,
+`RTLD_NOW|RTLD_LOCAL`, and failure with the intentionally incomplete runtime.
+All five existing suites also passed after the changes:
+`validate.sh`, `validate-data.sh`, `validate-features.sh`,
+`validate-shared.sh`, and `validate-shared-strings.sh`.
+
+### Self-contained attempt and limits
+
+The four required runtime translation units (`basic_runtime.c`,
+`basic_pool.c`, `kitty.c`, and `lodepng.c`) plus the lifecycle source compile
+with MADC using `-fno-eval-shims`, `-fPIC`, `-O2`,
+`BASIC_AOT_NO_MIR_RUNTIME`, and `BASIC_AOT_EXPLICIT_INIT`. MADC rejects
+`-ffunction-sections`; without section-level function elimination, the
+compiled runtime objects retain their optional BASIC eval/metaprogramming
+functions. Merging all seven objects can emit a large ET_DYN, but
+`ldd -r` reports required undefined MIR API symbols including `_MIR_init`,
+`MIR_link`, and `MIR_load_module`. Therefore this image is not loadable as a
+self-contained BASIC runtime and is retained only as a diagnostic artifact.
+Adding MIR itself as a runtime dependency would violate the no-MIR runtime
+goal. The working shared-runtime architecture remains usable. The next
+self-contained attempt needs either function-level elimination in MADC object
+emission or a deliberately reduced runtime translation unit; no compiler or
+upstream MIR change was made in this cycle.
+
+MADC also rejects `-fsanitize=address,undefined`, so the direct MADC-generated
+wrapper code could not be instrumented. The existing GCC-linked
+`validate-shared-strings.sh` ASan/UBSan/LeakSanitizer checks passed; this is not
+a sanitizer claim for the direct MIR DSO. The direct ownership and unload
+checks are functional tests only.
+
+### Native measurements
+
+`scripts/measure-shared-direct.py` ran 30 fresh processes per stage and 30
+fresh processes per runtime client (1,000,000 numeric calls and 100,000 string
+calls each). It reuses the already-built runtime; its one-time construction is
+not included in warm-stage times. Results and raw per-process samples are in
+`results/shared/cycle6-measure/summary.json`.
+
+| Stage / value | Median |
+|---|---:|
+| BASIC → MIR | 1.67 ms |
+| MIR → MADC ET_REL | 1.99 ms |
+| MIR object capture + direct ET_DYN emission | 0.66 ms |
+| GCC final link of reference DSO | 15.87 ms |
+| One-time GCC runtime archive build | 1.88 s |
+| One-time GCC runtime DSO build | 62.03 ms |
+| Direct MIR `SQUARE` call | 3.14 ns/call |
+| GCC-linked `SQUARE` call | 3.63 ns/call |
+| Direct `BASIC_UPPER` (copy + allocation) | 31.76 ns/call |
+| GCC `BASIC_UPPER` reference | 26.23 ns/call |
+| Direct DSO `dlopen` / `dlclose` | 66.08 / 25.74 µs |
+| Direct DSO `dlsym` | 33.78 ns/symbol |
+
+The direct BASIC DSO is 19,904 bytes and the shared runtime is 17,368 bytes,
+for 37,272 bytes of deployed ELF files. The GCC-linked reference DSO is
+28,432 bytes and contains the runtime statically. The packaging sizes are
+therefore not equivalent. Timing spreads overlap substantially; no performance
+advantage is claimed for direct emission or calls. This experiment shows the
+direct emitter can remove the measured final system-link step, not that the
+whole compile pipeline or deployment is faster/smaller.
+
+### Cycle 6 status
+
+- Required direct MIR ELF with `SQUARE` and `ADD`: PASS, direct-linked and
+  loaded by C.
+- Shared BASIC runtime architecture: PASS for the selected numeric, procedure,
+  string input/return, ownership, lifecycle and RTLD_NOW cases.
+- Five previous validation suites and `validate-shared-direct.sh`: PASS.
+- Self-contained runtime DSO: blocked by retained metaprogramming references
+  and unresolved MIR API imports; no false success claimed.
+- MADC submodule unchanged at `868847a76434058483bade03ead09ba6acb9d771`;
+  no pushes performed. The direct implementation and tests are local lab
+  changes; pre-existing root MPDecimal log changes remain untouched.
