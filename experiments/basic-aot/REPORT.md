@@ -1031,3 +1031,155 @@ failure while comparing the BASIC writer's MIR against both the pristine MIR
 reader and the maintained MADC reader. Only change a backend after the
 standalone MIR reproducer establishes a reader/backend defect independently
 of BASIC.
+
+## ELF size audit of the 149 standalone demos
+
+The read-only inventory and reproducible analysis outputs are under
+[`results/aot/size-analysis/`](results/aot/size-analysis/). Recreate them with:
+
+```sh
+experiments/basic-aot/scripts/analyze-elf-sizes.py
+```
+
+The script parses ELF sections and program segments with `pyelftools`, checks
+all 149 inputs (a malformed file is fatal), records `size -B`, source metrics
+and defined symbols, and emits JSON/CSV, Markdown and charts. It also creates
+`strip --strip-unneeded` copies below the analysis directory and compares
+selected original/stripped runs. It never overwrites corpus executables or
+rebuilds BASIC/MADC. Its output records Python, pyelftools, binutils, compiler
+and repository provenance. Per-section sizes are not treated as file size:
+PT_LOAD sizes, allocated memory, the union of section file extents and bytes
+outside those extents are reported separately. Segment ranges can overlap;
+the section-free file-byte total includes headers, inter-section padding and
+the section-header table.
+
+### Corpus distribution
+
+The 149 executables occupy 12,085,712 bytes (11,802.5 KiB). Minimum is 17,384
+bytes, maximum 1,554,184 bytes, mean 81,112, median 48,416 and population
+standard deviation 141,021. Percentiles are P75 84,120, P90 148,938, P95
+221,181 and P99 446,734 bytes. There are 45 binaries below 32 KiB, 52 from
+32–64 KiB, 34 from 64–128 KiB, 13 from 128–256 KiB, four from 256–512 KiB,
+none from 512 KiB–1 MiB, and one from 1–2 MiB. Total PT_LOAD file sizes are
+9,236,265 bytes and PT_LOAD memory sizes total 9,401,961 bytes. These are
+segment declarations summed across executables, not disk usage or RSS.
+
+The smallest program, `bcg/test1`, is 17,384 bytes. A minimal GCC C program
+compiled with `-Os`, function/data sections and `--gc-sections` is 15,608
+bytes. The 1,776-byte difference is a scale estimate for this tiny BASIC
+program, not a universal runtime charge: the link inputs differ. `test1` has
+1,229 bytes `.text`, 96 `.data`, 64 `.bss` and one byte `.rodata`; symbol
+tables, relocations, dynamic-loader metadata, alignment and ELF headers make
+up much of the remainder. Stripping reduces it to 14,968 bytes. ELF and
+dynamic-loader startup account for most of the roughly 17 KiB floor.
+
+### Largest binaries and dominant sections
+
+See [`top20.md`](results/aot/size-analysis/top20.md),
+[`outliers.md`](results/aot/size-analysis/outliers.md) and
+[`sections.csv`](results/aot/size-analysis/sections.csv) for complete rankings.
+
+| Program | File bytes | `.text` | `.data` | `.rodata` | `.bss` | Dominant evidence |
+|---|---:|---:|---:|---:|---:|---|
+| `bcg/poker` | 1,554,184 | 1,408,387 | 16,932 | 176 | 432 | Duplicate generated code; `main` symbol 702,146 B |
+| `bcg/qubit` | 458,968 | 293,027 | 19,268 | 224 | 416 | Generated `main` 144,671 B, data pool and metadata |
+| `fleuves` | 433,480 | 196,774 | 24,816 | 9,780 | 65,712 | `main`, lodepng code/data, 65,536-byte `basic_memory` |
+| `bcg/mastermind` | 381,328 | 287,651 | 9,860 | 224 | 432 | Generated `main` 141,923 B |
+| `bcg/football` | 310,872 | 187,267 | 14,564 | 224 | 432 | Generated `main` 91,558 B |
+| `bcg/battle` | 254,440 | 84,227 | 19,988 | 128 | 144 | Relocations and symbols about 104 KiB |
+| `bcg/salvo` | 247,808 | 82,211 | 18,164 | 224 | 432 | Relocations and symbols about 99 KiB |
+| `bcg/hockey` | 242,800 | 74,179 | 20,004 | 128 | 432 | Relocations and symbols about 99 KiB |
+| `bcg/ftball` | 188,752 | 62,499 | 14,180 | 224 | 432 | Code plus about 76 KiB metadata |
+| `bcg/hexapawn` | 188,624 | 52,483 | 15,924 | 224 | 432 | Code plus about 84 KiB metadata |
+
+Poker's `.text` alone is 90.6% of its file. Its 416 source lines expand to a
+702,146-byte `main`; emitted `.text` is roughly twice the sum of defined
+function symbol sizes. The adapter performs `MIR_link(ctx,
+MIR_set_gen_interface, NULL)` and then explicitly calls `MIR_gen` for each
+function before object emission. A diagnostic copy of the lab adapter with
+only that explicit loop omitted produced a one-copy object. Results on
+existing MIR inputs:
+
+| Program | `.text` bytes | Linked executable bytes | Difference |
+|---|---:|---:|---:|
+| `bcg/test1` | 228 → 100 | 17,384 → 17,224 | 160 B |
+| `fib` | 1,510 → 742 | 19,256 → 18,728 | 528 B |
+| `array` | 1,636 → 804 | 19,888 → 19,360 | 528 B |
+| `bcg/poker` | 1,404,738 → 702,338 | 1,554,184 → 812,832 | 741,352 B |
+
+Poker's `main` remains about 702 KiB in both variants; the ordinary object
+contains another similarly sized `.text` range outside function symbols,
+plus a second address pool and nearly twice the text relocations. The
+diagnostic `test1` output matched exactly. This demonstrates duplicate adapter
+emission on these samples, not a MIR codegen optimization. The variant was
+behavior-checked only on `test1`; first follow-up should test removal in a
+separate adapter change and run all six suites plus the corpus build and
+differential subset before adopting it.
+
+Other large games have large single generated `main` symbols: QuBit 144,671
+B, Mastermind 141,923 B and Football 91,558 B. Their sources are about
+5.4–7.3 KiB, so line count alone does not explain code size. No independent
+MIR-to-machine comparison here proves another lowering defect. Large BASIC
+programs expand into many MIR operations, address-pool entries and
+relocations; any further code expansion pathology is a hypothesis pending a
+minimal MIR-level measurement.
+
+Fleuves differs: a linker map attributes about 47.6 KiB `.text` to lodepng,
+about 3.0 KiB to selected BASIC runtime functions, and identifies a 65,536
+byte `basic_memory` object in BSS. Its 9.8 KiB `.rodata` includes encoder
+tables. It is 423 KiB despite only 124 source lines, with 274 estimated
+statements plus graphics/image support. `starfield`, `readhplot`, `screen` and
+`hgr2reset` each have about 9.6 KiB `.rodata` despite tiny sources; link maps
+and symbols attribute these tables to shared graphics runtime support. Poker,
+QuBit, Mastermind and Football contain only 176–224 bytes `.rodata`, so their
+size is not literal strings. BASIC strings and address-pool data in this ELF
+path primarily occupy writable `.data`/`.mir.addrpool`; section names alone
+do not identify string ownership.
+
+Section-category totals across the corpus include 4,923,630 bytes code,
+1,849,632 relocations and 1,746,308 symbols. The figures count section bytes
+and intentionally differ from total file bytes. Link maps for `test1`, `fib`,
+`array`, Poker and Fleuves show selected BASIC runtime `.text` of about 0.6,
+0.8, 1.4, 3.1 and 3.0 KiB respectively; Fleuves also has lodepng. Thus the
+statically linked BASIC runtime does not explain Poker's megabyte scale. A
+shared runtime might save a few KiB per ordinary binary and more for selected
+helpers, but Poker's measured duplicate code dwarfs that. These map samples
+are representative, not corpus-wide exact runtime attribution.
+
+### Stripping and code inspection
+
+`strip --strip-unneeded` copies remove 1,610,176 bytes total, 13.3% of
+deployed bytes. The removed sections are `.symtab` (1,154,280 B), `.strtab`
+(433,289 B) and `.shstrtab` (2,384 B). Reduction ranges from 2.3% for Poker
+to about 19.6% for `logotron`. Original and stripped `array`, `fib`,
+`fizzbuzz`, `math` and `while` were run in isolated directories and matched
+stdout, stderr, status and file effects. This supports an optional release
+packaging mode; it does not justify stripping development artifacts by
+default.
+
+The audit preserves `.text` disassembly and `.data` dumps for representative
+small, medium and large programs plus linker maps. `size -B` differs from ELF
+section inventory because it groups sections differently (including init,
+PLT and fini contributions), while ELF files also contain nonallocated
+metadata and alignment gaps. No instruction rewrite or runtime-helper-call
+optimization was attempted.
+
+### Prioritized recommendations
+
+| Priority | Follow-up | Expected bytes | Effort | Regression risk |
+|---|---|---|---|---|
+| 1 | Remove redundant adapter `MIR_gen` calls, then validate broadly | Measured 741,352 B on Poker; 160–528 B on three small samples; aggregate needs rebuild | Low | Medium: test emission ordering and object paths |
+| 2 | Optional release `strip --strip-unneeded` | Measured 1,610,176 B / 13.3% corpus reduction | Low | Low–medium: symbols/debuggability; five demos verified |
+| 3 | Shared BASIC runtime for multi-program bundles | Maps show about 0.6–3.1 KiB of BASIC runtime `.text` per sample plus data | Medium | Medium: ABI, lifecycle, versioning and deployment |
+| 4 | Measure single-copy generated `main` size and optimize if justified | Potentially large for Poker/QuBit/Mastermind/Football; no safe saving estimate | High | High: compiler changes can affect semantics and performance |
+| 5 | Reduce relocation/symbol metadata | Material in some 180–255 KiB games; saving bounded by their tables | Medium | Low–medium; lower priority than duplicate code |
+
+The full artifact set includes [`SUMMARY.md`](results/aot/size-analysis/SUMMARY.md),
+[`elf-sizes.json`](results/aot/size-analysis/elf-sizes.json),
+[`elf-sizes.csv`](results/aot/size-analysis/elf-sizes.csv),
+[`sections.csv`](results/aot/size-analysis/sections.csv),
+[`strip-comparison.csv`](results/aot/size-analysis/strip-comparison.csv),
+ranked Markdown reports, charts, link maps, disassembly and adapter diagnostics.
+No BASIC, MIR or MADC source or corpus executable was changed. The six-suite
+pass status from the preceding cycle is preserved; this audit ran only the
+five selected strip behavior comparisons.
