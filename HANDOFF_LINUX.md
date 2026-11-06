@@ -129,6 +129,29 @@ DecNumber examples can be reconstructed with `scripts/build-linux-decnumber.sh`;
 
 The reported loader crash was a use-after-unload in the lab harness, not an MADC relocation defect. The fix is in the lab source and the dedicated script validates `.o` load result 30. MADC remains at the pinned baseline on local branch `experiment/mir-aot-correctness`; no compiler source changes or commits were made.
 
-`mpd_qnew()` remains unresolved. GCC/MADC objects and GDB locate the first invalid behavior in generated code, but the `madc -c` driver does not expose its MIR representation; avoid claiming whether the error is in CIR lowering, MIR optimization, or backend code generation. Continue with a smaller program that reproduces the invalid sequence and a supported MIR dump path before changing MADC. Do not alter libmpdec's algorithm to mask the issue.
+`mpd_qnew()` remains unresolved for the normal `-DASM` libmpdec build. Cycle 4 identified the root cause: MADC discards non-empty GNU inline-assembly templates while parsing, so `_mpd_mul_words()` reads uninitialized `h`/`l` outputs. `MADC_DUMP_MIR=1` exposes the AOT pre-link MIR. The independent `src/clients/mpdecimal_inline_asm_min.c` reproduces the first semantic loss without libmpdec. See `docs/LIBMPDEC_ROOT_CAUSE.md`; do not attribute the failure to ABI or MIR inlining.
 
 On this native x86-64 host, the focused object-load/native-shared tests pass. The first full-suite invocation timed out at 180 seconds while compiling tests. The resumed run without optional zstd passed 40/48 `test_cir_freeze` cases; a forced rebuild with installed zstd enabled passed 42/48, with six C++ header/global reconstruction failures. Existing AArch64 QEMU fixtures remain the only ARM64 validation; no ARM64 build was needed because no shared backend patch was made. Native benchmarks were deferred until the remaining compiler correctness issue is resolved.
+
+## Cycle 4 handoff
+
+The lab is on `experiment/mir-aot-correctness-cycle3`; MADC is on the dedicated
+`experiment/mir-aot-correctness` branch at the unchanged baseline
+`f541a7a54624869e29b01f2f30b174bc0329eea5`. Temporary instrumentation for MIR
+before/after `MIR_link` and disabling only MIR inlining was removed from the
+MADC source after collecting `results/linux-x86_64/logs/cycle4-*`. The MADC
+working tree is clean. Focused object-load and native-shared tests pass after
+the removal.
+
+The `-DASM` libmpdec issue is traced to unsupported non-empty GNU extended asm
+in MADC's source parser/CIR builder, not c2mir, the MIR inliner, machine
+register allocation, ELF relocation, or symbol resolution. No minimal compiler
+patch was made because correct handling requires extended-asm semantics; the
+ANSI 128-bit path only verified allocation initialization/free and is not a
+full-library result. The failing cross-compiler regression harness is
+`scripts/test-linux-madc-inline-asm-min.sh`. No full libmpdec matrix, ARM64
+rebuild, or generic benchmark campaign was run in Cycle 4.
+
+The Cycle 3 full-suite baseline remains: after the initial 180-second build
+timeout, the zstd-enabled suite completed with six `test_cir_freeze` C++
+failures (42/48 cases, 1,286/1,292 assertions). Treat those as independent.
