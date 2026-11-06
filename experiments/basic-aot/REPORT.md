@@ -118,6 +118,130 @@ Median AOT compile pipeline times (5 runs, sum of stage medians):
 | Program | `basicc -S` | MIR to ELF object | GCC runtime compile/link | Total | Object bytes |
 |---|---:|---:|---:|---:|---:|
 | hello | 1.47 ms | 1.09 ms | 1,799.56 ms | 1,802.12 ms | 2,928 |
+
+## Cycle 3: EXTERN ordering and GOSUB/RETURN
+
+### EXTERN declarations
+
+The BASIC parser originally parsed each source line immediately. If a numeric
+external was called before its later `EXTERN` line, the name was not yet in
+`func_defs`; `EXT_LATE(3)` became an implicit array access and printed `0`.
+Emitting external MIR prototypes earlier in `gen_program()` alone could not
+repair that already-built AST. The experimental frontend now pre-scans only
+EXTERN declarations before parsing program lines, then parses the source
+normally. This also lets calls use their declared argument and return types.
+Conflicting declarations fail with `conflicting EXTERN declaration`.
+
+The external prototypes/imports are emitted in the first MIR declaration pass,
+before `main` and its calls. The tests cover numeric and string arguments and
+returns, two SUBs, multiple imports, and declarations both before and after
+calls. Interpreter and JIT runs resolve the test library with `LD_PRELOAD`; AOT
+links the same shared library. Undefined imports are not filled with a dummy
+address: interpreter/JIT report `import of undefined item EXT_NOT_PRESENT`,
+while GCC refuses to link the AOT executable with an undefined strong ELF
+symbol.
+
+The adapter has to accommodate MIR's eager-link API for relocatable output:
+`MIR_link` accepts a missing import only if temporarily marked weak. The
+adapter records each declaration's original binding, links without a resolver,
+emits the object, and restores originally strong imports to `STB_GLOBAL` in
+the ELF symbol table. They remain `SHN_UNDEF` relocations, so the system linker
+still enforces symbol presence. The `extern-missing` case verifies that failure
+path. No made-up resolver address is used.
+
+### GOSUB/RETURN diagnosis and repair
+
+The smallest BASIC reproducer is
+`tests/features/gosub-minimal.bas` (one `GOSUB`, `END`, one `RETURN`). Before
+the frontend change, its return address used
+`MIR_new_lref_data(ctx, NULL, label, NULL, 0)`. `MIR_new_ref_op` put that item
+in a `MIR_MOV`; during `basicc -S`, `MIR_output_insn` printed the REF name via
+`MIR_item_name`, which was NULL. GDB shows `fputs -> MIR_output_insn ->
+MIR_output_item -> MIR_output_module -> gen_program`; the standalone reducer
+`tests/mir-null-lref-crash.c` reproduces the same null-name crash with both the
+pinned upstream MIR and MADC-integrated MIR. Giving the lref data a generated
+name makes `MIR_output` finish. This identifies the original crash as BASIC
+frontend misuse of the MIR API, not a code generator or ELF relocation fault.
+The captured stacks are [upstream GDB](diagnostics/gosub-lref-upstream.gdb.txt)
+and [MADC GDB](diagnostics/gosub-lref-madc.gdb.txt); the reader-order checks
+are recorded in [gosub-lref-reader-order.txt](diagnostics/gosub-lref-reader-order.txt).
+
+There is a second serialization boundary: both MIR versions append lref
+declarations after their referencing function. Feeding this text unchanged to
+either version's reader fails with `undeclared name return_addr_0` (line 7).
+Moving the named lref declarations before the first function makes both readers
+accept it. The `.mir -> .o` adapter now performs that order-only adjustment
+before calling `MIR_scan_string`; labels and the generated return-address
+semantics are unchanged. The adapter then emits the ELF object as before.
+This compatibility issue is distinct from the NULL-name crash and is not
+attributed to the MADC machine-code backend.
+
+No integer continuation dispatcher was introduced. The existing address stack
+already handles nested calls and multiple returns; replacing it would add a
+dispatcher and a second set of control-flow cases without avoiding the needed
+MIR reader ordering adjustment.
+
+### Cycle 3 validation
+
+The following commands pass on Skip (Linux x86-64 native):
+
+```sh
+experiments/basic-aot/scripts/validate.sh
+experiments/basic-aot/scripts/validate-data.sh
+experiments/basic-aot/scripts/validate-features.sh
+```
+
+The extended differential fixtures compare stdout in the interpreter, JIT,
+and native ELF paths for the historical GOSUB program, nested GOSUB/RETURN,
+GOSUB in a loop with DATA/READ/RESTORE, and EXTERN before/after use. Prototype
+mismatches and missing symbols are asserted to fail explicitly. The full
+feature matrix is in `results/data-validation/feature-matrix.tsv`.
+
+Targeted ASan/UBSan builds of the BASIC runtime passed
+`tests/data-runtime-test.c` and a nested-GOSUB native executable (with leak
+detection enabled). These are focused checks, not a claim that the entire
+frontend or all BASIC programs are sanitizer-clean. Valgrind was not rerun;
+the previously observed dynamic-loader failure remains outside program
+execution. The runtime objects and harness used matching
+`-fsanitize=address,undefined -fno-omit-frame-pointer` instrumentation;
+runtime objects also used `-ffunction-sections -fdata-sections`, and the test
+links used `-Wl,--gc-sections`. The targeted invocations were:
+
+```sh
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
+  results/cycle3-sanitizers/data-runtime-test
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
+  results/cycle3-sanitizers/gosub-native
+```
+
+The `tests/mir-null-lref-crash.c` reducers are built once against the pinned
+MIR `mir.c.o`/`mir-gen.c.o` and once against
+`madc/obj/mir/host/libmir.a`, with `-lm -ldl -lpthread`. Run each with no
+arguments under GDB to see the NULL-name stack, or with `named` to see
+successful output. Feeding named output to its `read` mode reproduces the
+forward-reference parse error; moving the lref declaration before the function
+produces `read-ok`.
+
+### Direct integration recommendation
+
+Keep `.mir -> .o` as the supported experimental seam for now. Direct use of
+`MIR_gen_init`, `MIR_gen_set_object_mode`, `MIR_link`, `MIR_gen`, and
+`MIR_gen_object_emit` inside `basicc` would remove MIR text parsing and the
+small adapter, but would couple the historical BASIC source/build to the
+specific MADC-integrated MIR headers, ABI, and static library. The text path
+currently provides a useful inspectable/debuggable boundary and keeps the
+upstream source provenance isolated. A later direct backend can be added as an
+optional build target after a deliberate MIR versioning policy exists; it does
+not require merging MIR and MADC histories.
+
+### Cycle 3 status
+
+- EXTERN before and after use: PASS in interpreter, JIT, and AOT fixtures.
+- GOSUB/RETURN, including nested and loop/DATA cases: PASS in all three paths.
+- Incompatible EXTERN signature: explicit frontend error in all three modes.
+- Missing EXTERN symbol: explicit runtime/JIT import error or native link error.
+- ASan/UBSan: targeted DATA runtime and nested-GOSUB checks PASS.
+- General AOT benchmarks were not rerun.
 | arith | 1.96 ms | 1.85 ms | 1,756.64 ms | 1,760.46 ms | 8,112 |
 | loop | 1.85 ms | 1.57 ms | 1,832.31 ms | 1,835.73 ms | 4,384 |
 

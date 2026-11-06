@@ -1,0 +1,3 @@
+10 PRINT "outer": GOSUB 100: PRINT "done": END
+100 PRINT "inner": GOSUB 200: PRINT "return": RETURN
+200 PRINT "leaf": RETURN

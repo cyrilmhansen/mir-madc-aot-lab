@@ -68,38 +68,68 @@ PY
 cmp "$OUT/fileio.aot.out" "$expected"
 printf 'numeric file I/O\tPASS\tPASS\tPASS\n' >> "$matrix"
 
-# GOSUB is valid in the historical interpreter and JIT. The pinned frontend's
-# -S MIR emission is known to segfault for this input even before the adapter.
-source="$HERE/upstream/basic/tests/programs/gosub.bas"
-expected="$HERE/upstream/basic/tests/expected/gosub.out"
-run_compare gosub "$source" "$expected" interp
-run_compare gosub "$source" "$expected" jit
-printf 'GOSUB / RETURN\tPASS\tPASS\tBLOCKED\tpinned basicc -S segfaults in MIR_output\n' >> "$matrix"
+# GOSUB/RETURN must survive MIR text serialization and native ELF loading.
+for name in gosub gosub-nested gosub-loop-data; do
+  if [[ "$name" == gosub ]]; then
+    source="$HERE/upstream/basic/tests/programs/gosub.bas"
+    expected="$HERE/upstream/basic/tests/expected/gosub.out"
+  else
+    source="$HERE/tests/features/$name.bas"
+    expected="$HERE/tests/expected/$name.out"
+  fi
+  for mode in interp jit; do run_compare "$name" "$source" "$expected" "$mode"; done
+  "$HERE/scripts/build-aot.sh" "$source" > "$OUT/$name.aot.out" 2> "$OUT/$name.aot.err"
+  cmp "$OUT/$name.aot.out" "$expected"
+  printf 'GOSUB %s\tPASS\tPASS\tPASS\n' "$name" >> "$matrix"
+done
 
-extlib="$OUT/libextlib.so"
+# EXTERN prototypes must be available before code generation even if the BASIC
+# declaration appears after the call. Exercise numeric/string returns and SUBs.
+cycle3lib="$OUT/libextcycle3.so"
 cc -shared -fPIC -I "$HERE/upstream/basic/include" \
-  "$HERE/upstream/basic/test/extlib.c" -o "$extlib"
-source="$HERE/upstream/basic/tests/programs/extern.bas"
-expected="$HERE/upstream/basic/tests/expected/extern.out"
+  "$HERE/tests/extlib-cycle3.c" -o "$cycle3lib"
+for name in extern-types extern-after-use; do
+  source="$HERE/tests/features/$name.bas"
+  expected="$HERE/tests/expected/$name.out"
+  for mode in interp jit; do
+    if [[ "$mode" == interp ]]; then
+      LD_PRELOAD="$cycle3lib" "$BASIC" "$source" > "$OUT/$name.$mode.out" 2> "$OUT/$name.$mode.err"
+    else
+      LD_PRELOAD="$cycle3lib" "$BASIC" -j "$source" > "$OUT/$name.$mode.out" 2> "$OUT/$name.$mode.err"
+    fi
+    cmp "$OUT/$name.$mode.out" "$expected"
+  done
+  AOT_EXTRA_LIBS="-L$OUT -Wl,-rpath,$OUT -lextcycle3" \
+    "$HERE/scripts/build-aot.sh" "$source" > "$OUT/$name.aot.out" 2> "$OUT/$name.aot.err"
+  cmp "$OUT/$name.aot.out" "$expected"
+done
+printf 'EXTERN before/after use, numeric/string/function/SUB\tPASS\tPASS\tPASS\n' >> "$matrix"
+
+# Conflicting declarations are rejected by every frontend mode. Undefined
+# native imports must remain strong ELF references and fail at the system link.
 for mode in interp jit; do
   if [[ "$mode" == interp ]]; then
-    LD_PRELOAD="$extlib" "$BASIC" "$source" > "$OUT/extern.$mode.out" 2> "$OUT/extern.$mode.err"
+    "$BASIC" "$HERE/tests/features/extern-incompatible.bas" > /dev/null 2> "$OUT/extern-incompatible.$mode.err" && exit 1
   else
-    LD_PRELOAD="$extlib" "$BASIC" -j "$source" > "$OUT/extern.$mode.out" 2> "$OUT/extern.$mode.err"
+    "$BASIC" -j "$HERE/tests/features/extern-incompatible.bas" > /dev/null 2> "$OUT/extern-incompatible.$mode.err" && exit 1
   fi
-  cmp "$OUT/extern.$mode.out" "$expected"
+  grep -q 'conflicting EXTERN declaration' "$OUT/extern-incompatible.$mode.err"
 done
-if AOT_EXTRA_LIBS="-L$OUT -Wl,-rpath,$OUT -lextlib" \
-  "$HERE/scripts/build-aot.sh" "$source" > "$OUT/extern.aot.out" 2> "$OUT/extern.aot.err"; then
-  aot_status=PASS
-else
-  aot_status=FAIL
-fi
-if [[ "$aot_status" != FAIL ]] || ! grep -q 'undeclared name EXT_ADD_p' "$OUT/extern.aot.err"; then
-  echo 'external import AOT failure changed; inspect before updating the feature matrix' >&2
-  exit 1
-fi
-printf 'external imports\tPASS\tPASS\t%s\tMIR text declares imported prototypes after first use\n' "$aot_status" >> "$matrix"
+for mode in interp jit; do
+  if [[ "$mode" == interp ]]; then
+    "$BASIC" "$HERE/tests/features/extern-missing.bas" > /dev/null 2> "$OUT/extern-missing.$mode.err" && exit 1
+  else
+    "$BASIC" -j "$HERE/tests/features/extern-missing.bas" > /dev/null 2> "$OUT/extern-missing.$mode.err" && exit 1
+  fi
+  grep -q 'import of undefined item EXT_NOT_PRESENT' "$OUT/extern-missing.$mode.err"
+done
+if "$BASIC" -S -o "$OUT/extern-incompatible" "$HERE/tests/features/extern-incompatible.bas" \
+  > /dev/null 2> "$OUT/extern-incompatible.aot.err"; then exit 1; fi
+grep -q 'conflicting EXTERN declaration' "$OUT/extern-incompatible.aot.err"
+if "$HERE/scripts/build-aot.sh" "$HERE/tests/features/extern-missing.bas" \
+  > /dev/null 2> "$OUT/extern-missing.aot.err"; then exit 1; fi
+grep -q "undefined reference to .EXT_NOT_PRESENT'" "$OUT/extern-missing.aot.err"
+printf 'EXTERN mismatch/missing symbol\tEXPECTED ERROR\tEXPECTED ERROR\tEXPECTED LINK ERROR\n' >> "$matrix"
 
 # The full dynamic MIR API works in the old execution modes but introduces
 # MIR runtime references that a strictly native ELF link intentionally omits.

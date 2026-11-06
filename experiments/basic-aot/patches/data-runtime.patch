@@ -118,7 +118,42 @@
  }
  
  /* Statement representation */
-@@ -2477,6 +2526,7 @@
+@@ -1123,6 +1172,13 @@
+   return NULL;
+ }
+ 
++static int same_func_signature_p (const FuncDef *a, const FuncDef *b) {
++  if (a->is_str_ret != b->is_str_ret || a->is_proc != b->is_proc || a->n != b->n) return 0;
++  for (size_t i = 0; i < a->n; i++)
++    if (a->is_str[i] != b->is_str[i]) return 0;
++  return 1;
++}
++
+ typedef enum {
+   LINE_NONE,
+   LINE_ELSE,
+@@ -2407,9 +2463,18 @@
+     basic_pool_free (is_str);
+     FuncDef fd = {fname, params_final, is_str_final, n, NULL, (StmtVec) {0}, f_is_str, is_proc, 1,
+                   NULL,  NULL,         NULL,         0, 0};
+-    func_vec_push (&func_defs, fd);
++    FuncDef *prior = find_func (fname);
++    if (prior != NULL) {
++      if (!prior->is_extern || !same_func_signature_p (prior, &fd)) {
++        safe_fprintf (stderr, "conflicting EXTERN declaration for %s\n", fname);
++        return 0;
++      }
++      out->u.ext.idx = (size_t) (prior - func_defs.data);
++    } else {
++      func_vec_push (&func_defs, fd);
++      out->u.ext.idx = func_defs.len - 1;
++    }
+     out->kind = ST_EXTERN;
+-    out->u.ext.idx = func_defs.len - 1;
+     out->u.ext.is_proc = is_proc;
+     out->u.ext.is_str_ret = f_is_str;
+     out->u.ext.n_params = n;
+@@ -2477,6 +2542,7 @@
        d.is_str = 0;
        d.num = BASIC_ZERO;
        d.str = NULL;
@@ -126,7 +161,7 @@
        Token t = peek_token (p);
        if (t.type == TOK_STRING) {
          d.is_str = 1;
-@@ -2487,7 +2537,11 @@
+@@ -2487,7 +2553,11 @@
        } else {
          d.num = parse_number (p);
        }
@@ -139,7 +174,240 @@
        if (peek_token (p).type != TOK_COMMA) break;
        next_token (p);
      }
-@@ -6081,6 +6135,10 @@
+@@ -3383,9 +3453,27 @@
+     perror (path);
+     return 0;
+   }
+-  int auto_line = 10;
+   char line[256];
+   int ok = 1;
++  /* EXTERN declarations describe names used while parsing expressions. Read
++     them first so a call before its declaration is parsed as a function call,
++     not as an implicit BASIC array reference. The normal pass below still
++     preserves source-order statements and diagnoses incompatible redecls. */
++  while (fgets (line, sizeof (line), f)) {
++    line[strcspn (line, "\r\n")] = '\0';
++    Parser scan = {0};
++    scan.cur = line;
++    if (peek_token (&scan).type == TOK_NUMBER) next_token (&scan);
++    if (peek_token (&scan).type == TOK_EXTERN) {
++      Line decl;
++      if (!parse_line (&scan, line, &decl)) ok = 0;
++    }
++    cleanup_parser (&scan);
++    if (!ok) break;
++  }
++  rewind (f);
++  if (!ok) { fclose (f); return 0; }
++  int auto_line = 10;
+   while (fgets (line, sizeof (line), f)) {
+     line[strcspn (line, "\r\n")] = '\0';
+     Parser p_obj = {0};
+@@ -3570,6 +3658,60 @@
+                                                      (MIR_str_t) {strlen (n->str) + 1, n->str})));
+       return r;
+     } else if (n->kind == N_VAR) {
++      FuncDef *fd = find_func (n->var);
++      if (fd != NULL && !fd->is_proc) {
++        Node *call_args[5] = {n->left, n->right, n->index, n->index2, n->arg4};
++        MIR_reg_t result;
++        MIR_op_t args[5];
++        size_t nargs = 0;
++        for (size_t i = 0; i < 5 && call_args[i] != NULL; i++)
++          args[nargs++] = MIR_new_reg_op (ctx, gen_expr (ctx, func, vars, call_args[i]));
++        char buf[32];
++        safe_snprintf (buf, sizeof (buf), "$t%d", tmp_id++);
++        result = MIR_new_func_reg (ctx, func->u.func, MIR_T_I64, buf);
++        switch (nargs) {
++        case 0:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 3, MIR_new_ref_op (ctx, fd->proto),
++                                              MIR_new_ref_op (ctx, fd->item),
++                                              MIR_new_reg_op (ctx, result)));
++          break;
++        case 1:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 4, MIR_new_ref_op (ctx, fd->proto),
++                                              MIR_new_ref_op (ctx, fd->item),
++                                              MIR_new_reg_op (ctx, result), args[0]));
++          break;
++        case 2:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 5, MIR_new_ref_op (ctx, fd->proto),
++                                              MIR_new_ref_op (ctx, fd->item),
++                                              MIR_new_reg_op (ctx, result), args[0], args[1]));
++          break;
++        case 3:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 6, MIR_new_ref_op (ctx, fd->proto),
++                                              MIR_new_ref_op (ctx, fd->item),
++                                              MIR_new_reg_op (ctx, result), args[0], args[1],
++                                              args[2]));
++          break;
++        case 4:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 7, MIR_new_ref_op (ctx, fd->proto),
++                                              MIR_new_ref_op (ctx, fd->item),
++                                              MIR_new_reg_op (ctx, result), args[0], args[1],
++                                              args[2], args[3]));
++          break;
++        case 5:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 8, MIR_new_ref_op (ctx, fd->proto),
++                                              MIR_new_ref_op (ctx, fd->item),
++                                              MIR_new_reg_op (ctx, result), args[0], args[1],
++                                              args[2], args[3], args[4]));
++          break;
++        }
++        return result;
++      }
+       if (n->index != NULL) {
+         MIR_reg_t base = get_array (vars, ctx, func, n->var, 0, 0, 1);
+         ensure_array_dim (vars, ctx, func, n->var, base, 1, n->index2 != NULL);
+@@ -3643,9 +3785,60 @@
+       }
+     } else if (n->kind == N_CALL) {
+       char buf[32];
++      FuncDef *user_func = find_func (n->var);
++      MIR_type_t res_type = user_func != NULL
++        ? (user_func->is_str_ret ? MIR_T_I64 : BASIC_MIR_NUM_T)
++        : (n->is_str ? MIR_T_I64 : BASIC_MIR_NUM_T);
+       safe_snprintf (buf, sizeof (buf), "$t%d", tmp_id++);
+-      MIR_reg_t res = MIR_new_func_reg (ctx, func->u.func, MIR_T_I64, buf);
+-      if (strcasecmp (n->var, "CHR$") == 0) {
++      MIR_reg_t res = MIR_new_func_reg (ctx, func->u.func, res_type, buf);
++      if (user_func != NULL) {
++        Node *call_args[5] = {n->left, n->right, n->index, n->index2, n->arg4};
++        MIR_op_t args[5];
++        size_t nargs = 0;
++        for (size_t i = 0; i < 5 && call_args[i] != NULL; i++)
++          args[nargs++] = MIR_new_reg_op (ctx, gen_expr (ctx, func, vars, call_args[i]));
++        switch (nargs) {
++        case 0:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 3, MIR_new_ref_op (ctx, user_func->proto),
++                                              MIR_new_ref_op (ctx, user_func->item),
++                                              MIR_new_reg_op (ctx, res)));
++          break;
++        case 1:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 4, MIR_new_ref_op (ctx, user_func->proto),
++                                              MIR_new_ref_op (ctx, user_func->item),
++                                              MIR_new_reg_op (ctx, res), args[0]));
++          break;
++        case 2:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 5, MIR_new_ref_op (ctx, user_func->proto),
++                                              MIR_new_ref_op (ctx, user_func->item),
++                                              MIR_new_reg_op (ctx, res), args[0], args[1]));
++          break;
++        case 3:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 6, MIR_new_ref_op (ctx, user_func->proto),
++                                              MIR_new_ref_op (ctx, user_func->item),
++                                              MIR_new_reg_op (ctx, res), args[0], args[1],
++                                              args[2]));
++          break;
++        case 4:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 7, MIR_new_ref_op (ctx, user_func->proto),
++                                              MIR_new_ref_op (ctx, user_func->item),
++                                              MIR_new_reg_op (ctx, res), args[0], args[1],
++                                              args[2], args[3]));
++          break;
++        case 5:
++          MIR_append_insn (ctx, func,
++                           MIR_new_call_insn (ctx, 8, MIR_new_ref_op (ctx, user_func->proto),
++                                              MIR_new_ref_op (ctx, user_func->item),
++                                              MIR_new_reg_op (ctx, res), args[0], args[1],
++                                              args[2], args[3], args[4]));
++          break;
++        }
++      } else if (strcasecmp (n->var, "CHR$") == 0) {
+         MIR_reg_t arg = gen_expr (ctx, func, vars, n->left);
+         MIR_append_insn (ctx, func,
+                          MIR_new_call_insn (ctx, 4, MIR_new_ref_op (ctx, chr_proto),
+@@ -4774,35 +4967,33 @@
+   call2 (poke_proto, poke_import, MIR_new_reg_op (g_ctx, addr), MIR_new_reg_op (g_ctx, val));
+ }
+ 
++static void gen_external_prototype (FuncDef *fd) {
++  MIR_type_t rtype = fd->is_str_ret ? MIR_T_P : BASIC_MIR_NUM_T;
++  MIR_var_t *vars = NULL;
++  if (fd->n != 0) {
++    vars = arena_alloc (&ast_arena, sizeof (MIR_var_t) * fd->n);
++    for (size_t j = 0; j < fd->n; j++) {
++      vars[j].type = fd->is_str[j] ? MIR_T_P : BASIC_MIR_NUM_T;
++      vars[j].name = fd->params[j];
++    }
++  }
++  char proto_name[128];
++  safe_snprintf (proto_name, sizeof (proto_name), "%s_p", fd->name);
++  if (fd->is_proc)
++    fd->proto = MIR_new_proto_arr (g_ctx, proto_name, 0, NULL, fd->n, vars);
++  else
++    fd->proto = MIR_new_proto_arr (g_ctx, proto_name, 1, &rtype, fd->n, vars);
++  fd->item = MIR_new_import (g_ctx, fd->name);
++}
++
+ static void gen_stmt (Stmt *s) {
+   switch (s->kind) {
+   case ST_DEF:
+     /* no code generation needed */
+     break;
+-  case ST_EXTERN: {
+-    FuncDef *fd = &func_defs.data[s->u.ext.idx];
+-    if (fd->item == NULL) {
+-      MIR_type_t rtype = fd->is_str_ret ? MIR_T_P : BASIC_MIR_NUM_T;
+-      MIR_var_t *vars = NULL;
+-      if (fd->n != 0) {
+-        vars = arena_alloc (&ast_arena, sizeof (MIR_var_t) * fd->n);
+-        for (size_t j = 0; j < fd->n; j++) {
+-          vars[j].type = fd->is_str[j] ? MIR_T_P : BASIC_MIR_NUM_T;
+-          vars[j].name = fd->params[j];
+-        }
+-      }
+-      char proto_name[128];
+-      safe_snprintf (proto_name, sizeof (proto_name), "%s_p", fd->name);
+-      if (fd->is_proc) {
+-        fd->proto = MIR_new_proto_arr (g_ctx, proto_name, 0, NULL, fd->n, vars);
+-      } else {
+-        fd->proto = MIR_new_proto_arr (g_ctx, proto_name, 1, &rtype, fd->n, vars);
+-      }
+-      fd->item = MIR_new_import (g_ctx, fd->name);
+-      /* Do not free vars here; the MIR prototype references this array. */
+-    }
+-    break;
+-  }
++  case ST_EXTERN:
++    /* Prototypes and imports are registered before any code is emitted. */
++    break;
+   case ST_PRINT: gen_print (s); break;
+   case ST_PRINT_HASH: gen_print_hash (s); break;
+   case ST_INPUT: gen_input (s); break;
+@@ -5480,7 +5671,9 @@
+   }
+   case ST_GOSUB: {
+     MIR_label_t ret = MIR_new_label (g_ctx);
+-    MIR_item_t ret_ref = MIR_new_lref_data (g_ctx, NULL, ret, NULL, 0);
++    char data_name[64];
++    safe_snprintf (data_name, sizeof (data_name), "gosub_return_%d", tmp_id++);
++    MIR_item_t ret_ref = MIR_new_lref_data (g_ctx, data_name, ret, NULL, 0);
+     char buf[32];
+     safe_snprintf (buf, sizeof (buf), "$t%d", tmp_id++);
+     MIR_reg_t tmp = MIR_new_func_reg (g_ctx, g_func->u.func, MIR_T_I64, buf);
+@@ -5586,7 +5779,9 @@
+     MIR_append_insn (g_ctx, g_func,
+                      basic_mir_n2i (g_ctx, MIR_new_reg_op (g_ctx, ri), MIR_new_reg_op (g_ctx, r)));
+     MIR_label_t after = MIR_new_label (g_ctx);
+-    MIR_item_t after_ref = MIR_new_lref_data (g_ctx, NULL, after, NULL, 0);
++    char data_name[64];
++    safe_snprintf (data_name, sizeof (data_name), "ongosub_return_%d", tmp_id++);
++    MIR_item_t after_ref = MIR_new_lref_data (g_ctx, data_name, after, NULL, 0);
+     for (size_t k = 0; k < s->u.on_gosub.n_targets; k++) {
+       MIR_label_t next = MIR_new_label (g_ctx);
+       MIR_append_insn (g_ctx, g_func,
+@@ -6081,6 +6276,10 @@
      break;
    }
    case ST_END: {
@@ -150,7 +418,7 @@
      MIR_append_insn (g_ctx, g_func, MIR_new_ret_insn (g_ctx, 1, MIR_new_int_op (g_ctx, 0)));
      break;
    }
-@@ -6166,6 +6224,7 @@
+@@ -6166,6 +6365,7 @@
                           int reduce_libs, int profile_p, int track_lines, const char *out_name,
                           const char *src_name) {
    int eval_p = 0;
@@ -158,7 +426,7 @@
    interp_mode = !jit && !asm_p && !obj_p && !bin_p && !code_p;
    if (!interp_mode && contains_chain) {
      safe_fprintf (stderr, "CHAIN only supported in interpreter mode\n");
-@@ -6191,6 +6250,10 @@
+@@ -6191,6 +6391,10 @@
          break;
        }
      }
@@ -169,7 +437,7 @@
    }
    MIR_context_t ctx = MIR_init ();
    MIR_module_t module = MIR_new_module (ctx, "BASIC");
-@@ -6612,6 +6675,15 @@
+@@ -6612,6 +6816,15 @@
    read_import = MIR_new_import (ctx, "basic_read");
    read_str_proto = MIR_new_proto (ctx, "basic_read_str_p", 1, &p, 0);
    read_str_import = MIR_new_import (ctx, "basic_read_str");
@@ -185,7 +453,19 @@
    clear_array_proto = MIR_new_proto (ctx, "basic_clear_array_p", 0, NULL, 3, MIR_T_P, "base",
                                       BASIC_MIR_NUM_T, "len", BASIC_MIR_NUM_T, "is_str");
    clear_array_import = MIR_new_import (ctx, "basic_clear_array");
-@@ -6741,10 +6813,6 @@
+@@ -6621,7 +6834,10 @@
+   /* Pass 1: create prototypes and forward declarations. */
+   for (size_t i = 0; i < func_defs.len; i++) {
+     FuncDef *fd = &func_defs.data[i];
+-    if (fd->is_extern) continue;
++    if (fd->is_extern) {
++      gen_external_prototype (fd);
++      continue;
++    }
+     MIR_type_t rtype = fd->is_str_ret ? MIR_T_P : BASIC_MIR_NUM_T;
+     MIR_var_t *vars = NULL;
+     if (fd->n != 0) {
+@@ -6741,10 +6957,6 @@
    g_prog = prog;
    g_vars = (VarVec) {0};
  
@@ -196,7 +476,7 @@
    /* return stack for GOSUB/RETURN */
    MIR_reg_t ret_stack = MIR_new_func_reg (ctx, func->u.func, MIR_T_I64, "ret_stack");
    MIR_reg_t ret_sp = MIR_new_func_reg (ctx, func->u.func, MIR_T_I64, "ret_sp");
-@@ -6755,6 +6823,24 @@
+@@ -6755,6 +6967,24 @@
    MIR_append_insn (ctx, func,
                     MIR_new_insn (ctx, MIR_MOV, MIR_new_reg_op (ctx, ret_sp),
                                   MIR_new_int_op (ctx, 0)));
@@ -221,7 +501,7 @@
    g_var_init_anchor = DLIST_TAIL (MIR_insn_t, func->u.func->insns);
  
    g_ret_stack = ret_stack;
-@@ -6813,6 +6899,9 @@
+@@ -6813,6 +7043,9 @@
        /* Strings are arena-allocated; no need to free previous value. */
      }
    /* ensure function returns 0 if no END */
@@ -231,7 +511,7 @@
    MIR_append_insn (ctx, func, MIR_new_ret_insn (ctx, 1, MIR_new_int_op (ctx, 0)));
    MIR_finish_func (ctx);
    basic_pool_free (labels);
-@@ -6843,7 +6932,7 @@
+@@ -6843,7 +7076,7 @@
        basic_pool_free (name);
      }
      MIR_finish (ctx);
@@ -240,7 +520,7 @@
      return;
    }
    if (bin_p) {
-@@ -6887,7 +6976,7 @@
+@@ -6887,7 +7120,7 @@
      basic_pool_free (ctab_name);
      basic_pool_free (exe_name);
      MIR_finish (ctx);
@@ -249,7 +529,7 @@
      return;
    }
    if (code_p) {
-@@ -6912,7 +7001,7 @@
+@@ -6912,7 +7145,7 @@
      }
      MIR_gen_finish (ctx);
      MIR_finish (ctx);
@@ -258,7 +538,7 @@
      return;
    }
    MIR_load_module (ctx, module);
-@@ -6935,7 +7024,7 @@
+@@ -6935,7 +7168,7 @@
      m ();
    }
    MIR_finish (ctx);
@@ -267,7 +547,7 @@
  }
  
  static void basic_chain (const char *path) {
-@@ -7118,12 +7207,27 @@
+@@ -7118,12 +7351,27 @@
      long num = basic_num_to_int (num_tok.num);
      if (peek_token (p).type == TOK_EOF) {
        delete_line (prog, num);
