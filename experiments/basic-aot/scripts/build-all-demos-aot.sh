@@ -45,8 +45,8 @@ if [[ ${#programs[@]} -eq 0 ]]; then
 fi
 
 manifest="$OUTPUT_ROOT/manifest.tsv"
-printf 'source\tstatus\tstage\texecutable\n' > "$manifest"
-passed=0
+printf 'source\tbuild_status\texecution_status\tstage\texecutable\tdetail\n' > "$manifest"
+built=0
 failed=0
 for source in "${programs[@]}"; do
   relative="${source#"$SOURCE_ROOT"/}"
@@ -59,7 +59,7 @@ for source in "${programs[@]}"; do
   : > "$log"
   stage=frontend
   if ! "$BASIC_C" -S -o "$intermediate" "$source" >"$log" 2>&1; then
-    printf '%s\tFAIL\t%s\t\n' "$relative" "$stage" >> "$manifest"
+    printf '%s\tfrontend-fail\tnot-run\t%s\t\t%s\n' "$relative" "$stage" "basicc -S failed" >> "$manifest"
     failed=$((failed + 1))
     continue
   fi
@@ -77,7 +77,11 @@ if result.returncode < 0:
 raise SystemExit(result.returncode)
 PY
   then
-    printf '%s\tFAIL\t%s\t\n' "$relative" "$stage" >> "$manifest"
+    adapter_detail="MIR-to-object adapter failed"
+    if grep -q 'terminated by signal' "$log"; then
+      adapter_detail="$(sed -n 's/.*terminated by signal \([0-9][0-9]*\).*/signal-\1/p' "$log" | tail -1)"
+    fi
+    printf '%s\tadapter-fail\tnot-run\t%s\t\t%s\n' "$relative" "$stage" "$adapter_detail" >> "$manifest"
     failed=$((failed + 1))
     continue
   fi
@@ -85,17 +89,17 @@ PY
   if ! cc "$intermediate.o" -Wl,--gc-sections "$HERE/runtime/libbasicrt.a" \
       -lm "${extra_libs[@]}" -o "$temporary" >>"$log" 2>&1; then
     rm -f "$temporary"
-    printf '%s\tFAIL\t%s\t\n' "$relative" "$stage" >> "$manifest"
+    printf '%s\tlink-fail\tnot-run\t%s\t\t%s\n' "$relative" "$stage" "native linker failed" >> "$manifest"
     failed=$((failed + 1))
     continue
   fi
   mv -f "$temporary" "$executable"
-  printf '%s\tPASS\tcomplete\t%s\n' "$relative" "${executable#"$OUTPUT_ROOT"/}" >> "$manifest"
-  passed=$((passed + 1))
+  printf '%s\tbuilt\tnot-run\tcomplete\t%s\t\n' "$relative" "${executable#"$OUTPUT_ROOT"/}" >> "$manifest"
+  built=$((built + 1))
 done
 
-printf 'AOT standalone builds: %d passed, %d failed, %d total\n' \
-  "$passed" "$failed" "${#programs[@]}"
+printf 'AOT standalone builds: %d built, %d failed, %d total\n' \
+  "$built" "$failed" "${#programs[@]}"
 printf 'Executables: %s/bin/\nManifest: %s\n' "$OUTPUT_ROOT" "$manifest"
 if [[ $failed -ne 0 ]]; then
   echo 'See per-program logs; failures are recorded with their failing stage in the manifest.' >&2

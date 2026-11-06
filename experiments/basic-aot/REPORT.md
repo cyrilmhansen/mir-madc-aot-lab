@@ -870,3 +870,164 @@ type handling (`bcg/blackjack.bas`, `bcg/bug.bas`, `bcg/checkers.bas`,
 These are reported rather than hidden or treated as successful builds. The
 generated `array` executable was run and matched the historical interpreter
 output; its ELF dependency list has no MIR/JIT library.
+
+## Demo corpus validation and AWARI adapter crash triage
+
+### Corpus build matrix
+
+The recursive build command is:
+
+```sh
+experiments/basic-aot/scripts/build-all-demos-aot.sh
+```
+
+It compiles 163 historical samples and writes separate build and execution
+columns to `results/aot/standalone/manifest.tsv`:
+
+| Build status | Count | Meaning |
+|---|---:|---|
+| `built` | 149 | Native standalone ELF linked successfully |
+| `frontend-fail` | 13 | `basicc -S` rejected the source |
+| `adapter-fail` | 1 | MIR adapter terminated by SIGSEGV (AWARI) |
+| `link-fail` | 0 | No native-link failures |
+
+The execution validator records `pass`, `runtime-fail`, `output-mismatch`, or
+`not-run` independently. This keeps a successful build distinct from a
+program that was actually executed.
+
+The 13 frontend failures are all present in a separately built pristine
+historical compiler from the pinned BASIC sources. They are therefore existing
+frontend limitations, not regressions from the experimental AOT changes:
+
+| Source | Existing unsupported construct / diagnostic class |
+|---|---|
+| `bcg/blackjack.bas` | `SAME AS` expression syntax |
+| `bcg/bug.bas` | `DELAY` token used as a variable |
+| `bcg/checkers.bas` | multi-variable `NEXT Y,X` |
+| `bcg/civilwar.bas` | comma-leading `PRINT` field syntax |
+| `bcg/combat.bas` | comma-leading `PRINT` field syntax |
+| `bcg/horserace.bas` | comma-leading `PRINT` field syntax |
+| `bcg/mine.bas` | `!` inline comment syntax |
+| `bcg/stockmarket.bas` | `dsub` receives an integer operand |
+| `bcg/suite.bas` | `endif` syntax |
+| `bcg/superstartrek.bas` | compact `FORI=1TO9` tokenization |
+| `bcg/test.bas` | `STOP:RUN` syntax |
+| `bcg/tictactoe2.bas` | multi-variable `NEXT K,J` |
+| `pi_spigot.bas` | backslash integer-division syntax |
+
+The pristine compiler also crashes while serializing AWARI (`MIR_output_insn`),
+so it cannot produce the complete MIR input needed to compare adapter behavior.
+The experimental frontend does emit a complete 56,090-byte MIR file; that exact
+file is checked in at
+[`tests/demo-corpus/awari-adapter-crash.mir`](tests/demo-corpus/awari-adapter-crash.mir).
+
+### AWARI failure location and evidence
+
+Reproduce with:
+
+```sh
+experiments/basic-aot/scripts/repro-awari-adapter-crash.sh
+```
+
+The adapter receives SIGSEGV (11). GDB on the ordinary adapter stops in
+`build_func_cfg` at `madc/third_party/mir/mir-gen.c:2476`, dereferencing
+`op->u.label->data` for a `MIR_DBGT` instruction whose label pointer is NULL.
+The instruction pointer at the fault is `cmpq $0,(%rsi)` with RSI zero. A MIR
+dump at `MIR_link` entry shows the branch reference, but not a definition for
+the normalized target label.
+
+The first divergence is already visible in the generated MIR text: it branches
+to `L132` twice, but the complete file contains no `L132:` definition. Those
+branches come from the `FOR I=7 TO 12` at BASIC line 230. That loop has no
+lexical `NEXT`; line 235 jumps back to line 220, which is the `NEXT I` belonging
+to the earlier `FOR I=0 TO 5`. The BASIC frontend emits FOR exit branches from a
+compile-time loop stack, but does not emit an exit label for this cross-jump
+loop shape. It therefore writes malformed MIR. The input reader accepts the
+undefined label reference without a diagnostic and creates a detached label
+instruction. `MIR_link` later walks that label's invalid list link in
+`simplify_func` (`mir.c:4565`, `skip_labels` at `mir.c:4410`). ASan/UBSan on a
+fully instrumented MIR library reports the first invalid read as a dereference
+of `0xbebebebe...` at `mir.c:4410`; the ordinary adapter's later crash is in
+`build_func_cfg` at `mir-gen.c:2476` while reading `op->u.label->data`. The
+MIR-link crash is a consequence of malformed frontend output; the adapter
+should report a diagnostic rather than crashing, but no backend change is
+justified by this case alone.
+
+The reduction is checked in as both
+[`tests/demo-corpus/unmatched-for-goto.bas`](tests/demo-corpus/unmatched-for-goto.bas)
+and [`tests/demo-corpus/undefined-label-minimal.mir`](tests/demo-corpus/undefined-label-minimal.mir).
+The four-line BASIC sample produces a dangling `L10` branch target. The 7-line
+MIR input containing one conditional branch to an undefined label reproduces
+the same crash independently of BASIC. The exact 56,090-byte AWARI MIR input
+is retained as well. `repro-awari-adapter-crash.sh` verifies all three paths.
+This classifies the origin as BASIC-to-MIR generation, with a separate missing
+invalid-label check in the MIR reader/link path; it is not an ELF emission,
+relocation, symbol resolution, or machine-code defect.
+
+Disabling MIR inlining and setting its optimization level to zero both still
+crash, so inlining is not relevant. Removing lref declarations from the full
+input still leaves the failure. No source fix was made: the BASIC construct
+jumps into a `NEXT` from a different lexical `FOR`, and changing how the
+experimental frontend handles this legacy control flow requires choosing
+between implementing its dynamic loop semantics and rejecting it explicitly.
+The present corpus manifest accurately retains AWARI as `adapter-fail`, with
+the malformed frontend MIR and crash detail documented here.
+
+The captured GDB/ASan traces and parser audit are available in the generated
+ignored results tree (`logs/awari-gdb-full.txt`,
+`logs/awari-gdbasan.txt`, `diagnostics/asan-full.log`, and
+`diagnostics/awari-mir-audit-preload.txt`) and are not needed to regenerate the
+reproducer. No compiler or MADC source was changed for this issue.
+
+### Differential execution coverage
+
+Run the reviewed deterministic subset with:
+
+```sh
+experiments/basic-aot/scripts/validate-demo-corpus.sh
+```
+
+The runner gives each interpreter, JIT and AOT execution a separate temporary
+working directory, disables stdin, enforces a 10-second timeout, and compares
+stdout, stderr, exit status and file effects. It only runs sources manually
+reviewed to avoid interactive input, destructive effects, external programs,
+or device access.
+
+| Demo | Interpreter | JIT | AOT | Compared |
+|---|---:|---:|---:|---|
+| `array.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `array_default.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `bool.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `colons.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `fib.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `fizzbuzz.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `ifcolons.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `ifmulti.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `math.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `not.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `pos.bas` | pass | pass | pass | stdout, stderr, exit, files |
+| `while.bas` | pass | pass | pass | stdout, stderr, exit, files |
+
+All 12 runs matched exactly. Of the 149 built programs, 137 remain explicitly
+`not-run`; the rest of the corpus is not assumed safe merely because it builds.
+Captured outputs, statuses and per-run file-effect hashes are retained in
+`results/aot/standalone/differential/`.
+
+### Regression suite status and next step
+
+All six existing BASIC AOT suites passed after the corpus changes:
+
+- `validate.sh`
+- `validate-data.sh`
+- `validate-features.sh`
+- `validate-shared.sh`
+- `validate-shared-strings.sh`
+- `validate-shared-direct.sh`
+
+No defect was corrected in this cycle, so there is no new “fixed” regression
+case. The AWARI fixture and `repro-awari-adapter-crash.sh` preserve the current
+blocker as an expected-crash reproduction. Next, reduce the label association
+failure while comparing the BASIC writer's MIR against both the pristine MIR
+reader and the maintained MADC reader. Only change a backend after the
+standalone MIR reproducer establishes a reader/backend defect independently
+of BASIC.
