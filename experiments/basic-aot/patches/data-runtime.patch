@@ -580,7 +580,19 @@
      }
 --- a/basic/src/basic_runtime.c
 +++ b/basic/src/basic_runtime.c
-@@ -605,6 +605,49 @@
+@@ -222,9 +222,11 @@
+ int basic_line_tracking_enabled = 1;
+ static char *system_output = NULL;
+ #define BASIC_POOL_SIZE (1024 * 1024)
++#ifndef BASIC_AOT_EXPLICIT_INIT
+ static void __attribute__ ((constructor)) init_basic_pool (void) {
+   basic_pool_init (BASIC_POOL_SIZE);
+ }
++#endif
+ #ifndef _WIN32
+ static struct termios saved_termios;
+ static int termios_saved = 0;
+@@ -605,6 +607,49 @@
  BasicData *basic_data_items = NULL;
  size_t basic_data_len = 0;
  size_t basic_data_pos = 0;
@@ -630,7 +642,7 @@
  
  basic_num_t basic_read (void) {
    if (basic_data_pos >= basic_data_len || basic_data_items[basic_data_pos].is_str)
-@@ -1368,6 +1411,7 @@
+@@ -1368,6 +1413,7 @@
  static size_t handle_len = 0;
  
  void basic_runtime_fini (void) {
@@ -638,7 +650,7 @@
    if (func_profiles != NULL) {
      for (size_t i = 0; i < func_profiles_len; i++) free ((char *) func_profiles[i].name);
    }
-@@ -1379,11 +1423,13 @@
+@@ -1379,11 +1425,13 @@
    func_stack = NULL;
    line_profiles_len = func_profiles_len = func_stack_len = 0;
    last_profile_line = -1;

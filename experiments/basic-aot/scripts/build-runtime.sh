@@ -5,8 +5,8 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 LAB="$(cd "$HERE/../.." && pwd)"
 REV=54fa3e409224bbc6ffdbc421a80f02ff76f76ce6
 MIRROOT="$LAB/vendor/mir-upstream-$REV"
-BUILD="$HERE/runtime/build"
-LIB="$HERE/runtime/libbasicrt.a"
+BUILD="${BASIC_RUNTIME_BUILD_DIR:-$HERE/runtime/build}"
+LIB="${BASIC_RUNTIME_LIB:-$HERE/runtime/libbasicrt.a}"
 CC="${CC:-cc}"
 AR="${AR:-ar}"
 
@@ -17,6 +17,10 @@ CFLAGS=(-std=gnu11 -O2 -fPIC -ffunction-sections -fdata-sections -DBASIC_USE_DOU
   -I "$LAB/madc/third_party/mir" -I "$BASICROOT/include" -I "$BASICROOT/src"
   -I "$BASICROOT/src/vendor" -I "$BASICROOT/src/vendor/kitty"
   -I "$BASICROOT/src/vendor/libdfp")
+if [[ -n "${BASIC_RUNTIME_CFLAGS:-}" ]]; then
+  read -r -a extra_cflags <<< "$BASIC_RUNTIME_CFLAGS"
+  CFLAGS+=("${extra_cflags[@]}")
+fi
 
 signature="$BUILD/signature.new"
 python3 - "$BASICROOT" "$LAB/madc/third_party/mir" "$CC" "${CFLAGS[*]}" "$signature" <<'PY'
@@ -62,6 +66,7 @@ for source in "${sources[@]}"; do
   "$CC" "${CFLAGS[@]}" -c "$BASICROOT/$source" -o "$object"
   objects+=("$object")
 done
+mkdir -p "$(dirname "$LIB")"
 "$AR" rcs "$LIB" "${objects[@]}"
 mv "$signature" "$BUILD/signature"
 echo "built $LIB"

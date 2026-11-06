@@ -242,6 +242,158 @@ not require merging MIR and MADC histories.
 - Missing EXTERN symbol: explicit runtime/JIT import error or native link error.
 - ASan/UBSan: targeted DATA runtime and nested-GOSUB checks PASS.
 - General AOT benchmarks were not rerun.
+
+## Cycle 4: shared ELF library and C ABI
+
+### Exported interface and object generation
+
+`basicc.c` stores BASIC functions in `FuncDef` records. `parse_func()` accepts
+`FUNCTION` and `SUB` definitions, derives parameter kinds from `$` suffixes,
+and the generator creates MIR functions under the BASIC name itself (for
+example, `SQUARE`, not `SQUARE_p`; `_p` is the MIR call prototype). Under
+`BASIC_NUM_MODE=double`, numerical arguments/results use `MIR_T_D`, string
+arguments/results use `MIR_T_P`, and SUBs have no result. `DEF FN` is an
+expression shorthand rather than an exported function definition.
+
+The adapter now accepts explicit repeated `--export NAME` arguments. It
+rejects names that are absent or not defined functions and checks the
+requested C ABI signature from the parsed MIR item. Only those functions are
+marked exported; helpers and `main` remain local. The old two-path adapter
+invocation still exports `main` for executable builds. Example:
+
+```sh
+experiments/basic-aot/scripts/build-shared.sh \
+  experiments/basic-aot/tests/shared/libbasicdemo.bas \
+  experiments/basic-aot/results/shared/libbasicdemo.so \
+  --export SQUARE --export ADD --export STRLEN --export REPORT
+```
+
+The exported API is:
+
+| ELF symbol | C declaration | BASIC behavior |
+|---|---|---|
+| `SQUARE` | `double SQUARE(double)` | Pure numeric square |
+| `ADD` | `double ADD(double, double)` | Pure numeric addition |
+| `STRLEN` | `double STRLEN(const char *)` | `LEN` of an input string; does not take ownership or modify it |
+| `REPORT` | `void REPORT(double)` | Prints a number through the BASIC runtime |
+| `basic_module_init` | `void basic_module_init(void)` | Starts the shared BASIC runtime pool |
+| `basic_module_fini` | `void basic_module_fini(void)` | Frees runtime DATA/state and the pool |
+
+String-returning BASIC functions are not part of the stable C API. The frontend
+returns a pointer, but the ownership/freeing contract for such a result across
+the shared-library boundary is not defined here; `basic_free` is an internal
+runtime symbol and the result could also depend on the module pool. A returned
+string must not be retained past `basic_module_fini()` or `dlclose()`.
+
+### GCC-linked `libbasicdemo.so`
+
+The runtime archive was already compiled with `-fPIC`; the shared build uses a
+separate cache/archive so the ordinary AOT executable archive and its options
+remain unchanged. `build-runtime.sh` hashes the compiler version, complete
+compile flags, runtime sources, and relevant headers. A cache check confirmed:
+same flags reused the archive, while changing a test define rebuilt it. The
+shared link uses `-shared -Wl,--no-undefined -Wl,-z,defs -Wl,-z,text
+-Wl,--gc-sections -Wl,--exclude-libs,ALL`; archive helpers stay private and
+unused MIR metaprogramming sections are discarded.
+
+`results/shared/libbasicdemo.so` is ELF64 `ET_DYN`, x86-64. Its public dynamic
+symbols are the four selected BASIC functions and the two explicit runtime
+lifecycle functions. It has no `TEXTREL`, no MIR/JIT symbols, no public
+runtime helpers, and `ldd -r` reports no unresolved symbols. Its dynamic
+dependencies are `libc.so.6` and `libm.so.6`. GCC's strict undefined-symbol
+checks are enabled; the linker is not asked to relax PIC or unresolved-symbol
+rules.
+
+### Initialization, lifetime, and sanitizer finding
+
+The first sanitizer experiment found one 1 MiB pool allocation per `dlopen`
+and a 4 MiB LeakSanitizer report after four load/unload cycles. The cause was
+the historical runtime's ELF constructor, which called `basic_pool_init()`
+automatically, while its matching cleanup was only reachable from BASIC's
+`basic_stop()` path. A host loading a library and calling exported functions
+never enters that `main` path.
+
+The shared-only runtime build defines `BASIC_AOT_EXPLICIT_INIT` to omit that
+constructor and links the small lifecycle wrapper above. It does not add an
+ELF constructor. The C client explicitly initializes and finalizes the
+runtime around its use. With this lifecycle, the ASan/UBSan-instrumented
+runtime archive, shared library, and client pass value checks and repeated
+`dlopen`/`dlclose` with `ASAN_OPTIONS=detect_leaks=1`. `basic_module_init()` is
+idempotent within one mapped module; `basic_module_fini()` releases the state.
+Thread safety and simultaneous calls from multiple threads have not been
+tested or promised.
+
+### Differential and C-client validation
+
+Run `experiments/basic-aot/scripts/validate-shared.sh`. It first compares
+interpreter and historical JIT output against
+`tests/shared/expected.out` (`6.25`, `9`, `3.25`, `0`, `5`, `42.5`), then:
+
+- Uses `dlopen`/`dlsym` with zero, positive, negative, and fractional numbers.
+- Checks multiple functions in one DSO, the string-input ABI, and a SUB called
+  through `void (*)(double)`.
+- Confirms `dlsym` reports a missing name, reloads the DSO three times, and
+  invokes the exports on every load.
+- Links a second client directly with `-lbasicdemo` and compares its results.
+- Checks export selection, rejects a missing function and a non-C `main`
+  signature, and verifies internal helpers are not exported.
+- Runs the existing `validate.sh` AOT executable regression suite.
+
+The native client calls both the BASIC function pointer and a `noinline` C
+implementation of the same square operation. This checks the native ABI and
+call overhead with the same arithmetic, but the result is a small host
+microbenchmark, not a general backend performance claim.
+
+### Direct MIR shared emitter
+
+The maintained MIR `MIR_gen_object_emit_executable()` path with `shared_p=1`
+also emits a loadable ELF `ET_DYN` containing callable `SQUARE` and `ADD`
+exports; the C probe returns the expected values, and the image has no
+`TEXTREL`. It is not yet equivalent to the GCC-linked library: loading the
+entire BASIC MIR module leaves weak undefined `basic_*` entries in its dynamic
+symbol table, and runtime-using exports such as `STRLEN` require `basic_len`
+from the separately compiled runtime. The direct-emitter validation therefore
+calls only pure arithmetic exports. No MADC change was made; this is a
+composition limitation of emitting the complete MIR module without embedding
+or linking the BASIC runtime. The GCC-linked library remains the complete
+validated path.
+
+### Skip measurements
+
+`scripts/measure-shared.py` ran 30 fresh processes for each build stage and 30
+fresh client processes, each making one million BASIC and C calls. The runtime
+archive was already built; initial runtime compilation is excluded. Full
+min/median/max data and artifact sizes are in
+[`results/shared/measurements.json`](results/shared/measurements.json).
+
+| Stage | Median | Min–max |
+|---|---:|---:|
+| BASIC → MIR | 1.24 ms | 1.14–2.30 ms |
+| MIR → ELF `.o` | 1.77 ms | 1.34–2.10 ms |
+| GCC `.so` link | 15.59 ms | 12.82–19.35 ms |
+| MIR direct shared emission | 1.57 ms | 1.28–2.23 ms |
+| `dlopen` | 31.8 µs | 25.5–67.6 µs |
+| `dlsym` per lookup (10,000 lookups/process) | 33.3 ns | 21.0–41.1 ns |
+| BASIC `SQUARE` call through function pointer | 3.61 ns | 2.35–3.76 ns |
+| Equivalent noinline C call | 2.69 ns | 2.34–3.63 ns |
+| `dlclose` after explicit runtime fini | 22.0 µs | 11.9–29.8 µs |
+
+The ELF `.o`, GCC-linked `.so`, and direct MIR `.so` measured 9,240, 19,224,
+and 11,008 bytes respectively in this run. These timing ranges are machine-
+and load-dependent; the square loop is intentionally tiny and mainly exposes
+the call path.
+
+### Cycle 4 validation and remaining scope
+
+- `validate-shared.sh`: PASS, including `dlopen`, direct linking, strict ELF
+  checks, direct MIR pure-function image, and the existing AOT regression.
+- `validate-data.sh` and `validate-features.sh`: PASS after the adapter CLI
+  extension.
+- ASan/UBSan: PASS for the shared runtime, C client, explicit lifecycle, and
+  four DSO load/unload cycles with leak detection.
+- The main shared artifact is `results/shared/libbasicdemo.so`; it is a local
+  build output and is regenerated by `validate-shared.sh`.
+- MADC remains unchanged. No general AOT benchmark campaign was run.
 | arith | 1.96 ms | 1.85 ms | 1,756.64 ms | 1,760.46 ms | 8,112 |
 | loop | 1.85 ms | 1.57 ms | 1,832.31 ms | 1,835.73 ms | 4,384 |
 
