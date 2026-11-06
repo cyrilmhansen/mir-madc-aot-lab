@@ -1,0 +1,254 @@
+BASIC Compiler Notes
+====================
+
+Assignments may begin with the optional `LET` keyword. `LET X=1` and `X=1` are equivalent forms. `INC X` and `DEC X` provide shorthand for incrementing or decrementing a numeric variable.
+
+The `basicc` compiler accepts the `--no-line-tracking` flag to skip inserting
+`basic_set_line` calls during code generation.  Disabling line tracking can
+speed up compiled programs but removes support for `RESUME` without an explicit
+line number and causes the `basic_get_line` helper to report an error if
+invoked.
+
+The compiler also understands `--option-base N` to set the default `OPTION BASE`
+for programs that omit it.  Specify `0` or `1` for `N`.
+
+Use `-h`, `--usage`, or `-?` to display all available command line options and exit.
+
+Mathematical built-ins include `ABS`, `SGN`, `SQR`, the trigonometric
+functions `SIN`, `COS`, `TAN`, and `ATN`, logarithms `LOG`, `LOG2`, `LOG10`, and
+`EXP`.  Hyperbolic counterparts `SINH`, `COSH`, `TANH` and their inverses
+`ASINH`, `ACOSH`, `ATANH` are also available.
+
+Automated Tests
+---------------
+Run `make basic-test` to build the compiler and execute sample programs along with
+selected cases from the NBS Minimal BASIC suite.  The latter can also be run
+directly via `basic/test/run-mbasic-tests.sh <path-to-basicc>`, which
+invokes each test in both interpreted and JIT-compiled modes and looks for
+`*** TEST PASSED ***` in their output.  Test `P173.BAS` is currently marked as an
+expected failure until TAB error handling is improved.
+
+CMake Numeric Modes
+-------------------
+The BASIC example can also be built with CMake.  Configure with
+`-DBASIC_NUM_MODE=<mode>` to select the numeric representation.  Supported
+values are `double`, `long-double`, `fixed64`, and `msfp`, which map to the
+`BASIC_USE_DOUBLE`, `BASIC_USE_LONG_DOUBLE`, `BASIC_USE_FIXED64`, and
+`BASIC_USE_MSFP` definitions respectively.  For example:
+
+```
+cmake -S . -B build -DBUILD_TESTING=ON -DBASIC_NUM_MODE=fixed64
+cmake --build build
+ctest --output-on-failure --test-dir build
+```
+
+
+The interpreter also recognizes a `CHAIN <expr>` statement that clears the
+current program and loads another BASIC source file.  Because it depends on the
+interpreter runtime, programs containing `CHAIN` are rejected by compilation
+flags such as `-S`, `-c`, `-r`, `-b`, and `-j`.
+
+String formatting within `basicc` uses a `safe_snprintf` wrapper that aborts
+on truncation. Use this helper for any new text generation to avoid silent
+buffer overflows.
+
+The REPL understands a `RUN PROFILING` command which executes the current
+program with profiling enabled. After the program finishes, it prints line
+statistics followed by function statistics, each sorted in ascending order. The
+format lists the line number or function name, the execution count, and the
+total time in seconds.
+
+The REPL also accepts an `EVAL <command>` directive that parses and executes
+the remainder of the line as if entered at the prompt. This allows nested
+commands such as `EVAL LIST` or `EVAL 10 PRINT "HI"`.
+
+Interactive input supports configurable abbreviations.  Definitions are read
+from an `abbrev.cfg` file (or the path given by `BASIC_ABBREV_CONFIG`) and are
+expanded before parsing.  By default `?` and `P` abbreviate `PRINT` while `'`
+acts as `REM`.  Abbreviations apply only in the REPL; program files must use the
+full keywords.
+
+`EVAL` can also be used as a BASIC statement. A line like `20 EVAL LIST`
+evaluates the `LIST` command when the program runs, producing a listing of the
+current program.
+
+Example session:
+
+```
+10 DEF FNA(X)=X+1
+20 PRINT FNA(1)
+30 PRINT FNA(2)
+40 END
+RUN PROFILING
+QUIT
+```
+
+Sample output:
+
+```
+2
+3
+line 20: count 1 time 0.000000001
+line 30: count 1 time 0.000000001
+func FNA: count 2 time 0.000000002
+```
+
+MIR Metaprogramming
+-------------------
+The BASIC runtime exposes a small API for constructing and executing MIR code at runtime. Objects such as contexts, modules, functions, registers, and labels are referenced through numeric *handles* returned by helper functions. Instructions are appended by name and operate on these handles, enabling BASIC programs to generate machine code on the fly.
+
+Example:
+
+```
+10 ctx = MIRCTX()
+20 mod = MIRMOD(ctx, "demo")
+30 f = MIRFUNC(mod, "add", 2)
+40 a = MIRREG(f)
+50 b = MIRREG(f)
+60 MIREMIT(f, "DADD", a, a, b)
+70 MIRRET(f, a)
+80 MIRFINISH(mod)
+90 PRINT MIRRUN(f, 2, 3)
+```
+
+This program builds a function that adds its two arguments and prints `5`.
+
+External Routines
+-----------------
+Native code can be invoked from BASIC by declaring an external routine.
+Write the routine in assembly (or another language), compile it to a shared
+object following the platform's C ABI, and preload it when running the BASIC
+program.
+
+Example `ext_add.s`:
+
+```
+    .globl ext_add
+ext_add:
+    add %rsi, %rdi    # example integer addition
+    mov %rdi, %rax
+    ret
+```
+
+Compile and run:
+
+```
+cc -c ext_add.s -o ext_add.o
+cc -shared -o libext_add.so ext_add.o
+        LD_PRELOAD=./libext_add.so ./basic/basicc basic/samples/extern.bas
+```
+
+The BASIC program declares and calls the routine:
+
+```
+10 EXTERNAL FUNCTION EXT_ADD(A,B)
+20 PRINT EXT_ADD(2,3)
+```
+
+This prints `5`.
+
+DATE$ Example
+-------------
+The `DATE$` function returns the current date in `YYYY-MM-DD` format. The
+components can be extracted with `MID$` and converted with `VAL`:
+
+```
+10 d$ = DATE$
+20 y = VAL(MID$(d$, 1, 4))
+30 m = VAL(MID$(d$, 6, 2))
+40 d = VAL(MID$(d$, 9, 2))
+50 PRINT y; "/"; m; "/"; d
+```
+
+This program prints the year, month, and day as numbers.
+
+PI Function
+-----------
+The `PI` function returns the mathematical constant π.
+
+```
+10 PRINT PI
+```
+
+This example prints `3.14159265358979`.
+
+Pi Spigot Example
+-----------------
+The `pi_spigot.bas` program demonstrates generating digits of `PI` using only
+integer arithmetic.  It builds the result as a string one digit at a time via a
+spigot algorithm.
+
+Run the sample with the BASIC compiler and provide the desired number of digits
+at the prompt.  For example, supplying `20` produces 20 digits after the decimal
+point:
+
+```
+DIGITS?
+3.14159265358979323846
+```
+
+Sine Wave Example
+-----------------
+The `sinewave.bas` program animates an orange sine wave across the terminal
+using escape sequences for cursor positioning and color. It showcases
+trigonometric functions, ANSI coloring, and simple timing control.
+
+Additional Trigonometric Functions
+----------------------------------
+Inverse functions `ASIN` and `ACOS` complement `SIN` and `COS`, returning angles
+in radians.
+
+Floating-Point Precision
+------------------------
+Programs such as `pi.bas` use the host's `long double` type for calculations.
+On x86-64, `long double` typically offers only about 19–20 decimal digits of
+precision, so requesting more digits will not produce additional accurate
+output. Users needing greater precision should compile the BASIC runtime with
+`BASIC_USE_FLOAT128` or link against an arbitrary-precision library.
+
+Fixed-Point Variant
+-------------------
+For targets lacking floating-point support, the runtime can be built with
+`-DBASIC_USE_FIXED64` to use a 64.64 fixed-point representation. Arithmetic,
+I/O, and math built-ins rely on helper functions such as `basic_num_add`,
+`basic_num_lt`, and `basic_num_scan` which wrap the underlying `fixed64`
+routines. These helpers implement the usual BASIC numeric operations,
+including trigonometric functions, logarithms, exponentials, and square
+roots. If a math function is invoked that does not yet have a fixed-point
+implementation, the runtime reports a dedicated error.
+
+The `basicc-fix` executable is built with the same compiler source but
+compiled with `-DBASIC_USE_FIXED64`. Build it by configuring CMake with
+`-DBASIC_NUM_MODE=fixed64`:
+
+```
+cmake -DBASIC_NUM_MODE=fixed64
+make
+```
+
+Or use the GNU Make target:
+
+```
+make basic/basicc-fix
+```
+
+Invoke the resulting binary just like the floating-point `basicc` variants.
+
+Numbers are stored as signed 64.64 fixed-point values. The integer portion
+spans approximately ±9.22e18 and the fractional component has a resolution
+of 1/2^64 (about 5.4e-20). Values exceeding this range wrap around and
+sub-unit magnitudes round to zero.
+
+Because all arithmetic is emulated in software, execution is slower than the
+double and long-double builds, and accuracy may degrade for large or highly
+precise calculations.
+
+Sample programs in `basic/samples/fixed_demo.bas` and
+`basic/samples/fixed_edge.bas` demonstrate fixed-point math and
+overflow/underflow behavior. Run them with:
+
+```
+./basic/basicc-fix basic/samples/fixed_demo.bas
+./basic/basicc-fix basic/samples/fixed_edge.bas
+```
+
