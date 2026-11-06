@@ -841,3 +841,32 @@ whole compile pipeline or deployment is faster/smaller.
 - MADC submodule unchanged at `868847a76434058483bade03ead09ba6acb9d771`;
   no pushes performed. The direct implementation and tests are local lab
   changes; pre-existing root MPDecimal log changes remain untouched.
+
+## Building the BASIC demo corpus as standalone AOT executables
+
+Run `experiments/basic-aot/scripts/build-all-demos-aot.sh` to recursively
+compile every `.bas` file under the historical `basic/samples/` tree. An
+optional first argument selects another source directory (for example
+`basic/tests/programs/`); an optional second argument selects the output root.
+The script builds the frontend, MIR adapter and cached static BASIC runtime
+once, then processes each source into an executable. `AOT_EXTRA_LIBS` accepts
+additional linker flags for demos with external dependencies. The BASIC
+runtime is linked statically; the resulting native executables still use the
+host libc/libm, but do not need MIR/JIT at runtime.
+
+Executables preserve their source-relative paths under
+`results/aot/standalone/bin/`. Intermediary MIR and object files are under
+`obj/`, per-program logs under `logs/`, and `manifest.tsv` records pass/fail
+and the failing stage. The batch continues after individual failures and
+returns nonzero if any program fails, avoiding a misleading all-success exit.
+
+On this machine the 163 files under `basic/samples/` yielded 149 standalone
+executables. Thirteen sources fail in the historical frontend on syntax or
+type handling (`bcg/blackjack.bas`, `bcg/bug.bas`, `bcg/checkers.bas`,
+`bcg/civilwar.bas`, `bcg/combat.bas`, `bcg/horserace.bas`, `bcg/mine.bas`,
+`bcg/stockmarket.bas`, `bcg/suite.bas`, `bcg/superstartrek.bas`,
+`bcg/test.bas`, `bcg/tictactoe2.bas`, and `pi_spigot.bas`). The remaining
+`bcg/awari.bas` parses but the MIR-to-object adapter terminates with signal 11.
+These are reported rather than hidden or treated as successful builds. The
+generated `array` executable was run and matched the historical interpreter
+output; its ELF dependency list has no MIR/JIT library.
