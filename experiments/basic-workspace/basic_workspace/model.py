@@ -513,6 +513,8 @@ class Workspace:
                 if t.uid in doc.line_refs:
                     continue
                 array = array_symbols.get((scope_id, t.text.casefold()))
+                if array is None and scope_id != "module":
+                    array = array_symbols.get(("module", t.text.casefold()))
                 if array is not None:
                     if i + 1 >= len(sig) or sig[i + 1].text != "(":
                         doc.diagnostics.append(Diagnostic("ARRAY_SCALAR_COLLISION",
@@ -931,6 +933,29 @@ class Workspace:
             raise WorkspaceError("BINDING_MISMATCH", "DIM declaration did not produce the expected local array")
         return symbol_id
 
+    def _declare_shared_array_tokens(self, doc: Document, name: Any, upper_bound: Any) -> str:
+        if (not isinstance(name, str) or not IDENT_RE.fullmatch(name) or name.upper() in KEYWORDS
+                or name.endswith(("$", "%", "!", "#"))):
+            raise WorkspaceError("INVALID_NAME", "Shared numeric array name must be an unsuffixed BASIC identifier")
+        if isinstance(upper_bound, bool) or not isinstance(upper_bound, int) or not 0 <= upper_bound <= 255:
+            raise WorkspaceError("INVALID_ARRAY_BOUND", "Shared array upper_bound must be from 0 through 255")
+        if any(s.scope_id == "module" and s.normalized == name.casefold() for s in doc.symbols.values()):
+            raise WorkspaceError("NAME_COLLISION", f"{name} already exists at module scope")
+        tokens = self._new_tokens([("IDENT", "DIM"), ("WS", " "), ("IDENT", name),
+                                   ("PUNCT", "("), ("NUMBER", str(upper_bound)),
+                                   ("PUNCT", ")"), ("NEWLINE", "\n")])
+        first_function_line = min((f["start_line"] for f in doc.functions), default=None)
+        position = next((i for i, t in enumerate(doc.tokens)
+                         if first_function_line is not None and t.line == first_function_line), len(doc.tokens))
+        doc.tokens[position:position] = tokens
+        self._recolumn(doc)
+        self._index(doc)
+        sid = doc.token_symbol.get(tokens[2].uid)
+        symbol = doc.symbols.get(sid) if sid else None
+        if symbol is None or symbol.kind != "array" or symbol.scope_id != "module":
+            raise WorkspaceError("BINDING_MISMATCH", "Shared DIM did not produce a module array")
+        return sid
+
     def _insert_array_assignment_tokens(self, doc: Document, function_id: str,
                                         array_id: str, index_expression: Any,
                                         value_expression: Any,
@@ -939,8 +964,8 @@ class Workspace:
 
         function = self._function_row(doc, function_id)
         array = doc.symbols.get(array_id)
-        if array is None or array.kind != "array" or array.scope_id != function["scope_id"]:
-            raise WorkspaceError("UNSUPPORTED_TYPE", "Array assignment requires a local array in the current function")
+        if array is None or array.kind != "array" or array.scope_id not in (function["scope_id"], "module"):
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Array assignment requires a local or module array")
         before = doc.statements.get(before_statement_id)
         if before is None or before["containing_function_id"] != function_id:
             raise WorkspaceError("CROSS_SCOPE_STATEMENT", "Array assignment must be inserted inside its function")
@@ -1130,12 +1155,17 @@ class Workspace:
                     if set(item) != {"kind", "array_ref", "index", "expression"}:
                         raise WorkspaceError("INVALID_BODY_STATEMENT", "array_assign requires array_ref, index, and expression")
                     ref = item["array_ref"]
-                    if not isinstance(ref, dict) or ref.get("kind") != "local_ref" or not isinstance(ref.get("name"), str):
-                        raise WorkspaceError("INVALID_ARRAY_REFERENCE", "Body array_ref must be a constructor-local name")
-                    array_id = handles.get(ref["name"].casefold())
+                    if (not isinstance(ref, dict) or ref.get("kind") not in ("local_ref", "symbol_ref")):
+                        raise WorkspaceError("INVALID_ARRAY_REFERENCE", "Body array_ref must be a constructor handle or discovered symbol")
+                    if ref["kind"] == "local_ref":
+                        if not isinstance(ref.get("name"), str):
+                            raise WorkspaceError("INVALID_ARRAY_REFERENCE", "Constructor array handle requires a name")
+                        array_id = handles.get(ref["name"].casefold())
+                    else:
+                        array_id = ref.get("symbol_id")
                     array = doc.symbols.get(array_id) if array_id else None
-                    if array is None or array.kind != "array" or array.scope_id != row["scope_id"]:
-                        raise WorkspaceError("INVALID_ARRAY_REFERENCE", "array_assign must target a declared local numeric array")
+                    if array is None or array.kind != "array" or array.scope_id not in (row["scope_id"], "module"):
+                        raise WorkspaceError("INVALID_ARRAY_REFERENCE", "array_assign must target a local or module array")
                     index_parts, index_refs = checked_expression(item["index"])
                     value_parts, value_refs = checked_expression(item["expression"])
                     generated = append_line([("IDENT", array.name), ("PUNCT", "(")] + index_parts +
@@ -1215,6 +1245,7 @@ class Workspace:
             generated, expected_refs = self._edit_expression_tokens(doc, result_statement_id, resolved)
             self._index(doc)
             self._verify_expression_bindings(doc, generated, expected_refs)
+
 
     @staticmethod
     def _expression_context(doc: Document) -> tuple[dict[str, int], dict[str, Any]]:
@@ -1354,6 +1385,10 @@ class Workspace:
                     raise WorkspaceError("SYMBOL_NOT_FOUND", "Unknown symbol identity")
                 touched.setdefault(sid, candidate.symbols[sid].name)
                 self._move_function(candidate, sid, operation.get("before_symbol_id"))
+            elif kind == "declare_shared_numeric_array":
+                shared_id = self._declare_shared_array_tokens(
+                    candidate, operation.get("name"), operation.get("upper_bound"))
+                touched[shared_id] = candidate.symbols[shared_id].name
             elif kind in ("create_numeric_function", "create_string_function"):
                 self._create_function_tokens(candidate, operation.get("name"), operation.get("parameters", []))
                 self._index(candidate)
@@ -1398,6 +1433,9 @@ class Workspace:
                                                 "edit_assignment_expression",
                                                 "insert_numeric_assignment")
                for operation in operations):
+            from .projection import build_projection_from_document
+            build_projection_from_document(self, candidate, candidate.revision)
+        elif any(operation.get("operation") == "declare_shared_numeric_array" for operation in operations) and candidate.functions:
             from .projection import build_projection_from_document
             build_projection_from_document(self, candidate, candidate.revision)
         created_entities = [self._symbol_json(symbol) for sid, symbol in candidate.symbols.items()
@@ -1495,6 +1533,12 @@ class Workspace:
             operation["body"] = body
         return self._transaction(document_id, expected_revision,
                                  operation)
+
+    def declare_shared_numeric_array(self, document_id: str, name: str,
+                                     upper_bound: int, expected_revision: int) -> dict[str, Any]:
+        return self._transaction(document_id, expected_revision,
+                                 {"operation": "declare_shared_numeric_array",
+                                  "name": name, "upper_bound": upper_bound})
 
     def create_string_function(self, document_id: str, name: str, parameters: list[str],
                                expected_revision: int, expression: Any = None,
@@ -1661,6 +1705,8 @@ class Workspace:
                 params["document_id"], params["name"], params.get("parameters", []),
                 params["expected_revision"], params.get("expression"), params.get("locals"),
                 params.get("arrays"), params.get("array_assignments"), params.get("body")),
+            "declare_shared_numeric_array": lambda: self.declare_shared_numeric_array(
+                params["document_id"], params["name"], params["upper_bound"], params["expected_revision"]),
             "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "render_document": lambda: self.render_document(params["document_id"]),

@@ -32,12 +32,27 @@ representation is reused across calls within one instance, but not across
 instances. This is intentional in the first validation slice; an explicit
 state-pointer ABI can be considered after correctness is established.
 
-The persistent command channel uses bounded length-prefixed binary requests
-and one JSON response per request. Python owns the worker lifecycle and
-serializes commands to a given instance. Timeouts invalidate and terminate the
-worker; an instance is never silently recreated. Calls to separate instances
-can run in separate processes. There is no hot reload, state migration,
-cross-process shared memory, or claim of a general security sandbox.
+The implemented persistent command channel uses bounded length-prefixed
+binary requests and one JSON response per request, correlated by request ID.
+Python owns the worker lifecycle and serializes commands to a given instance.
+The worker reads the BWM projection once, compiles once, and retains the MIR
+context and generated functions until shutdown. BWM5 marks shared numeric
+arrays and their slots; BWM1–BWM4 remain accepted. The existing one-shot worker
+protocol remains the default path.
+
+The explicit initializer is an ordinary projected MIR function selected at
+instance creation. It executes once before the handle is published. Its MIR
+assignments populate worker-owned module BSS arrays; Python never stores
+runtime records. Persistent worker failure or timeout marks that instance
+dead, with no restart or state reset. Calls within an instance are serialized.
+There is no hot reload, state migration, cross-process shared memory, or claim
+of a general security sandbox.
+
+The current implementation compiles one MIR module per worker. “Prepared
+module” is an immutable projection and metadata handle, not shared native code.
+Compiled functions are reused only across calls made to the same instance.
+The top-level fixed numeric `DIM` is a restricted Workspace extension, not a
+claim of historical BASIC module-global semantics.
 
 The current worker lowers pointer-valued MIR data references through the
 x86-64 host ABI already used by the string implementation. This experiment is

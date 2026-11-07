@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import sys
+import atexit
 
 from .model import Workspace, WorkspaceError
-from .mir_execution import MirExecutionService
+from .mir_execution import MirExecutionService, PersistentExecutionService
 
 
 def _check_discovered_expression(workspace: Workspace, document_id: str, expression: dict) -> None:
@@ -94,6 +95,8 @@ def _check_discovered_operations(workspace: Workspace, document_id: str,
 def serve() -> None:
     workspace = Workspace()
     mir_execution = MirExecutionService()
+    persistent_execution = PersistentExecutionService()
+    atexit.register(persistent_execution.close)
     for raw in sys.stdin:
         request: dict = {}
         try:
@@ -110,6 +113,26 @@ def serve() -> None:
                 result = mir_execution.execute_function(
                     workspace, document_id, params["expected_revision"], function_id,
                     params.get("arguments", []), params.get("engine", "interp"))
+            elif method == "prepare_compiled_module":
+                result = persistent_execution.prepare_module(
+                    workspace, params["document_id"], params["expected_revision"],
+                    params.get("engine", "interp"))
+            elif method == "create_execution_instance":
+                result = persistent_execution.create_instance(
+                    params["module_id"], params.get("initializer_function_id"))
+            elif method == "call_instance_function":
+                instance = persistent_execution.get_instance_info(params["instance_id"])
+                if not workspace.symbol_was_discovered(instance["document_id"], params["function_id"]):
+                    raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover the function in the current document before calling it")
+                result = persistent_execution.call_instance_function(
+                    params["instance_id"], params["function_id"], params.get("arguments", []),
+                    params.get("expected_revision"))
+            elif method == "get_instance_info":
+                result = persistent_execution.get_instance_info(params["instance_id"])
+            elif method == "destroy_execution_instance":
+                result = persistent_execution.destroy_instance(params["instance_id"])
+            elif method == "release_compiled_module":
+                result = persistent_execution.release_module(params["module_id"])
             elif method == "list_function_statements":
                 document_id = params["document_id"]
                 if not workspace.symbol_was_discovered(document_id, params["function_id"]):

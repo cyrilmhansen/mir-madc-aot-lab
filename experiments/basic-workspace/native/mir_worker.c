@@ -74,6 +74,9 @@ typedef struct {
   MIR_reg_t *elements;
   MIR_reg_t base;
   int memory_backed;
+  int shared;
+  uint32_t shared_slot;
+  MIR_item_t shared_item;
 } Array;
 
 static int use_memory_arrays;
@@ -464,16 +467,18 @@ static Function *read_projection(const uint8_t *data, size_t length,
   uint32_t version;
   if (!read_bytes(&reader, magic, sizeof(magic)) ||
       (memcmp(magic, "BWM1", 4) != 0 && memcmp(magic, "BWM2", 4) != 0 &&
-       memcmp(magic, "BWM3", 4) != 0 && memcmp(magic, "BWM4", 4) != 0) ||
+       memcmp(magic, "BWM3", 4) != 0 && memcmp(magic, "BWM4", 4) != 0 &&
+       memcmp(magic, "BWM5", 4) != 0) ||
       !read_u32(&reader, &version) || !read_u32(&reader, engine) ||
       !read_u32(&reader, target) || !read_u32(&reader, nfunctions)) {
     *error = reader.error != NULL ? reader.error : "invalid binary projection header";
     return NULL;
   }
-  int version4 = memcmp(magic, "BWM4", 4) == 0;
+  int version5 = memcmp(magic, "BWM5", 4) == 0;
+  int version4 = memcmp(magic, "BWM4", 4) == 0 || version5;
   int version3 = memcmp(magic, "BWM3", 4) == 0 || version4;
   int version2 = memcmp(magic, "BWM2", 4) == 0 || version3;
-  if (version != (version4 ? 4u : version3 ? 3u : version2 ? 2u : 1u) || *engine > 1 || *nfunctions == 0 || *nfunctions > MAX_FUNCTIONS ||
+  if (version != (version5 ? 5u : version4 ? 4u : version3 ? 3u : version2 ? 2u : 1u) || *engine > 1 || *nfunctions == 0 || *nfunctions > MAX_FUNCTIONS ||
       *target >= *nfunctions) {
     *error = "unsupported binary projection header values";
     return NULL;
@@ -519,6 +524,16 @@ static Function *read_projection(const uint8_t *data, size_t length,
         Array *array = &function->arrays[j];
         if (!read_u32(&reader, &array->lower) || !read_u32(&reader, &array->upper)) goto fail;
         if (version4 && (!read_u8(&reader, &array->is_string) || array->is_string > 1)) { reader.error = "invalid array element type"; goto fail; }
+        if (version5) {
+          uint8_t shared_flag = 0;
+          if (!read_u8(&reader, &shared_flag) || shared_flag > 1 ||
+              !read_u32(&reader, &array->shared_slot) ||
+              (shared_flag && array->shared_slot >= MAX_ARRAYS) ||
+              (!shared_flag && array->shared_slot != UINT32_MAX)) {
+            reader.error = "invalid shared-array metadata"; goto fail;
+          }
+          array->shared = shared_flag;
+        }
         if (array->lower != 0 || array->upper >= MAX_ARRAY_ELEMENTS) {
           reader.error = "array bounds exceed supported fixed numeric-array limits";
           goto fail;
@@ -560,6 +575,39 @@ static Function *read_projection(const uint8_t *data, size_t length,
       }
       statement->value = read_expr(&reader, 0, function->narrays);
       if (statement->value == NULL) goto fail;
+    }
+  }
+  if (version5) {
+    uint32_t expected_shared = 0;
+    for (uint32_t j = 0; j < functions[0].narrays; j++) {
+      Array *array = &functions[0].arrays[j];
+      if (array->shared) {
+        if (array->shared_slot != expected_shared++) {
+          reader.error = "shared arrays must use dense declaration-order slots"; goto fail;
+        }
+      }
+    }
+    for (uint32_t i = 0; i < *nfunctions; i++) {
+      uint8_t seen[MAX_ARRAYS] = {0};
+      uint32_t count = 0;
+      for (uint32_t j = 0; j < functions[i].narrays; j++) {
+        Array *array = &functions[i].arrays[j];
+        if (!array->shared) continue;
+        if (array->shared_slot >= expected_shared || seen[array->shared_slot]++) {
+          reader.error = "invalid or duplicate shared-array slot"; goto fail;
+        }
+        Array *reference = NULL;
+        for (uint32_t k = 0; k < functions[0].narrays; k++)
+          if (functions[0].arrays[k].shared && functions[0].arrays[k].shared_slot == array->shared_slot)
+            reference = &functions[0].arrays[k];
+        if (reference == NULL || reference->upper != array->upper || reference->is_string != array->is_string) {
+          reader.error = "shared-array declarations disagree across functions"; goto fail;
+        }
+        count++;
+      }
+      if (count != expected_shared) {
+        reader.error = "each function must carry the complete shared-array table"; goto fail;
+      }
     }
   }
   for (uint32_t i = 0; i < *nfunctions; i++) {
@@ -966,7 +1014,19 @@ static double monotonic_ms(void) {
   return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
-static uint8_t *read_stdin(size_t *size) {
+static uint8_t *read_stdin(size_t *size, int persistent) {
+  if (persistent) {
+    uint8_t header[4];
+    if (fread(header, 1, sizeof(header), stdin) != sizeof(header)) return NULL;
+    uint32_t length = (uint32_t)header[0] | ((uint32_t)header[1] << 8) |
+                      ((uint32_t)header[2] << 16) | ((uint32_t)header[3] << 24);
+    if (length == 0 || length > MAX_INPUT) return NULL;
+    uint8_t *data = malloc(length);
+    if (data == NULL) return NULL;
+    if (fread(data, 1, length, stdin) != length) { free(data); return NULL; }
+    *size = length;
+    return data;
+  }
   size_t capacity = 4096;
   uint8_t *data = malloc(capacity);
   if (data == NULL) return NULL;
@@ -991,13 +1051,89 @@ static uint8_t *read_stdin(size_t *size) {
   return data;
 }
 
+static int read_exact(FILE *f, void *buffer, size_t length) {
+  size_t offset = 0;
+  while (offset < length) {
+    size_t n = fread((uint8_t *)buffer + offset, 1, length - offset, f);
+    if (n == 0) return 0;
+    offset += n;
+  }
+  return 1;
+}
+
+static uint32_t load_u32_le(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Persistent protocol: each request is a u32 length followed by
+   opcode:u8, request_id:u32, function_slot:u32, argc:u32, argc*f64.
+   Shutdown is opcode 2 and contains only opcode + request_id. */
+static int persistent_request(uint32_t *request_id, uint32_t *target,
+                              uint32_t *argc, double args[MAX_ARGS]) {
+  uint8_t header[4];
+  if (!read_exact(stdin, header, sizeof(header))) return 0;
+  uint32_t length = load_u32_le(header);
+  if (length < 5 || length > 1 + 12 + MAX_ARGS * 8) return -1;
+  uint8_t frame[1 + 12 + MAX_ARGS * 8];
+  if (!read_exact(stdin, frame, length)) return -1;
+  uint8_t opcode = frame[0];
+  *request_id = load_u32_le(frame + 1);
+  if (opcode == 2) return length == 5 ? 2 : -1;
+  if (opcode != 1 || length < 13) return -1;
+  *target = load_u32_le(frame + 5);
+  *argc = load_u32_le(frame + 9);
+  if (*argc > MAX_ARGS || length != 13 + *argc * 8) return -1;
+  for (uint32_t i = 0; i < *argc; i++) {
+    uint64_t bits = 0;
+    for (unsigned b = 0; b < 8; b++) bits |= (uint64_t)frame[13 + i * 8 + b] << (b * 8);
+    memcpy(&args[i], &bits, sizeof(bits));
+    if (!isfinite(args[i])) return -1;
+  }
+  return 1;
+}
+
+static int persistent_call(MIR_context_t ctx, MIR_item_t *items, void **addresses,
+                           uint32_t engine, Function *functions, uint32_t nfunctions,
+                           uint32_t request_id, uint32_t target, uint32_t argc,
+                           const double args[MAX_ARGS]) {
+  if (target >= nfunctions || argc != functions[target].nargs ||
+      functions[target].return_string) {
+    printf("{\"ok\":false,\"request_id\":%u,\"code\":\"INVALID_CALL\",\"message\":\"persistent worker accepts numeric calls with matching arity\"}\n", request_id);
+    fflush(stdout);
+    return 1;
+  }
+  uint32_t error_status = 0;
+  double result = 0;
+  if (engine == 0) {
+    MIR_val_t values[MAX_ARGS + 1], results[1];
+    for (uint32_t i = 0; i < argc; i++) values[i].d = args[i];
+    values[argc].a = &error_status;
+    MIR_interp_arr(ctx, items[target], results, argc + 1, values);
+    result = results[0].d;
+  } else {
+    result = call_native(addresses[target], argc, args, &error_status);
+  }
+  if (error_status != 0 || !isfinite(result)) {
+    const char *code = error_status == 1 ? "ARRAY_BOUNDS" : error_status == 2 ? "LOOP_LIMIT" : "NON_FINITE_RESULT";
+    printf("{\"ok\":false,\"request_id\":%u,\"code\":\"%s\",\"message\":\"persistent MIR call failed\"}\n", request_id, code);
+  } else {
+    printf("{\"ok\":true,\"request_id\":%u,\"result_type\":\"double\",\"result_hex\":\"%a\"}\n", request_id, result);
+  }
+  fflush(stdout);
+  return 1;
+}
+
 int main(void) {
+  int persistent = getenv("BASIC_WORKSPACE_PERSISTENT") != NULL;
+  void **persistent_addresses = NULL;
+  int persistent_gen_initialized = 0;
   const char *memory_mode = getenv("BASIC_WORKSPACE_MEMORY_ARRAYS");
   /* Prefer bounded stack storage by default. Set =0 to force the historical
      per-cell register/dispatch lowering for comparison and regression tests. */
   use_memory_arrays = memory_mode == NULL || strcmp(memory_mode, "0") != 0;
   size_t input_size = 0;
-  uint8_t *input = read_stdin(&input_size);
+  uint8_t *input = read_stdin(&input_size, persistent);
   if (input == NULL) {
     report_error("INVALID_PROJECTION", "could not read projection or input exceeded worker limit");
     return 0;
@@ -1015,6 +1151,7 @@ int main(void) {
 
   double build_started = monotonic_ms();
   double build_ms = 0.0, link_ms = 0.0, jit_compile_ms = 0.0, invoke_ms = 0.0;
+  uint32_t mir_build_count = 0, mir_link_count = 0;
   MIR_context_t ctx = MIR_init();
   if (ctx == NULL) {
     free_functions(functions, nfunctions);
@@ -1022,6 +1159,41 @@ int main(void) {
     return 0;
   }
   MIR_module_t module = MIR_new_module(ctx, "basic_workspace_projection");
+  MIR_item_t shared_data[MAX_ARRAYS] = {0};
+  if (module != NULL) {
+    for (uint32_t i = 0; i < nfunctions; i++) {
+      for (uint32_t j = 0; j < functions[i].narrays; j++) {
+        Array *array = &functions[i].arrays[j];
+        if (!array->shared) continue;
+        uint32_t slot = array->shared_slot;
+        if (slot >= MAX_ARRAYS) { module = NULL; break; }
+        uint32_t capacity = array->upper - array->lower + 1;
+        if (shared_data[slot] == NULL) {
+          char state_name[48];
+          snprintf(state_name, sizeof(state_name), "bw_shared_array_%u", slot);
+          shared_data[slot] = MIR_new_bss(ctx, state_name, (size_t)capacity * 8);
+          if (shared_data[slot] == NULL) { module = NULL; break; }
+        } else {
+          for (uint32_t k = 0; k < i; k++) {
+            for (uint32_t m = 0; m < functions[k].narrays; m++) {
+              Array *prior = &functions[k].arrays[m];
+              if (prior->shared && prior->shared_slot == slot &&
+                  (prior->upper != array->upper || prior->is_string != array->is_string)) {
+                module = NULL;
+              }
+            }
+          }
+        }
+      }
+      if (module == NULL) break;
+    }
+    for (uint32_t slot = 0; slot < MAX_ARRAYS; slot++) {
+      if (shared_data[slot] != NULL) {
+        for (uint32_t missing = 0; missing < slot; missing++)
+          if (shared_data[missing] == NULL) module = NULL;
+      }
+    }
+  }
   MIR_item_t *protos = calloc(nfunctions, sizeof(*protos));
   MIR_item_t *forwards = calloc(nfunctions, sizeof(*forwards));
   MIR_item_t *items = calloc(nfunctions, sizeof(*items));
@@ -1085,7 +1257,17 @@ int main(void) {
     for (uint32_t j = 0; j < functions[i].narrays; j++) {
       Array *array = &functions[i].arrays[j];
       uint32_t capacity = array->upper - array->lower + 1;
-      array->memory_backed = use_memory_arrays || array->is_string;
+      array->memory_backed = array->shared || use_memory_arrays || array->is_string;
+      if (array->shared) {
+        char array_name[48];
+        snprintf(array_name, sizeof(array_name), "shared_array_%u", j);
+        array->base = MIR_new_func_reg(ctx, mir_func, MIR_T_I64, array_name);
+        if (array->base == 0 || array->shared_slot >= MAX_ARRAYS ||
+            shared_data[array->shared_slot] == NULL) { failed = 1; break; }
+        MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_MOV,
+            MIR_new_reg_op(ctx, array->base), MIR_new_ref_op(ctx, shared_data[array->shared_slot])));
+        continue;
+      }
       if (array->memory_backed) {
         char array_name[48];
         snprintf(array_name, sizeof(array_name), "array_mem_%u", j);
@@ -1154,14 +1336,68 @@ int main(void) {
   }
   MIR_finish_module(ctx);
   MIR_load_module(ctx, module);
+  mir_build_count++;
   build_ms = monotonic_ms() - build_started;
   if (getenv("BASIC_WORKSPACE_MIR_DUMP") != NULL) MIR_output(ctx, stderr);
   double result = 0.0;
   const char *string_result = NULL;
   uint32_t worker_error = 0;
+  if (persistent) {
+    double link_started_persistent = monotonic_ms();
+    if (engine == 0) {
+      MIR_link(ctx, MIR_set_interp_interface, NULL);
+      mir_link_count++;
+    } else {
+      MIR_gen_init(ctx);
+      persistent_gen_initialized = 1;
+      MIR_link(ctx, MIR_set_gen_interface, NULL);
+      mir_link_count++;
+      persistent_addresses = calloc(nfunctions, sizeof(*persistent_addresses));
+      if (persistent_addresses == NULL) {
+        report_error("OUT_OF_MEMORY", "could not allocate persistent function table");
+        goto cleanup;
+      }
+      double persistent_jit_started = monotonic_ms();
+      for (uint32_t i = 0; i < nfunctions; i++) {
+        persistent_addresses[i] = MIR_gen(ctx, items[i]);
+        if (persistent_addresses[i] == NULL) {
+          report_error("MIR_JIT_FAILED", "MIR_gen failed while preparing persistent module");
+          goto cleanup;
+        }
+      }
+      jit_compile_ms = monotonic_ms() - persistent_jit_started;
+    }
+    link_ms = monotonic_ms() - link_started_persistent;
+    printf("{\"ready\":true,\"functions\":%u,\"engine\":\"%s\",\"mir_build_count\":%u,\"mir_link_count\":%u,\"timings_ms\":{\"mir_build\":%.6f,\"link\":%.6f,\"jit_compile\":%.6f}}\n",
+           nfunctions, engine == 0 ? "interp" : "jit", mir_build_count,
+           mir_link_count, build_ms, link_ms, jit_compile_ms);
+    fflush(stdout);
+    for (;;) {
+      uint32_t request_id = 0, requested_target = 0, requested_argc = 0;
+      double requested_args[MAX_ARGS] = {0};
+      int request = persistent_request(&request_id, &requested_target,
+                                       &requested_argc, requested_args);
+      if (request == 0) break;
+      if (request == 2) {
+        printf("{\"ok\":true,\"request_id\":%u,\"shutdown\":true}\n", request_id);
+        fflush(stdout);
+        break;
+      }
+      if (request < 0) {
+        printf("{\"ok\":false,\"request_id\":0,\"code\":\"INVALID_FRAME\",\"message\":\"malformed or oversized persistent request\"}\n");
+        fflush(stdout);
+        break;
+      }
+      persistent_call(ctx, items, persistent_addresses, engine, functions,
+                      nfunctions, request_id, requested_target,
+                      requested_argc, requested_args);
+    }
+    goto cleanup;
+  }
   double link_started = monotonic_ms();
   if (engine == 0) {
     MIR_link(ctx, MIR_set_interp_interface, NULL);
+    mir_link_count++;
     link_ms = monotonic_ms() - link_started;
     MIR_val_t values[MAX_ARGS + 1], results[1];
     for (uint32_t i = 0; i < argc; i++) values[i].d = args[i];
@@ -1174,6 +1410,7 @@ int main(void) {
   } else {
     MIR_gen_init(ctx);
     MIR_link(ctx, MIR_set_gen_interface, NULL);
+    mir_link_count++;
     link_ms = monotonic_ms() - link_started;
     double jit_started = monotonic_ms();
     void *address = MIR_gen(ctx, items[target]);
@@ -1220,6 +1457,7 @@ int main(void) {
   }
 
 cleanup:
+  if (persistent_gen_initialized) MIR_gen_finish(ctx);
   MIR_finish(ctx);
   free_functions(functions, nfunctions);
   free(protos);
@@ -1228,5 +1466,6 @@ cleanup:
   free(vars);
   free(names);
   free(result_types);
+  free(persistent_addresses);
   return 0;
 }

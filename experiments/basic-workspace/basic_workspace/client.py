@@ -317,6 +317,36 @@ class WorkspaceClient:
             expected_revision=expected_revision, function_id=function_id,
             arguments=arguments, engine=engine))
 
+    def workspace_prepare_compiled_module(self, expected_revision: int,
+                                          engine: str = "interp") -> dict[str, Any]:
+        return self._rpc("prepare_compiled_module", self._doc_params(
+            expected_revision=expected_revision, engine=engine))
+
+    def workspace_create_execution_instance(self, module_id: str,
+                                           initializer_function_id: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"module_id": module_id}
+        if initializer_function_id is not None:
+            params["initializer_function_id"] = initializer_function_id
+        return self._rpc("create_execution_instance", params)
+
+    def workspace_call_instance_function(self, instance_id: str, function_id: str,
+                                         arguments: list[Any],
+                                         expected_revision: int | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"instance_id": instance_id, "function_id": function_id,
+                                  "arguments": arguments}
+        if expected_revision is not None:
+            params["expected_revision"] = expected_revision
+        return self._rpc("call_instance_function", params)
+
+    def workspace_instance_info(self, instance_id: str) -> dict[str, Any]:
+        return self._rpc("get_instance_info", {"instance_id": instance_id})
+
+    def workspace_destroy_instance(self, instance_id: str) -> dict[str, Any]:
+        return self._rpc("destroy_execution_instance", {"instance_id": instance_id})
+
+    def workspace_release_compiled_module(self, module_id: str) -> dict[str, Any]:
+        return self._rpc("release_compiled_module", {"module_id": module_id})
+
     def _doc_params(self, **kwargs: Any) -> dict[str, Any]:
         if not self.document_id:
             raise RpcError("NO_DOCUMENT", "Open a document before querying it")

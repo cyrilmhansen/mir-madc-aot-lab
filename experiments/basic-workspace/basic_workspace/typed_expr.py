@@ -125,7 +125,7 @@ def parse_request(value: Any, symbols: Mapping[str, Any], current_scope: str,
         array = symbols.get(array_id)
         if array is None or array.kind != "array":
             raise WorkspaceError("UNSUPPORTED_TYPE", "array_element must reference a declared array")
-        if array.scope_id != current_scope:
+        if array.scope_id not in (current_scope, "module"):
             raise WorkspaceError("CROSS_SCOPE_REFERENCE", f"Array {array.name} is outside the current function scope")
         index, index_refs = parse_request(value["index"], symbols, current_scope,
                                           current_function_id, function_parameters,

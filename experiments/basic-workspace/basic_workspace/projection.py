@@ -48,6 +48,8 @@ class ArrayProjection:
     lower_bound: int
     upper_bound: int
     element_type: str = "numeric"
+    shared: bool = False
+    shared_slot: int = -1
 
 
 @dataclass(frozen=True)
@@ -253,6 +255,10 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
         first = statement[0]
         word = first.text.upper() if first.kind == "IDENT" else ""
         if active_id is None:
+            if word == "DIM":
+                # Workspace extension: module-scope DIM declares per-instance
+                # data. It is not asserted to be portable historical BASIC.
+                continue
             if word in ("FUNCTION", "SUB", "DEF", "EXTERN", "EXTERNAL"):
                 if word != "FUNCTION":
                     raise _fail("UNSUPPORTED_DECLARATION", f"{word} is outside the numeric FUNCTION subset", first)
@@ -302,11 +308,19 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
     for sid, parameter_ids, body in function_rows:
         symbol = doc.symbols[sid]
         scope_id = by_symbol[sid]["scope_id"]
+        array_symbols = [row for row in doc.symbols.values()
+                         if row.kind == "array" and row.scope_id in (scope_id, "module")]
+        token_order = {t.uid: i for i, t in enumerate(doc.tokens)}
+        shared_symbols = sorted((x for x in array_symbols if x.scope_id == "module"),
+                                key=lambda x: token_order[x.declaration_token])
+        local_symbols = sorted((x for x in array_symbols if x.scope_id == scope_id),
+                               key=lambda x: token_order[x.declaration_token])
         array_rows = tuple(ArrayProjection(row.id, row.name, row.array_lower or 0,
                                            row.array_upper if row.array_upper is not None else -1,
-                                           "string" if row.name.endswith("$") else "numeric")
-                           for row in doc.symbols.values()
-                           if row.kind == "array" and row.scope_id == scope_id)
+                                           "string" if row.name.endswith("$") else "numeric",
+                                           row.scope_id == "module",
+                                           next((i for i, shared in enumerate(shared_symbols) if shared.id == row.id), -1))
+                           for row in shared_symbols + local_symbols)
         if any(row.name.endswith(("%", "!", "#")) for row in array_rows):
             raise WorkspaceError("UNSUPPORTED_TYPE", "Only double and $ string arrays are supported")
         array_ids = {row.symbol_id for row in array_rows}
@@ -318,7 +332,7 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                 if row.name.endswith(("%", "!", "#")):
                     raise WorkspaceError("UNSUPPORTED_TYPE", f"Typed local {row.name} is outside the Workspace subset")
                 local_ids.add(row.id)
-        declared_arrays: set[str] = set()
+        declared_arrays: set[str] = {a.symbol_id for a in array_rows if a.shared}
 
         def constant(expr: Expr, token: Token) -> float:
             if expr.kind == "number":
@@ -360,7 +374,7 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                 raise _fail("UNSUPPORTED_ARRAY", "Array assignment requires an index", target_token)
             is_result = target.id == sid
             if target_is_array:
-                if target.id not in array_ids or target.scope_id != scope_id:
+                if target.id not in array_ids or target.scope_id not in (scope_id, "module"):
                     raise _fail("CROSS_SCOPE_REFERENCE", "Array target is outside the current function", target_token)
             elif not is_result and (target.kind not in ("parameter", "variable") or target.scope_id != scope_id):
                 raise _fail("UNSUPPORTED_ASSIGNMENT", f"Assignment to {target.name} is outside the current function scope", target_token)
