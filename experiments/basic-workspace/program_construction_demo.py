@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 from pathlib import Path
 
 from basic_workspace.client import AgentToolAdapter, WorkspaceClient
@@ -13,61 +14,65 @@ RESULTS = ROOT / "results/program-construction"
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path,
+                        default=RESULTS / "constructed.bas",
+                        help="optional rendered BASIC diagnostic artifact")
+    parser.add_argument("--json", type=Path, default=RESULTS / "demo.json",
+                        help="JSON execution trace output")
+    args = parser.parse_args()
+
     with WorkspaceClient(timeout=10) as client:
         agent = AgentToolAdapter(client)
         created_doc = agent.call("workspace_create_empty", {})
         did = created_doc["document_id"]
 
         created_double = agent.call("workspace_create_function", {
-            "expected_revision": 1, "name": "DOUBLE", "parameters": ["X"]})
+            "expected_revision": 1, "name": "DOUBLE", "parameters": ["X"],
+            "expression": {"kind": "binary", "operator": "*",
+                "left": {"kind": "local_ref", "name": "X"},
+                "right": {"kind": "number", "value": 2}}})
         double = next(row for row in created_double["created_entities"] if row["kind"] == "function")
         x = next(row for row in created_double["created_entities"] if row["kind"] == "parameter")
-        double_stmt = agent.call("workspace_statements", {"function_id": double["symbol_id"]})["items"][0]
-        double_expr = {"kind": "binary", "operator": "*",
-                       "left": {"kind": "symbol_ref", "symbol_id": x["symbol_id"]},
-                       "right": {"kind": "number", "value": 2}}
-        agent.call("workspace_edit_expression", {"expected_revision": 2,
-            "statement_id": double_stmt["statement_id"], "expression": double_expr})
+        double_stmt = created_double["created_statements"][0]
         double_18 = {engine: agent.call("workspace_execute_function", {
-            "expected_revision": 3, "function_id": double["symbol_id"],
+            "expected_revision": 2, "function_id": double["symbol_id"],
             "arguments": [9], "engine": engine}) for engine in ("interp", "jit")}
 
         created_calculate = agent.call("workspace_create_function", {
-            "expected_revision": 3, "name": "CALCULATE", "parameters": ["Y"]})
+            "expected_revision": 2, "name": "CALCULATE", "parameters": ["Y"],
+            "expression": {"kind": "binary", "operator": "+",
+                "left": {"kind": "call", "function_id": double["symbol_id"],
+                         "arguments": [{"kind": "local_ref", "name": "Y"}]},
+                "right": {"kind": "number", "value": 3}}})
         calculate = next(row for row in created_calculate["created_entities"] if row["kind"] == "function")
         y = next(row for row in created_calculate["created_entities"] if row["kind"] == "parameter")
-        calculate_stmt = agent.call("workspace_statements", {
-            "function_id": calculate["symbol_id"]})["items"][0]
-        calculate_expr = {"kind": "binary", "operator": "+",
-                          "left": {"kind": "call", "function_id": double["symbol_id"],
-                                   "arguments": [{"kind": "symbol_ref", "symbol_id": y["symbol_id"]}]},
-                          "right": {"kind": "number", "value": 3}}
-        agent.call("workspace_edit_expression", {"expected_revision": 4,
-            "statement_id": calculate_stmt["statement_id"], "expression": calculate_expr})
+        calculate_stmt = created_calculate["created_statements"][0]
         calculate_21 = {engine: agent.call("workspace_execute_function", {
-            "expected_revision": 5, "function_id": calculate["symbol_id"],
+            "expected_revision": 3, "function_id": calculate["symbol_id"],
             "arguments": [9], "engine": engine}) for engine in ("interp", "jit")}
 
         triple_expr = {"kind": "binary", "operator": "*",
                        "left": {"kind": "symbol_ref", "symbol_id": x["symbol_id"]},
                        "right": {"kind": "number", "value": 3}}
-        agent.call("workspace_edit_expression", {"expected_revision": 5,
+        agent.call("workspace_edit_expression", {"expected_revision": 3,
             "statement_id": double_stmt["statement_id"], "expression": triple_expr})
         calculate_30 = {engine: agent.call("workspace_execute_function", {
-            "expected_revision": 6, "function_id": calculate["symbol_id"],
+            "expected_revision": 4, "function_id": calculate["symbol_id"],
             "arguments": [9], "engine": engine}) for engine in ("interp", "jit")}
 
-        agent.call("workspace_commit", {"expected_revision": 6,
+        agent.call("workspace_commit", {"expected_revision": 4,
             "operations": [{"operation": "rename_symbol", "symbol_id": double["symbol_id"],
                             "new_name": "TRIPLE"}]})
         renamed_30 = {engine: agent.call("workspace_execute_function", {
-            "expected_revision": 7, "function_id": calculate["symbol_id"],
+            "expected_revision": 5, "function_id": calculate["symbol_id"],
             "arguments": [9], "engine": engine}) for engine in ("interp", "jit")}
 
         # Rendering is only an optional terminal artifact after all edits/runs.
         rendered = agent.call("workspace_render", {})["text"]
-        RESULTS.mkdir(parents=True, exist_ok=True)
-        (RESULTS / "constructed.bas").write_text(rendered, encoding="utf-8")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
         report = {
             "document_id": did,
             "revision": client.revision,
@@ -87,7 +92,7 @@ def main() -> None:
             "timings": {"double": double_18, "calculate_21": calculate_21,
                         "calculate_30": calculate_30, "renamed_30": renamed_30},
         }
-        (RESULTS / "demo.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        args.json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, indent=2))
 
 

@@ -323,4 +323,7 @@ for the API as presented to the agent, prompt/schema/context measurements, and
 the revised continued-session study design. That report distinguishes the
 validated numeric slice from the proposed graphics-animation and related
 address-book sessions, which require additional language and execution
-capabilities before a fair semantic-versus-text trial.
+capabilities before a fair semantic-versus-text trial. The Cycle 6 atomic
+constructor, historical BASIC feasibility findings, ECS boundary, model
+timeout record, and exact in-memory demo are documented in
+[`results/continued-sessions/REPORT.md`](results/continued-sessions/REPORT.md).

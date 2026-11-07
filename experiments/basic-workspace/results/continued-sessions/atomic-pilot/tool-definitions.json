@@ -1,0 +1,660 @@
+{
+  "semantic": [
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_structure",
+        "description": "Discover functions, line labels, revision, and diagnostics without returning source text.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_symbols",
+        "description": "Filter and discover semantic symbols and their opaque IDs.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "exact_name": {
+              "type": "string"
+            },
+            "unique": {
+              "type": "boolean"
+            },
+            "scope_id": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_create_function",
+        "description": "Atomically create a complete numeric FUNCTION and body in one revision. In expression/local initializer trees use local_ref(name) for parameters or earlier locals declared by this request. Returns stable function, parameter, local, and statement IDs.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "parameters": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 6
+            },
+            "expression": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "number",
+                    "symbol_ref",
+                    "local_ref",
+                    "unary",
+                    "binary",
+                    "call"
+                  ]
+                },
+                "value": {
+                  "type": "number"
+                },
+                "symbol_id": {
+                  "type": "string"
+                },
+                "function_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "+",
+                    "-",
+                    "*",
+                    "/"
+                  ]
+                },
+                "left": {
+                  "type": "object"
+                },
+                "right": {
+                  "type": "object"
+                },
+                "operand": {
+                  "type": "object"
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false,
+              "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."
+            },
+            "locals": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "expression": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "number",
+                          "symbol_ref",
+                          "local_ref",
+                          "unary",
+                          "binary",
+                          "call"
+                        ]
+                      },
+                      "value": {
+                        "type": "number"
+                      },
+                      "symbol_id": {
+                        "type": "string"
+                      },
+                      "function_id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "operator": {
+                        "type": "string",
+                        "enum": [
+                          "+",
+                          "-",
+                          "*",
+                          "/"
+                        ]
+                      },
+                      "left": {
+                        "type": "object"
+                      },
+                      "right": {
+                        "type": "object"
+                      },
+                      "operand": {
+                        "type": "object"
+                      },
+                      "arguments": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."
+                  }
+                },
+                "required": [
+                  "name",
+                  "expression"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "expected_revision",
+            "name",
+            "parameters",
+            "expression"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_statements",
+        "description": "Discover bounded assignment statements in a discovered function, including stable IDs and referenced symbols.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "function_id": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "function_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_edit_expression",
+        "description": "Replace only a discovered assignment's typed right-hand expression; commits one revision atomically.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "statement_id": {
+              "type": "string"
+            },
+            "expression": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "number",
+                    "symbol_ref",
+                    "local_ref",
+                    "unary",
+                    "binary",
+                    "call"
+                  ]
+                },
+                "value": {
+                  "type": "number"
+                },
+                "symbol_id": {
+                  "type": "string"
+                },
+                "function_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "+",
+                    "-",
+                    "*",
+                    "/"
+                  ]
+                },
+                "left": {
+                  "type": "object"
+                },
+                "right": {
+                  "type": "object"
+                },
+                "operand": {
+                  "type": "object"
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false,
+              "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."
+            }
+          },
+          "required": [
+            "expected_revision",
+            "statement_id",
+            "expression"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_insert_assignment",
+        "description": "Insert a numeric local or function-result assignment at the end of a function or before a discovered statement.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "function_id": {
+              "type": "string"
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "result"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            "expression": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "number",
+                    "symbol_ref",
+                    "local_ref",
+                    "unary",
+                    "binary",
+                    "call"
+                  ]
+                },
+                "value": {
+                  "type": "number"
+                },
+                "symbol_id": {
+                  "type": "string"
+                },
+                "function_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "operator": {
+                  "type": "string",
+                  "enum": [
+                    "+",
+                    "-",
+                    "*",
+                    "/"
+                  ]
+                },
+                "left": {
+                  "type": "object"
+                },
+                "right": {
+                  "type": "object"
+                },
+                "operand": {
+                  "type": "object"
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false,
+              "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."
+            },
+            "before_statement_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_revision",
+            "function_id",
+            "target",
+            "expression"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_execute_function",
+        "description": "Compile the current committed revision to MIR and execute a discovered numeric function using interp or jit.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "function_id": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "engine": {
+              "type": "string",
+              "enum": [
+                "interp",
+                "jit"
+              ]
+            }
+          },
+          "required": [
+            "expected_revision",
+            "function_id",
+            "arguments"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "text": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_source",
+        "description": "Read the in-memory BASIC buffer, optionally one-based line range.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "start_line": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "end_line": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20000
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_text",
+        "description": "Search source text and return bounded matching lines with context.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "context_lines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "apply_patch",
+        "description": "Replace one unique exact source context. Supply the observed buffer version; stale or ambiguous patches fail without mutation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "old_text": {
+              "type": "string"
+            },
+            "new_text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_version",
+            "old_text",
+            "new_text"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_diff",
+        "description": "Show the unified diff from the original buffer.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "text_diagnostics",
+        "description": "Run the BASIC subset diagnostics on the current buffer without changing it.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "validate_program",
+        "description": "Validate current buffer with the available BASIC subset parser; no compilation side effects.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "write_source",
+        "description": "Generate the initial BASIC source into the empty in-memory text buffer. Use no filesystem.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_version",
+            "source"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "execute_program",
+        "description": "Compile the in-memory source with the same numeric BASIC/MIR subset as the semantic arm and execute a named numeric function.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "function": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "engine": {
+              "type": "string",
+              "enum": [
+                "interp",
+                "jit"
+              ]
+            }
+          },
+          "required": [
+            "function",
+            "arguments",
+            "engine"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

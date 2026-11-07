@@ -70,6 +70,9 @@ def main():
         for task in tasks:
             for arm in ("semantic", "text"):
                 if arm == "semantic":
+                    # The host establishes the empty document before the model
+                    # turn, so the agent never has to guess/create its target.
+                    client.workspace_create_empty()
                     adapter = AgentToolAdapter(client)
                     runner = ToolRunner(arm, client=client, adapter=adapter, source="")
                 else:

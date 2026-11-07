@@ -40,14 +40,29 @@ then proves that identifiers resolve to the exact supplied symbol identities.
 
 ## Construction sequencing
 
-`create_numeric_function` creates a complete function whose result is initially
-0. The operation returns its function, parameter, and default assignment IDs.
-Agents then discover those IDs and use `edit_assignment_expression` to provide
-the intended body. This avoids temporary transaction handles and makes every
-committed revision well-formed and executable. A second function can be created
-and populated in the same sequence, using a previously discovered callee ID.
-Locals are introduced with `insert_assignment`; after commit their implicit
-variable IDs are returned and can be referenced in later expressions.
+`create_numeric_function` can atomically create a complete body in one
+transaction. The expression tree may refer to newly declared parameters with
+`{"kind":"local_ref","name":"X"}`; it may refer to locals declared earlier
+in the same `locals` list the same way. The transaction creates the function
+header, indexes the candidate to obtain temporary persistent IDs, resolves
+these name handles in the function scope, emits local assignments in order,
+then emits the result expression and validates its bindings. The temporary
+name map exists only during transaction construction; successful commit
+returns stable function, parameter, local, and statement IDs. A failure
+discards the entire candidate and publishes no IDs.
+
+For backwards compatibility, callers may omit the body; that retains the
+previous zero-result constructor. The agent-facing construction schema now
+requires a typed result expression and supports optional ordered locals. The
+previous two-step path (create zero function, discover assignment, replace
+expression) remains available through the general edit API, but is no longer
+needed for initial construction. Calls to already existing functions still
+require a function ID discovered by the agent.
+
+The host now creates the empty virtual document before the first model turn
+and provides its revision in the prompt. The agent tool list does not expose
+`workspace_create_empty`; this avoids a failed function creation on an absent
+document and an unnecessary bootstrap call.
 
 The existing `preview_transaction` and `apply_transaction` accept these
 operations too. Preview reports a created-entity count/summary rather than

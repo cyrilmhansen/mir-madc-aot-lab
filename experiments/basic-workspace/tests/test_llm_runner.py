@@ -35,6 +35,27 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 
 class LlmHarnessTests(unittest.TestCase):
+    def test_endpoint_timeout_is_saved_as_a_failed_model_attempt(self):
+        class TimedOutEndpoint:
+            last_request_bytes = 1234
+            last_response_bytes = 0
+            last_elapsed_ms = 180000.0
+
+            def complete(self, _messages, _tools):
+                raise TimeoutError("timed out")
+
+        task = {"id": "construct_double", "instruction": "Create DOUBLE(X)=X*2.",
+                "function": "DOUBLE", "arguments": [9], "expected_result": 18}
+        runner = llm_runner.ToolRunner("text", source="")
+        result = llm_runner.run_session(TimedOutEndpoint(), "text", task, runner,
+            max_calls=10, max_iterations=4, construction=True)
+        self.assertEqual("endpoint_error", result["status"])
+        self.assertEqual(1, result["model_request_attempts"])
+        self.assertEqual(0, result["model_turns"])
+        self.assertEqual(1234, result["trace"][0]["request_bytes"])
+        self.assertEqual(0, result["trace"][0]["response_wire_bytes"])
+        self.assertEqual("TimeoutError: timed out", result["trace"][0]["endpoint_error"])
+
     def test_construction_text_arm_executes_same_numeric_mir_subset(self):
         runner = llm_runner.ToolRunner("text", source=(
             "FUNCTION DOUBLE(X)\nDOUBLE = X * 2\nEND FUNCTION\n"))

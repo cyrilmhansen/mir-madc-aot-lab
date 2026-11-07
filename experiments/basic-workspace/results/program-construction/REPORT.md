@@ -26,26 +26,27 @@ The construction agent is presented with a small set of JSON function tools:
 |---|---|---|
 | `workspace_create_empty` | Create a virtual document with no source input | Establishes its first revision |
 | `workspace_structure` / `workspace_symbols` | Discover functions, parameters, locals, types, IDs, and revision | IDs must be returned by the workspace |
-| `workspace_create_function` | Create a numeric `FUNCTION` with parameters and a zero result | Commits one validated revision and returns function, parameter, and statement IDs |
+| `workspace_create_function` | Atomically create a numeric `FUNCTION`, parameters, ordered locals, and typed body | Resolves request-local `local_ref(name)` handles, commits one revision, and returns persistent function/parameter/local/statement IDs |
 | `workspace_statements` | Find assignment statements inside a discovered function | Returns durable statement IDs, target, references, summary, and revision |
 | `workspace_edit_expression` | Replace one assignment RHS using a typed expression object | Requires a discovered statement and current revision |
 | `workspace_insert_assignment` | Add a numeric local/result assignment | Requires a discovered containing function and any insertion anchor |
 | `workspace_execute_function` | Run a discovered function using `interp` or `jit` | Rebuilds the projection for the requested committed revision |
 
 The expression request is a JSON algebra (`number`, `symbol_ref`, `unary`,
-`binary`, `call`). It has no source-string field. References carry opaque IDs;
+`binary`, `call`); constructor bodies additionally accept a transaction-local
+`local_ref(name)` handle for parameters and earlier locals. It has no
+source-string field. Existing references carry opaque IDs;
 the transaction checks scope, numeric type, arity, supported operators,
 finite values, and expression limits. New nodes become canonical BASIC tokens
 with fresh IDs. The index rebuild then verifies that each emitted reference
 still resolves to the requested symbol. A failed check discards the private
 candidate document.
 
-Creation is intentionally two-stage today: create a complete function that
-returns zero, discover its assignment identity, then replace its expression.
-This makes every committed revision valid and discoverable, but it also costs
-extra model turns. A later API could accept a function plus a typed body in one
-atomic request, using transaction-local handles for the new parameters. That
-would reduce interaction overhead without introducing an editable second
+Creation now accepts a complete typed body in one atomic request. The request
+can use transaction-local parameter/local handles before persistent IDs exist;
+after validation, the response returns stable IDs. The zero-returning
+constructor remains available for compatibility. This reduces the initial
+function construction path without introducing another editable
 representation.
 
 The current tool schemas are sent with each chat completion. The JSON tool
@@ -72,9 +73,11 @@ operations. It creates `DOUBLE(X)`, executes `DOUBLE(9)`, creates
 `CALCULATE(Y)` with a call to the discovered `DOUBLE` identity, changes
 `DOUBLE` from `X*2` to `X*3`, and renames it to `TRIPLE`. Both engines return
 18, 21, then 30 and 30 after the rename. The only BASIC rendering is performed
-after the last execution for optional inspection. The JSON trace records 18
-workspace RPCs, 4,185 request bytes, 8,229 response bytes, and 35.24 ms of
-workspace RPC wall time for this single local run. Execution uses a fresh MIR
+after the last execution for optional inspection. The original two-stage JSON
+trace recorded 18 RPCs. After atomic construction, the same demo uses 14 RPCs,
+3,295 request bytes, 6,729 response bytes, and 35.93 ms of RPC wall time in one
+local run. This is a 22% RPC-count reduction and approximately 21%/18% fewer
+request/response bytes. Execution uses a fresh MIR
 worker per call; the recorded small-module process cost is roughly 0.7–1.0 ms.
 
 Historical validation is downstream only:

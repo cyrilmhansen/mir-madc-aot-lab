@@ -16,6 +16,54 @@ WORKER = pathlib.Path(__file__).resolve().parents[1] / "native/build/mir-worker"
 
 @unittest.skipUnless(WORKER.is_file(), "build MIR worker with scripts/build-mir-worker.sh")
 class ProgramConstructionTests(unittest.TestCase):
+    def test_atomic_function_constructor_resolves_transaction_local_parameter(self):
+        with WorkspaceClient() as client:
+            agent = AgentToolAdapter(client)
+            opened = agent.call("workspace_create_empty", {})
+            created = agent.call("workspace_create_function", {
+                "expected_revision": opened["revision"],
+                "name": "DOUBLE", "parameters": ["X"],
+                "expression": {"kind": "binary", "operator": "*",
+                    "left": {"kind": "local_ref", "name": "X"},
+                    "right": {"kind": "number", "value": 2}}})
+            self.assertEqual(2, created["revision"])
+            self.assertEqual(1, len(created["created_statements"]))
+            function = next(x for x in created["created_entities"] if x["kind"] == "function")
+            parameter = next(x for x in created["created_entities"] if x["kind"] == "parameter")
+            self.assertEqual("X", parameter["name"])
+            self.assertEqual(18.0, agent.call("workspace_execute_function", {
+                "expected_revision": 2, "function_id": function["symbol_id"],
+                "arguments": [9], "engine": "interp"})["result"])
+            self.assertEqual(18.0, agent.call("workspace_execute_function", {
+                "expected_revision": 2, "function_id": function["symbol_id"],
+                "arguments": [9], "engine": "jit"})["result"])
+
+    def test_atomic_constructor_orders_locals_and_rolls_back_bad_handles(self):
+        workspace = Workspace()
+        did = workspace.create_empty_document()["document_id"]
+        created = workspace.create_numeric_function(did, "COMBINE", ["A", "B"], 1,
+            expression={"kind": "binary", "operator": "+",
+                "left": {"kind": "local_ref", "name": "PRODUCT"},
+                "right": {"kind": "local_ref", "name": "B"}},
+            locals=[{"name": "PRODUCT", "expression": {
+                "kind": "binary", "operator": "*",
+                "left": {"kind": "local_ref", "name": "A"},
+                "right": {"kind": "local_ref", "name": "B"}}}])
+        function = next(x for x in created["created_entities"] if x["kind"] == "function")
+        local = next(x for x in created["created_entities"] if x["name"] == "PRODUCT")
+        self.assertEqual(2, created["revision"])
+        self.assertEqual(2, len(created["created_statements"]))
+        self.assertEqual(24.0, MirExecutionService().execute_function(
+            workspace, did, 2, function["symbol_id"], [5, 4], "jit")["result"])
+        with self.assertRaises(WorkspaceError) as raised:
+            workspace.create_numeric_function(did, "BROKEN", ["X"], 2,
+                expression={"kind": "local_ref", "name": "ABSENT"})
+        self.assertEqual("UNKNOWN_TRANSACTION_HANDLE", raised.exception.code)
+        self.assertEqual(2, workspace.get_revision(did))
+        self.assertNotIn("BROKEN", [x["name"] for x in workspace.get_document_structure(did)["functions"]])
+        self.assertEqual(local["symbol_id"], next(
+            x["symbol_id"] for x in workspace.list_symbols(did) if x["name"] == "PRODUCT"))
+
     def test_agent_constructs_and_evolves_program_from_empty_document(self):
         with WorkspaceClient() as client:
             agent = AgentToolAdapter(client)

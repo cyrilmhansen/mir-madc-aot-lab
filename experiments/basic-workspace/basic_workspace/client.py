@@ -216,10 +216,21 @@ class WorkspaceClient:
         return result
 
     def workspace_create_function(self, expected_revision: int, name: str,
-                                  parameters: list[str]) -> dict[str, Any]:
+                                  parameters: list[str], expression: Any = None,
+                                  locals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         self._check_expected_revision(expected_revision)
-        result = self._rpc("create_numeric_function", self._doc_params(
-            expected_revision=expected_revision, name=name, parameters=parameters))
+        if expression is not None:
+            self._validate_expression_symbols(expression, allow_local_ref=True)
+        for local in locals or []:
+            if isinstance(local, dict) and "expression" in local:
+                self._validate_expression_symbols(local["expression"], allow_local_ref=True)
+        params = {"expected_revision": expected_revision, "name": name,
+                  "parameters": parameters}
+        if expression is not None:
+            params["expression"] = expression
+        if locals is not None:
+            params["locals"] = locals
+        result = self._rpc("create_numeric_function", self._doc_params(**params))
         self.revision = result["revision"]
         self._remember_created(result)
         return result
@@ -303,9 +314,14 @@ class WorkspaceClient:
                 if before is not None and before not in self._known_statements:
                     raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the insertion point first")
             if "expression" in op:
-                self._validate_expression_symbols(op["expression"])
+                self._validate_expression_symbols(op["expression"],
+                    allow_local_ref=op.get("operation") == "create_numeric_function")
+            if op.get("operation") == "create_numeric_function":
+                for local in op.get("locals", []):
+                    if isinstance(local, dict) and "expression" in local:
+                        self._validate_expression_symbols(local["expression"], allow_local_ref=True)
 
-    def _validate_expression_symbols(self, expression: Any) -> None:
+    def _validate_expression_symbols(self, expression: Any, allow_local_ref: bool = False) -> None:
         if not isinstance(expression, dict):
             raise RpcError("INVALID_EXPRESSION", "Expression must be a typed object")
         kind = expression.get("kind")
@@ -316,12 +332,15 @@ class WorkspaceClient:
             if expression.get("function_id") not in self._known_symbols:
                 raise RpcError("UNKNOWN_SYMBOL_ID", "Discover called functions before using their identities")
             for child in expression.get("arguments", []):
-                self._validate_expression_symbols(child)
+                self._validate_expression_symbols(child, allow_local_ref)
         elif kind == "unary":
-            self._validate_expression_symbols(expression.get("operand"))
+            self._validate_expression_symbols(expression.get("operand"), allow_local_ref)
         elif kind == "binary":
-            self._validate_expression_symbols(expression.get("left"))
-            self._validate_expression_symbols(expression.get("right"))
+            self._validate_expression_symbols(expression.get("left"), allow_local_ref)
+            self._validate_expression_symbols(expression.get("right"), allow_local_ref)
+        elif kind == "local_ref" and allow_local_ref:
+            if not isinstance(expression.get("name"), str):
+                raise RpcError("INVALID_TRANSACTION_HANDLE", "local_ref requires a name")
         elif kind != "number":
             raise RpcError("UNSUPPORTED_EXPRESSION", f"Unknown typed expression kind {kind!r}")
 
@@ -343,7 +362,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "workspace_render": {"required": [], "optional": ["max_chars"]},
     "workspace_execute_function": {"required": ["expected_revision", "function_id", "arguments"],
                                    "optional": ["engine"]},
-    "workspace_create_function": {"required": ["expected_revision", "name", "parameters"], "optional": []},
+    "workspace_create_function": {"required": ["expected_revision", "name", "parameters"],
+                                   "optional": ["expression", "locals"]},
     "workspace_statements": {"required": ["function_id"], "optional": ["offset", "limit"]},
     "workspace_edit_expression": {"required": ["expected_revision", "statement_id", "expression"], "optional": []},
     "workspace_insert_assignment": {"required": ["expected_revision", "function_id", "target", "expression"],
@@ -414,7 +434,13 @@ class AgentToolAdapter:
                 before = args.get("before_statement_id")
                 if before is not None and before not in self.known_statements:
                     raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the insertion point first")
-            if name != "workspace_create_function":
+            if name == "workspace_create_function":
+                if "expression" in args:
+                    self._validate_expression_symbols(args["expression"], allow_local_ref=True)
+                for local in args.get("locals", []):
+                    if isinstance(local, dict) and "expression" in local:
+                        self._validate_expression_symbols(local["expression"], allow_local_ref=True)
+            else:
                 self._validate_expression_symbols(args["expression"])
         result = getattr(self.client, name)(**args)
         if name in ("workspace_open", "workspace_create_empty"):
@@ -472,7 +498,7 @@ class AgentToolAdapter:
             if "expression" in operation:
                 self._validate_expression_symbols(operation["expression"])
 
-    def _validate_expression_symbols(self, expression: Any) -> None:
+    def _validate_expression_symbols(self, expression: Any, allow_local_ref: bool = False) -> None:
         if not isinstance(expression, dict):
             raise RpcError("INVALID_EXPRESSION", "Expression must be a typed object")
         kind = expression.get("kind")
@@ -483,11 +509,14 @@ class AgentToolAdapter:
             if expression.get("function_id") not in self.known_symbols:
                 raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover called functions first")
             for child in expression.get("arguments", []):
-                self._validate_expression_symbols(child)
+                self._validate_expression_symbols(child, allow_local_ref)
         elif kind == "unary":
-            self._validate_expression_symbols(expression.get("operand"))
+            self._validate_expression_symbols(expression.get("operand"), allow_local_ref)
         elif kind == "binary":
-            self._validate_expression_symbols(expression.get("left"))
-            self._validate_expression_symbols(expression.get("right"))
+            self._validate_expression_symbols(expression.get("left"), allow_local_ref)
+            self._validate_expression_symbols(expression.get("right"), allow_local_ref)
+        elif kind == "local_ref" and allow_local_ref:
+            if not isinstance(expression.get("name"), str):
+                raise RpcError("INVALID_TRANSACTION_HANDLE", "local_ref requires a name")
         elif kind != "number":
             raise RpcError("UNSUPPORTED_EXPRESSION", f"Unsupported typed expression {kind!r}")

@@ -753,6 +753,87 @@ class Workspace:
         return row
 
     @staticmethod
+    def _resolve_constructor_handles(expression: Any, handles: dict[str, str]) -> Any:
+        """Replace transaction-local name handles with candidate symbol IDs."""
+        if not isinstance(expression, dict):
+            raise WorkspaceError("INVALID_EXPRESSION", "Expression must be a typed object")
+        kind = expression.get("kind")
+        if kind == "local_ref":
+            if set(expression) != {"kind", "name"} or not isinstance(expression["name"], str):
+                raise WorkspaceError("INVALID_TRANSACTION_HANDLE", "local_ref requires only a string name")
+            key = expression["name"].casefold()
+            if key not in handles:
+                raise WorkspaceError("UNKNOWN_TRANSACTION_HANDLE",
+                                     f"{expression['name']} is not a parameter or earlier local in this constructor")
+            return {"kind": "symbol_ref", "symbol_id": handles[key]}
+        if kind == "unary":
+            return {**expression, "operand": Workspace._resolve_constructor_handles(
+                expression.get("operand"), handles)}
+        if kind == "binary":
+            return {**expression,
+                    "left": Workspace._resolve_constructor_handles(expression.get("left"), handles),
+                    "right": Workspace._resolve_constructor_handles(expression.get("right"), handles)}
+        if kind == "call":
+            args = expression.get("arguments")
+            if not isinstance(args, list):
+                raise WorkspaceError("INVALID_EXPRESSION", "call arguments must be an array")
+            return {**expression, "arguments": [Workspace._resolve_constructor_handles(x, handles)
+                                                   for x in args]}
+        # number and symbol_ref are validated by the shared expression parser.
+        return expression
+
+    def _populate_constructed_function(self, doc: Document, operation: dict[str, Any]) -> None:
+        """Build locals and result within the private candidate transaction."""
+        name = self._numeric_identifier(operation.get("name"), "Function name")
+        function = next((f for f in doc.functions if f["kind"] == "function"
+                         and f["name"].casefold() == name.casefold()
+                         and doc.symbols.get(f["symbol_id"]) is not None
+                         and doc.symbols[f["symbol_id"]].scope_id == "module"), None)
+        if function is None:
+            raise WorkspaceError("FUNCTION_CREATION_FAILED", "Created function was not indexed")
+        function_id = function["symbol_id"]
+        row = self._function_row(doc, function_id)
+        handles = {doc.symbols[sid].name.casefold(): sid for sid in row["parameters"]}
+        result_statement = next((s for s in doc.statements.values()
+                                 if s["containing_function_id"] == function_id
+                                 and s["target_symbol_id"] == function_id), None)
+        if result_statement is None:
+            raise WorkspaceError("STATEMENT_CREATION_FAILED", "Function result assignment was not indexed")
+        result_statement_id = result_statement["statement_id"]
+
+        locals_spec = operation.get("locals", [])
+        if not isinstance(locals_spec, list) or len(locals_spec) > 16:
+            raise WorkspaceError("INVALID_LOCALS", "locals must be an array of at most 16 declarations")
+        for local in locals_spec:
+            if not isinstance(local, dict) or set(local) != {"name", "expression"}:
+                raise WorkspaceError("INVALID_LOCALS", "Each local requires exactly name and expression")
+            local_name = self._numeric_identifier(local["name"], "Local name")
+            key = local_name.casefold()
+            if key in handles:
+                raise WorkspaceError("NAME_COLLISION", f"{local_name} already exists in this function")
+            resolved = self._resolve_constructor_handles(local["expression"], handles)
+            generated, expected_refs, target_token = self._insert_assignment_tokens(
+                doc, function_id, {"kind": "local", "name": local_name},
+                resolved, result_statement_id)
+            self._index(doc)
+            self._verify_expression_bindings(doc, generated, expected_refs)
+            target_id = doc.token_symbol.get(target_token.uid)
+            target_symbol = doc.symbols.get(target_id) if target_id else None
+            if (target_symbol is None or target_symbol.kind != "variable"
+                    or target_symbol.scope_id != row["scope_id"]):
+                raise WorkspaceError("BINDING_MISMATCH", "Constructed local did not bind in the function scope")
+            handles[key] = target_id
+            result_statement = doc.statements.get(result_statement_id)
+            if result_statement is None:
+                raise WorkspaceError("STATEMENT_CREATION_FAILED", "Result statement identity changed during construction")
+
+        if "expression" in operation:
+            resolved = self._resolve_constructor_handles(operation["expression"], handles)
+            generated, expected_refs = self._edit_expression_tokens(doc, result_statement_id, resolved)
+            self._index(doc)
+            self._verify_expression_bindings(doc, generated, expected_refs)
+
+    @staticmethod
     def _expression_context(doc: Document) -> tuple[dict[str, int], dict[str, Any]]:
         params = {row["symbol_id"]: len(row["parameters"])
                   for row in doc.functions if row["kind"] == "function"}
@@ -892,6 +973,8 @@ class Workspace:
                 self._move_function(candidate, sid, operation.get("before_symbol_id"))
             elif kind == "create_numeric_function":
                 self._create_function_tokens(candidate, operation.get("name"), operation.get("parameters", []))
+                self._index(candidate)
+                self._populate_constructed_function(candidate, operation)
             elif kind == "edit_assignment_expression":
                 statement_id = operation.get("statement_id")
                 if statement_id not in candidate.statements:
@@ -1010,10 +1093,16 @@ class Workspace:
                                   "before_symbol_id": before_symbol_id})
 
     def create_numeric_function(self, document_id: str, name: str, parameters: list[str],
-                                expected_revision: int) -> dict[str, Any]:
+                                expected_revision: int, expression: Any = None,
+                                locals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        operation = {"operation": "create_numeric_function", "name": name,
+                     "parameters": parameters}
+        if expression is not None:
+            operation["expression"] = expression
+        if locals is not None:
+            operation["locals"] = locals
         return self._transaction(document_id, expected_revision,
-                                 {"operation": "create_numeric_function", "name": name,
-                                  "parameters": parameters})
+                                 operation)
 
     def edit_assignment_expression(self, document_id: str, statement_id: str,
                                    expression: Any, expected_revision: int) -> dict[str, Any]:
@@ -1155,7 +1244,9 @@ class Workspace:
             "preview_transaction": lambda: self.preview_transaction(params["document_id"], params["expected_revision"], params["operations"], params.get("include_diff", False)),
             "renumber_line": lambda: self.renumber_line(params["document_id"], params["old_line"], params["new_line"], params["expected_revision"]),
             "move_function": lambda: self.move_function(params["document_id"], params["symbol_id"], params.get("before_symbol_id"), params["expected_revision"]),
-            "create_numeric_function": lambda: self.create_numeric_function(params["document_id"], params["name"], params.get("parameters", []), params["expected_revision"]),
+            "create_numeric_function": lambda: self.create_numeric_function(
+                params["document_id"], params["name"], params.get("parameters", []),
+                params["expected_revision"], params.get("expression"), params.get("locals")),
             "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "render_document": lambda: self.render_document(params["document_id"]),

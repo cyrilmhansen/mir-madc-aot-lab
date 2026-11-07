@@ -86,8 +86,8 @@ TEXT_TOOLS = [
 ]
 
 EXPRESSION_SCHEMA = {"type": "object", "properties": {
-    "kind": {"type": "string", "enum": ["number", "symbol_ref", "unary", "binary", "call"]},
-    "value": {"type": "number"}, "symbol_id": STR, "function_id": STR,
+    "kind": {"type": "string", "enum": ["number", "symbol_ref", "local_ref", "unary", "binary", "call"]},
+    "value": {"type": "number"}, "symbol_id": STR, "function_id": STR, "name": STR,
     "operator": {"type": "string", "enum": ["+", "-", "*", "/"]},
     "left": {"type": "object"}, "right": {"type": "object"},
     "operand": {"type": "object"},
@@ -96,17 +96,19 @@ EXPRESSION_SCHEMA = {"type": "object", "properties": {
     "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."}
 
 CONSTRUCTION_SEMANTIC_TOOLS = [
-    schema("workspace_create_empty", "Create a new empty in-memory BASIC document; accepts no source text.",
-           {}, []),
     schema("workspace_structure", "Discover functions, line labels, revision, and diagnostics without returning source text.",
            {"offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
     schema("workspace_symbols", "Filter and discover semantic symbols and their opaque IDs.",
            {"kind": STR, "exact_name": STR, "unique": BOOL, "scope_id": STR,
             "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
-    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION initialized to return zero. Returns function, parameter, and assignment IDs.",
+    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION and body in one revision. In expression/local initializer trees use local_ref(name) for parameters or earlier locals declared by this request. Returns stable function, parameter, local, and statement IDs.",
            {"expected_revision": INT, "name": STR,
-            "parameters": {"type": "array", "items": STR, "maxItems": 6}},
-           ["expected_revision", "name", "parameters"]),
+            "parameters": {"type": "array", "items": STR, "maxItems": 6},
+            "expression": EXPRESSION_SCHEMA,
+            "locals": {"type": "array", "maxItems": 16, "items": {"type": "object",
+                "properties": {"name": STR, "expression": EXPRESSION_SCHEMA},
+                "required": ["name", "expression"], "additionalProperties": False}}},
+           ["expected_revision", "name", "parameters", "expression"]),
     schema("workspace_statements", "Discover bounded assignment statements in a discovered function, including stable IDs and referenced symbols.",
            {"function_id": STR, "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["function_id"]),
     schema("workspace_edit_expression", "Replace only a discovered assignment's typed right-hand expression; commits one revision atomically.",
@@ -143,6 +145,7 @@ class ChatEndpoint:
         self.timeout, self.seed, self.think = timeout, seed, think
         self.last_request_bytes = 0
         self.last_response_bytes = 0
+        self.last_elapsed_ms = 0.0
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> tuple[dict[str, Any], float]:
         payload: dict[str, Any] = {"model": self.model, "messages": messages,
@@ -154,6 +157,7 @@ class ChatEndpoint:
             payload["think"] = self.think
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.last_request_bytes = len(body)
+        self.last_response_bytes = 0
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
@@ -172,7 +176,9 @@ class ChatEndpoint:
             raise RuntimeError(f"completion endpoint HTTP {exc.code}: {detail}") from None
         except URLError as exc:
             raise RuntimeError(f"completion endpoint unavailable: {exc.reason}") from None
-        return parsed, (time.perf_counter() - started) * 1000
+        finally:
+            self.last_elapsed_ms = (time.perf_counter() - started) * 1000
+        return parsed, self.last_elapsed_ms
 
 
 class ToolRunner:
@@ -428,7 +434,7 @@ def source_text_payload_bytes(tool_calls: list[dict[str, Any]]) -> int:
 SYSTEM_SEMANTIC = """Use only the exact structured tools listed. The document is loaded in a private in-memory workspace. There is no workspace_rename_symbol or text-replacement tool. For edits call workspace_preview/workspace_commit with operations such as {\"operation\":\"rename_symbol\",\"symbol_id\":\"...\",\"new_name\":\"...\"}; renumber_line uses old_line/new_line; move_function uses symbol_id/before_symbol_id. Discover symbols or labels before using IDs. For a unique match, workspace_symbols with exact_name and unique=true returns opaque ID, scope, type, reference count, revision and diagnostic counts together. Call workspace_references only when details are useful. Preview is optional but useful for multi-operation changes; commit revalidates revision. For collisions, ambiguity, incomplete source or stale revisions, refuse or inspect current state; never guess. Do not return a full source listing unless needed. Finish with whether you committed or refused."""
 SYSTEM_TEXT = """You edit BASIC source through conventional in-memory text tools. Read/search source as needed, then use exact-context patches with the current buffer version. A patch must match exactly once; inspect the diff and diagnostics after editing. If a patch is stale or ambiguous, read/search again and repair carefully. For collisions, ambiguity, incomplete source, or stale revisions, refuse or inspect the current state; never guess. Do not use shell or filesystem access. Finish with a short result and whether you edited or refused."""
 
-SYSTEM_CONSTRUCTION_SEMANTIC = """You author numeric BASIC programs using only the structured semantic tools. The workspace starts empty; create functions and parameters by identity. Functions initially return zero, so discover their assignment statement and replace its typed expression. Use only returned symbol and statement IDs; never invent IDs or submit BASIC source strings. Expression nodes are number, symbol_ref, unary, binary, and call. Each mutation commits one revision and requires its current expected_revision. Discover a function's statements before editing them. Execute the current revision with workspace_execute_function when requested. If a request refers to an unavailable identity or a stale revision, inspect the workspace and recover safely; refuse when the requested relationship cannot be established. Do not render source during construction."""
+SYSTEM_CONSTRUCTION_SEMANTIC = """You author numeric BASIC programs using only the structured semantic tools. The host has already opened an empty workspace at revision 1. Create a complete function in one workspace_create_function call, including its typed result expression. Use local_ref(name) to refer to parameters and optional locals created by that same request; locals are declared in order and may refer only to parameters or earlier locals. Calls to already existing functions require their discovered IDs. Use only returned persistent symbol and statement IDs for later edits; never invent IDs or submit BASIC source strings. Other expression nodes are number, discovered symbol_ref, unary, binary, and call. Each mutation commits one revision and requires its current expected_revision. Execute the current revision with workspace_execute_function when requested. If a request refers to an unavailable identity or a stale revision, inspect the workspace and recover safely; refuse when the requested relationship cannot be established. Do not render source during construction."""
 SYSTEM_CONSTRUCTION_TEXT = """You author a numeric BASIC program in an in-memory text buffer. Use supported FUNCTION declarations with numeric parameters and assignments to the function result. Use write_source for its initial source, then exact-context patches for changes. Run diagnostics and execute the named function with execute_program when requested; it compiles this buffer through the same numeric BASIC/MIR subset as the semantic arm. A stale or ambiguous patch must not be forced; refresh the current buffer/version and retry carefully. Do not use shell or filesystem access."""
 
 
@@ -441,6 +447,9 @@ def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
                 construction: bool = False) -> dict[str, Any]:
     tools = (CONSTRUCTION_SEMANTIC_TOOLS if arm == "semantic" else CONSTRUCTION_TEXT_TOOLS) if construction else (SEMANTIC_TOOLS if arm == "semantic" else TEXT_TOOLS)
     visible_task = descriptions(task)
+    if construction and arm == "semantic":
+        visible_task = ("The host has opened an empty virtual document at revision 1. "
+                        "Use it directly; it is already ready for construction.\n" + visible_task)
     messages: list[dict[str, Any]] = copy.deepcopy(initial_messages) if initial_messages else [
         {"role": "system", "content": (SYSTEM_CONSTRUCTION_SEMANTIC if arm == "semantic" else SYSTEM_CONSTRUCTION_TEXT) if construction else (SYSTEM_SEMANTIC if arm == "semantic" else SYSTEM_TEXT)},
         {"role": "user", "content": f"Task {task['id']}: {visible_task}"},
@@ -454,6 +463,7 @@ def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
     provider_usage: dict[str, int] = {}
     provider_usage_turns = 0
     model_turns = 0
+    model_request_attempts = 0
     schema_bytes = len(json.dumps(tools, separators=(",", ":")).encode())
     max_request_context_bytes = 0
     final_text = ""
@@ -465,7 +475,20 @@ def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
         if request_context_bytes > max_context_bytes:
             terminal = "context_byte_limit"
             break
-        response, elapsed = endpoint.complete(messages, tools)
+        model_request_attempts += 1
+        try:
+            response, elapsed = endpoint.complete(messages, tools)
+        except Exception as exc:
+            elapsed = getattr(endpoint, "last_elapsed_ms", 0.0)
+            model_wait_ms += elapsed
+            trace.append({"turn": model_turns + 1,
+                "request_bytes": getattr(endpoint, "last_request_bytes", 0),
+                "response_wire_bytes": getattr(endpoint, "last_response_bytes", 0),
+                "elapsed_ms": round(elapsed, 3), "finish_reason": None,
+                "usage": None, "tool_calls": [],
+                "endpoint_error": f"{type(exc).__name__}: {str(exc)[:500]}"})
+            terminal = "endpoint_error"
+            break
         model_wait_ms += elapsed
         model_turns += 1
         choice = response.get("choices", [{}])[0]
@@ -585,6 +608,7 @@ def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
         "construction_execution": construction_execution, "final_text": final_text,
         "final_revision": runner.client.revision if arm == "semantic" and runner.client else runner.version,
         "model_turns": model_turns, "model_tool_calls": runner.tool_calls,
+        "model_request_attempts": model_request_attempts,
         "transaction_previews": sum(1 for turn in trace for c in turn.get("tool_calls", []) if c["name"] == "workspace_preview"),
         "transaction_commit_attempts": sum(1 for turn in trace for c in turn.get("tool_calls", []) if c["name"] == "workspace_commit"),
         "patch_attempts": runner.patch_attempts,
@@ -592,7 +616,7 @@ def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
         "failed_tool_calls": runner.failed_calls,
         "repair_cycles": runner.repair_cycles, "provider_usage": provider_usage or None,
         "provider_usage_records": provider_usage_turns,
-        "provider_usage_complete": provider_usage_turns == model_turns,
+        "provider_usage_complete": provider_usage_turns == model_turns and terminal != "endpoint_error",
         "schema_bytes": schema_bytes, "tool_response_bytes": sum(
             c.get("response_bytes", 0) for t in trace for c in t.get("tool_calls", [])),
         "tool_execution_ms": round(runner.tool_time_ms, 3),

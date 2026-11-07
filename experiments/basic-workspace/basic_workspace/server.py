@@ -44,6 +44,10 @@ def _check_discovered_operations(workspace: Workspace, document_id: str,
                 raise WorkspaceError("STATEMENT_NOT_DISCOVERED", "Discover the insertion point first")
         if "expression" in operation:
             _check_discovered_expression(workspace, document_id, operation["expression"])
+        if kind == "create_numeric_function":
+            for local in operation.get("locals", []):
+                if isinstance(local, dict) and "expression" in local:
+                    _check_discovered_expression(workspace, document_id, local["expression"])
 
 
 def serve() -> None:
@@ -69,6 +73,14 @@ def serve() -> None:
                 document_id = params["document_id"]
                 if not workspace.symbol_was_discovered(document_id, params["function_id"]):
                     raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover the function before querying statements")
+                result = workspace.protocol_call(method, params)
+            elif method == "create_numeric_function":
+                document_id = params["document_id"]
+                if "expression" in params:
+                    _check_discovered_expression(workspace, document_id, params["expression"])
+                for local in params.get("locals", []):
+                    if isinstance(local, dict) and "expression" in local:
+                        _check_discovered_expression(workspace, document_id, local["expression"])
                 result = workspace.protocol_call(method, params)
             elif method in ("edit_assignment_expression", "insert_numeric_assignment"):
                 document_id = params["document_id"]
