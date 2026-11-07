@@ -170,6 +170,7 @@ class WorkspaceError(Exception):
 class Workspace:
     def __init__(self) -> None:
         self.documents: dict[str, Document] = {}
+        self._discovered_symbols: dict[str, set[str]] = {}
 
     def create_workspace(self) -> dict[str, Any]:
         return {"workspace_id": "workspace-1", "documents": 0}
@@ -178,6 +179,7 @@ class Workspace:
         did = opaque("doc")
         doc = Document(did, uri or f"memory://{did}/program.bas", 1, lex(text))
         self.documents[did] = doc
+        self._discovered_symbols[did] = set()
         self._index(doc)
         return {"document_id": did, "uri": doc.uri, "revision": doc.revision,
                 "diagnostics": [self._diag_json(d) for d in doc.diagnostics]}
@@ -196,6 +198,7 @@ class Workspace:
         new = Document(old.id, old.uri, old.revision + 1, lex(text))
         self._index(new)
         self.documents[document_id] = new
+        self._discovered_symbols[document_id] = set()
         return {"document_id": new.id, "revision": new.revision,
                 "diagnostics": [self._diag_json(d) for d in new.diagnostics]}
 
@@ -499,6 +502,10 @@ class Workspace:
 
     def get_document_structure(self, document_id: str) -> dict[str, Any]:
         d = self._doc(document_id)
+        self._discovered_symbols.setdefault(document_id, set()).update(
+            f["symbol_id"] for f in d.functions if f.get("symbol_id"))
+        self._discovered_symbols[document_id].update(
+            d.token_symbol[uid] for uid in d.labels.values() if uid in d.token_symbol)
         return {"document_id": d.id, "revision": d.revision, "physical_lines": d.lines,
                 "functions": [{k: v for k, v in f.items()} for f in d.functions],
                 "line_labels": [{"line": n, "token_id": uid,
@@ -523,7 +530,9 @@ class Workspace:
 
     def list_symbols(self, document_id: str) -> list[dict[str, Any]]:
         d = self._doc(document_id)
-        return [self._symbol_json(s) for s in d.symbols.values()]
+        rows = [self._symbol_json(s) for s in d.symbols.values()]
+        self._discovered_symbols.setdefault(document_id, set()).update(x["symbol_id"] for x in rows)
+        return rows
 
     def list_symbols_page(self, document_id: str, offset: int = 0, limit: int = 50,
                           kind: str | None = None, name_query: str | None = None,
@@ -536,6 +545,11 @@ class Workspace:
                 and (name_query is None or name_query.casefold() in s.name.casefold())
                 and (exact_name is None or exact_name.casefold() == s.name.casefold())
                 and (scope_id is None or s.scope_id == scope_id)]
+        discovered = self._discovered_symbols.setdefault(document_id, set())
+        if unique and len(rows) == 1:
+            discovered.add(rows[0]["symbol_id"])
+        else:
+            discovered.update(x["symbol_id"] for x in rows[offset:offset + limit])
         result = {"items": rows[offset:offset + limit], "total": len(rows),
                   "offset": offset, "limit": limit, "truncated": offset + limit < len(rows)}
         if unique:
@@ -551,6 +565,9 @@ class Workspace:
             else:
                 result["items"] = rows[:min(limit, 5)]
         return result
+
+    def symbol_was_discovered(self, document_id: str, symbol_id: str) -> bool:
+        return symbol_id in self._discovered_symbols.get(document_id, set())
 
     @staticmethod
     def _symbol_json(s: Symbol) -> dict[str, Any]:

@@ -149,6 +149,23 @@ The baseline interpreter and JIT were run on
 comparison. The core tests themselves build programs from strings and do not
 write BASIC source files.
 
+## Direct in-memory MIR execution experiment
+
+The numeric `FUNCTION` subset can be lowered from the canonical token model
+without rendering or reparsing BASIC. Build the native bridge and run the
+semantic edit/re-execution example with:
+
+```sh
+experiments/basic-workspace/scripts/build-mir-worker.sh
+PYTHONPATH=experiments/basic-workspace python3 experiments/basic-workspace/mir_execution_demo.py
+```
+
+The JSON-RPC `execute_function` operation requires a discovered function ID,
+the current document revision, numeric arguments, and `engine: "interp"` or
+`"jit"`. Unsupported constructs return explicit diagnostics. Scope, API,
+differential results and limitations are documented in
+`results/mir-execution/REPORT.md`.
+
 ## JSON-RPC and optional LSP
 
 The native JSON-RPC service is the primary interface. The optional facade can

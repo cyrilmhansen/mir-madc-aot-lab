@@ -200,6 +200,13 @@ class WorkspaceClient:
         limit = self.max_render_chars if max_chars is None else max_chars
         return {"text": text[:limit], "total_chars": len(text), "truncated": len(text) > limit}
 
+    def workspace_execute_function(self, expected_revision: int, function_id: str,
+                                   arguments: list[Any], engine: str = "interp") -> dict[str, Any]:
+        self._require_symbol(function_id)
+        return self._rpc("execute_function", self._doc_params(
+            expected_revision=expected_revision, function_id=function_id,
+            arguments=arguments, engine=engine))
+
     def _doc_params(self, **kwargs: Any) -> dict[str, Any]:
         if not self.document_id:
             raise RpcError("NO_DOCUMENT", "Open a document before querying it")
@@ -233,6 +240,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "workspace_commit": {"required": ["expected_revision", "operations"], "optional": []},
     "workspace_diagnostics": {"required": [], "optional": []},
     "workspace_render": {"required": [], "optional": ["max_chars"]},
+    "workspace_execute_function": {"required": ["expected_revision", "function_id", "arguments"],
+                                   "optional": ["engine"]},
 }
 
 
@@ -278,6 +287,9 @@ class AgentToolAdapter:
         if name == "workspace_references":
             if args.get("symbol_id") not in self.known_symbols:
                 raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover the symbol before requesting its references")
+        if name == "workspace_execute_function":
+            if args.get("function_id") not in self.known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover the function before executing it")
         result = getattr(self.client, name)(**args)
         if name == "workspace_open":
             self.observed_revision = result["revision"]
