@@ -1,0 +1,8 @@
+FUNCTION ITEM$(I)
+  DIM NAMES$(1)
+  NAMES$(0) = "Alice"
+  NAMES$(1) = "Chloé"
+  ITEM$ = NAMES$(I)
+END FUNCTION
+PRINT ITEM$(0)
+PRINT ITEM$(1)

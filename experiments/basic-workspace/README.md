@@ -167,15 +167,31 @@ the current document revision, numeric arguments, and `engine: "interp"` or
 differential results and limitations are documented in
 `results/mir-execution/REPORT.md`.
 
-The numeric projection also supports function-local, one-dimensional numeric
+The projection also supports function-local, one-dimensional numeric
 arrays declared with `DIM NAME(n)`, where `n` is an inclusive upper bound
 (0..255). Typed construction can declare arrays, write indexed elements and
 read them with `array_element`; each invocation initializes cells to zero and
-invalid dynamic access returns `ARRAY_BOUNDS`. This does not add strings,
-loops, conditions, shared state, or a general ECS. Run
+invalid dynamic access returns `ARRAY_BOUNDS`. BWM3 adds comparisons,
+conditionals and bounded FOR loops; BWM4 adds UTF-8 string literals, locals,
+returns and fixed string arrays. String memory belongs to one worker call and
+returned values are copied into JSON before that worker is released. Strings
+are not compared or concatenated, passed as arguments, or shared between
+functions. This does not add module-level state or a general ECS. Run
 `python3 numeric_array_demo.py` from this directory; historical comparison,
 performance data and subset limits are in
 `results/numeric-arrays/REPORT.md`.
+
+Cycle 9's complete in-memory ID-to-name construction and semantic edit is
+reproducible with:
+
+```sh
+experiments/basic-workspace/scripts/build-mir-worker.sh
+python3 experiments/basic-workspace/scripts/demo-string-lookup.py
+python3 -m unittest discover -s experiments/basic-workspace/tests -p 'test_*.py'
+```
+
+See `results/string-lookup/REPORT.md` for ownership rules, historical compiler
+differences, sanitizer results and string lookup measurements.
 
 ## JSON-RPC and optional LSP
 

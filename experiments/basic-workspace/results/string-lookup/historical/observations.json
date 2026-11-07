@@ -1,0 +1,62 @@
+{
+  "compiler": "experiments/basic-aot/results/aot/standalone/diagnostics/pristine-src/build/basic/basicc",
+  "commands": [
+    "basicc string-arrays.bas",
+    "basicc -j string-arrays.bas",
+    "basicc function-string-no-if.bas",
+    "basicc -j function-string-no-if.bas",
+    "basicc function-if-lookup.bas",
+    "basicc -j function-if-lookup.bas"
+  ],
+  "observations": [
+    {
+      "fixture": "string-arrays.bas",
+      "engine": "interpreter",
+      "exit_status": 0,
+      "stdout": "Alice\nChloé\n",
+      "stderr": "",
+      "classification": "pass"
+    },
+    {
+      "fixture": "string-arrays.bas",
+      "engine": "jit",
+      "exit_status": 0,
+      "stdout": "Alice\nChloé\n",
+      "stderr": "",
+      "classification": "pass"
+    },
+    {
+      "fixture": "function-string-no-if.bas",
+      "engine": "interpreter",
+      "exit_status": 0,
+      "stdout": "@n*$LV\n\n",
+      "stderr": "",
+      "classification": "incorrect-corrupted-string-result"
+    },
+    {
+      "fixture": "function-string-no-if.bas",
+      "engine": "jit",
+      "exit_status": 139,
+      "stdout": "",
+      "stderr": "",
+      "classification": "segfault"
+    },
+    {
+      "fixture": "function-if-lookup.bas",
+      "engine": "interpreter",
+      "exit_status": 139,
+      "stdout": "",
+      "stderr": "",
+      "classification": "known-function-if-defect-segfault"
+    },
+    {
+      "fixture": "function-if-lookup.bas",
+      "engine": "jit",
+      "exit_status": 139,
+      "stdout": "",
+      "stderr": "",
+      "classification": "known-function-if-defect-segfault"
+    }
+  ],
+  "note": "Only top-level string array assignment/read agrees across historical interpreter and JIT. Function-local string return is not a valid oracle: even without IF the interpreter returns corrupted bytes and the JIT crashes."
+}

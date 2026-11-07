@@ -47,6 +47,7 @@ class ArrayProjection:
     name: str
     lower_bound: int
     upper_bound: int
+    element_type: str = "numeric"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class FunctionProjection:
     local_ids: tuple[str, ...]
     arrays: tuple[ArrayProjection, ...]
     statements: tuple[ProjectedStatement, ...]
+    return_type: str = "numeric"
+    local_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,20 @@ class CompilableProjection:
 def _fail(code: str, message: str, token: Token | None = None) -> WorkspaceError:
     details = None if token is None else {"line": token.line, "column": token.column}
     return WorkspaceError(code, message, details)
+
+
+def _expr_type(expr: Expr, array_types: dict[str, str]) -> str:
+    if expr.kind in ("string", "variable_string", "result_string", "array_element_string"):
+        return "string"
+    if expr.kind == "array_element":
+        return array_types.get(str(expr.value), "numeric")
+    if expr.kind in ("number", "variable", "result", "unary_minus", "binary", "compare", "call"):
+        if expr.kind == "unary_minus" and _expr_type(expr.children[0], array_types) != "numeric":
+            raise WorkspaceError("TYPE_MISMATCH", "Unary arithmetic requires a numeric operand")
+        if expr.kind in ("binary", "compare") and any(_expr_type(c, array_types) != "numeric" for c in expr.children):
+            raise WorkspaceError("TYPE_MISMATCH", "Arithmetic and comparisons require numeric operands")
+        return "numeric"
+    raise WorkspaceError("UNSUPPORTED_TYPE", f"Unsupported expression type for {expr.kind}")
 
 
 def _statements(doc: Document) -> list[tuple[Token, ...]]:
@@ -137,6 +154,15 @@ class _ExpressionParser:
         token = self.take()
         if token.kind == "NUMBER":
             left = Expr("number", float(token.text))
+        elif token.kind == "STRING":
+            raw = token.text[1:-1].replace('""', '"')
+            try:
+                encoded = raw.encode("utf-8", "strict")
+            except UnicodeError as exc:
+                raise _fail("INVALID_UTF8", "String literal is not valid UTF-8", token) from exc
+            if b"\0" in encoded or b"\n" in encoded or b"\r" in encoded or len(encoded) > 4096:
+                raise _fail("STRING_LIMIT", "String literals cannot contain NUL or line breaks and are limited to 4096 bytes", token)
+            left = Expr("string", raw)
         elif token.kind == "OP" and token.text in ("+", "-"):
             operand = self.parse(3)
             left = operand if token.text == "+" else Expr("unary_minus", children=(operand,))
@@ -157,7 +183,8 @@ class _ExpressionParser:
                     close = self.take()
                     if close.text != ")":
                         raise _fail("UNSUPPORTED_ARRAY", "Only one-dimensional array reads are supported", close)
-                    left = Expr("array_element", symbol.id, (index,))
+                    left = Expr("array_element_string" if symbol.name.endswith("$") else "array_element",
+                                symbol.id, (index,))
                 else:
                     if symbol.kind != "function" or symbol.name.endswith("$"):
                         raise _fail("UNSUPPORTED_CALL", f"{token.text} is not a resolved numeric FUNCTION", token)
@@ -174,11 +201,9 @@ class _ExpressionParser:
                         raise _fail("INVALID_EXPRESSION", "Expected closing parenthesis in function call", close)
                     left = Expr("call", symbol.id, tuple(args))
             elif self.current is not None and symbol.id == self.current.symbol_id:
-                left = Expr("result")
+                left = Expr("result_string" if self.current.return_type == "string" else "result")
             elif symbol.kind in ("parameter", "variable") and self.current is not None and symbol.scope_id == self.current.scope_id:
-                if symbol.name.endswith("$"):
-                    raise _fail("UNSUPPORTED_TYPE", f"String value {token.text} is outside the numeric subset", token)
-                left = Expr("variable", symbol.id)
+                left = Expr("variable_string" if symbol.name.endswith("$") else "variable", symbol.id)
             else:
                 raise _fail("UNSUPPORTED_REFERENCE", f"Reference to {token.text} is not a local numeric value", token)
         else:
@@ -239,8 +264,8 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                 row = by_symbol.get(sid or "")
                 if symbol is None or row is None or symbol.kind != "function":
                     raise _fail("UNRESOLVED_FUNCTION", f"Function {name_token.text} lacks a semantic definition", name_token)
-                if symbol.name.endswith("$"):
-                    raise _fail("UNSUPPORTED_TYPE", f"String function {symbol.name} is outside the numeric subset", name_token)
+                if symbol.name.endswith(("%", "!", "#")):
+                    raise _fail("UNSUPPORTED_TYPE", f"Numeric types other than double are outside the Workspace subset", name_token)
                 if sid in seen:
                     raise _fail("DUPLICATE_FUNCTION", f"Duplicate function {symbol.name}", name_token)
                 seen.add(sid)
@@ -254,8 +279,8 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                                if t.kind == "IDENT" and t.uid in doc.token_symbol)
                 if len(params) != len(row["parameters"]):
                     raise _fail("INVALID_FUNCTION", f"Parameter bindings for {symbol.name} are incomplete", name_token)
-                if any(doc.symbols[p].name.endswith("$") for p in params):
-                    raise _fail("UNSUPPORTED_TYPE", f"String parameter in {symbol.name} is outside the numeric subset", name_token)
+                if any(doc.symbols[p].name.endswith(("$", "%", "!", "#")) for p in params):
+                    raise _fail("UNSUPPORTED_TYPE", f"Typed parameters in {symbol.name} are not supported", name_token)
                 active_id, active_body = sid, []
             elif word == "END" and len(statement) > 1 and statement[1].text.upper() in ("FUNCTION", "SUB"):
                 raise _fail("UNMATCHED_END", "END FUNCTION has no open function", first)
@@ -271,21 +296,27 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
         function = doc.symbols[active_id]
         raise WorkspaceError("NOT_COMPILABLE", f"Function {function.name} is incomplete")
     if not function_rows:
-        raise WorkspaceError("NOT_COMPILABLE", "No numeric FUNCTION definitions were found")
+        raise WorkspaceError("NOT_COMPILABLE", "No supported FUNCTION definitions were found")
 
     compiled: list[FunctionProjection] = []
     for sid, parameter_ids, body in function_rows:
         symbol = doc.symbols[sid]
         scope_id = by_symbol[sid]["scope_id"]
         array_rows = tuple(ArrayProjection(row.id, row.name, row.array_lower or 0,
-                                           row.array_upper if row.array_upper is not None else -1)
+                                           row.array_upper if row.array_upper is not None else -1,
+                                           "string" if row.name.endswith("$") else "numeric")
                            for row in doc.symbols.values()
                            if row.kind == "array" and row.scope_id == scope_id)
+        if any(row.name.endswith(("%", "!", "#")) for row in array_rows):
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Only double and $ string arrays are supported")
         array_ids = {row.symbol_id for row in array_rows}
-        shell = FunctionProjection(sid, symbol.name, scope_id, parameter_ids, (), array_rows, ())
+        return_type = "string" if symbol.name.endswith("$") else "numeric"
+        shell = FunctionProjection(sid, symbol.name, scope_id, parameter_ids, (), array_rows, (), return_type)
         local_ids: set[str] = set()
         for row in doc.symbols.values():
             if row.kind == "variable" and row.scope_id == scope_id:
+                if row.name.endswith(("%", "!", "#")):
+                    raise WorkspaceError("UNSUPPORTED_TYPE", f"Typed local {row.name} is outside the Workspace subset")
                 local_ids.add(row.id)
         declared_arrays: set[str] = set()
 
@@ -333,9 +364,11 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                     raise _fail("CROSS_SCOPE_REFERENCE", "Array target is outside the current function", target_token)
             elif not is_result and (target.kind not in ("parameter", "variable") or target.scope_id != scope_id):
                 raise _fail("UNSUPPORTED_ASSIGNMENT", f"Assignment to {target.name} is outside the current function scope", target_token)
-            if target.name.endswith("$"):
-                raise _fail("UNSUPPORTED_TYPE", f"String assignment {target.name} is outside the numeric subset", target_token)
             expression = _ExpressionParser(doc, tokens[equals_index + 1:], shell).parse_all()
+            expected_type = ("string" if (target.name.endswith("$") if not target_is_array
+                                           else target.name.endswith("$")) else "numeric")
+            if _expr_type(expression, {a.symbol_id: a.element_type for a in array_rows}) != expected_type:
+                raise _fail("TYPE_MISMATCH", f"Assignment to {target.name} requires a {expected_type} expression", target_token)
             return Assignment(target.id, is_result, expression, target_token.line,
                               target_index, target_is_array)
 
@@ -435,8 +468,10 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
         # Keep slot order tied to declaration token order, not dictionary order.
         token_index = {t.uid: i for i, t in enumerate(doc.tokens)}
         locals_ordered = tuple(sorted(local_ids, key=lambda ident: token_index[doc.symbols[ident].declaration_token]))
+        local_types = tuple("string" if doc.symbols[x].name.endswith("$") else "numeric"
+                            for x in locals_ordered)
         compiled.append(FunctionProjection(sid, symbol.name, scope_id, parameter_ids,
-                                           locals_ordered, array_rows, statements))
+                                           locals_ordered, array_rows, statements, return_type, local_types))
 
     function_ids = {f.symbol_id for f in compiled}
     call_graph: dict[str, set[str]] = {f.symbol_id: set() for f in compiled}

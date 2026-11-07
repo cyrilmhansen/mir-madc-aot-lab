@@ -266,7 +266,8 @@ class WorkspaceClient:
             params["array_assignments"] = array_assignments
         if body is not None:
             params["body"] = body
-        result = self._rpc("create_numeric_function", self._doc_params(**params))
+        method = "create_string_function" if name.endswith("$") else "create_numeric_function"
+        result = self._rpc(method, self._doc_params(**params))
         self.revision = result["revision"]
         self._remember_created(result)
         return result
@@ -352,7 +353,7 @@ class WorkspaceClient:
             if "expression" in op:
                 self._validate_expression_symbols(op["expression"],
                     allow_local_ref=op.get("operation") == "create_numeric_function")
-            if op.get("operation") == "create_numeric_function":
+            if op.get("operation") in ("create_numeric_function", "create_string_function"):
                 for local in op.get("locals", []):
                     if isinstance(local, dict) and "expression" in local:
                         self._validate_expression_symbols(local["expression"], allow_local_ref=True)
@@ -388,6 +389,9 @@ class WorkspaceClient:
         elif kind == "local_ref" and allow_local_ref:
             if not isinstance(expression.get("name"), str):
                 raise RpcError("INVALID_TRANSACTION_HANDLE", "local_ref requires a name")
+        elif kind == "string":
+            if set(expression) != {"kind", "value"} or not isinstance(expression.get("value"), str):
+                raise RpcError("INVALID_STRING", "string expression requires a string value")
         elif kind != "number":
             raise RpcError("UNSUPPORTED_EXPRESSION", f"Unknown typed expression kind {kind!r}")
 
@@ -581,8 +585,8 @@ class AgentToolAdapter:
                     raise RpcError("UNKNOWN_STATEMENT_ID", "This agent must discover the insertion position")
             if "expression" in operation:
                 self._validate_expression_symbols(operation["expression"],
-                    allow_local_ref=operation.get("operation") == "create_numeric_function")
-            if operation.get("operation") == "create_numeric_function":
+                    allow_local_ref=operation.get("operation") in ("create_numeric_function", "create_string_function"))
+            if operation.get("operation") in ("create_numeric_function", "create_string_function"):
                 for local in operation.get("locals", []):
                     if isinstance(local, dict) and "expression" in local:
                         self._validate_expression_symbols(local["expression"], True)

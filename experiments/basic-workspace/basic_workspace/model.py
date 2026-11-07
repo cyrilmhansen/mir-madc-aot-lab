@@ -750,7 +750,7 @@ class Workspace:
                 "declaration_token_id": s.declaration_token, "line": s.line,
                 "implicit": s.implicit, "reference_count": len(s.references)}
         if s.kind == "array":
-            row.update({"element_type": "numeric", "lower_bound": s.array_lower,
+            row.update({"element_type": "string" if s.name.endswith("$") else "numeric", "lower_bound": s.array_lower,
                         "upper_bound": s.array_upper,
                         "capacity": s.array_upper - s.array_lower + 1})
         return row
@@ -804,11 +804,26 @@ class Workspace:
         return name
 
     @staticmethod
+    def _function_identifier(name: Any) -> str:
+        if (not isinstance(name, str) or not IDENT_RE.fullmatch(name)
+                or name.endswith(("%", "!", "#"))
+                or name.upper() in KEYWORDS or name.upper() in BUILTINS):
+            raise WorkspaceError("INVALID_NAME", "Function name must be a BASIC identifier")
+        return name
+
+    @staticmethod
+    def _local_identifier(name: Any) -> str:
+        if (not isinstance(name, str) or not IDENT_RE.fullmatch(name)
+                or name.endswith(("%", "!", "#")) or name.upper() in KEYWORDS):
+            raise WorkspaceError("INVALID_NAME", "Local name must be a numeric or $ string identifier")
+        return name
+
+    @staticmethod
     def _new_tokens(parts: list[tuple[str, str]]) -> list[Token]:
         return [Token(opaque("t"), kind, text, 1, 0) for kind, text in parts]
 
     def _create_function_tokens(self, doc: Document, name: str, parameters: list[str]) -> None:
-        name = self._numeric_identifier(name, "Function name")
+        name = self._function_identifier(name)
         if name.upper() in BUILTINS:
             raise WorkspaceError("NAME_COLLISION", f"{name} is a BASIC built-in name")
         if not isinstance(parameters, list) or len(parameters) > 6:
@@ -829,7 +844,8 @@ class Workspace:
             parts.append(("IDENT", param))
         parts.extend([("PUNCT", ")"), ("NEWLINE", "\n"),
                       ("WS", "  "), ("IDENT", name), ("WS", " "),
-                      ("OP", "="), ("WS", " "), ("NUMBER", "0"), ("NEWLINE", "\n"),
+                      ("OP", "="), ("WS", " "),
+                      (("STRING", '""') if name.endswith("$") else ("NUMBER", "0")), ("NEWLINE", "\n"),
                       ("IDENT", "END"), ("WS", " "), ("IDENT", "FUNCTION"),
                       ("NEWLINE", "\n")])
         if doc.tokens and doc.tokens[-1].kind != "NEWLINE":
@@ -842,9 +858,6 @@ class Workspace:
         row = next((f for f in doc.functions if f["symbol_id"] == function_id), None)
         if row is None or row["kind"] != "function" or row["end_statement"] is None:
             raise WorkspaceError("FUNCTION_NOT_FOUND", "Expected a complete numeric FUNCTION identity")
-        symbol = doc.symbols.get(function_id)
-        if symbol is None or symbol.name.endswith("$"):
-            raise WorkspaceError("UNSUPPORTED_TYPE", "Only numeric functions can be constructed")
         return row
 
     @staticmethod
@@ -891,7 +904,9 @@ class Workspace:
     def _insert_numeric_array_tokens(self, doc: Document, function_id: str,
                                      name: Any, upper_bound: Any,
                                      before_statement_id: str) -> str:
-        name = self._numeric_identifier(name, "Array name")
+        if (not isinstance(name, str) or not IDENT_RE.fullmatch(name)
+                or name.endswith(("%", "!", "#"))):
+            raise WorkspaceError("INVALID_NAME", "Array name must be a BASIC identifier")
         if isinstance(upper_bound, bool) or not isinstance(upper_bound, int) or not 0 <= upper_bound <= 255:
             raise WorkspaceError("INVALID_ARRAY_BOUND", "Numeric array upper_bound must be an integer from 0 through 255")
         function = self._function_row(doc, function_id)
@@ -913,7 +928,7 @@ class Workspace:
         symbol = doc.symbols.get(symbol_id) if symbol_id else None
         if (symbol is None or symbol.kind != "array" or symbol.scope_id != row["scope_id"]
                 or doc.array_bounds.get(symbol_id) != (0, upper_bound)):
-            raise WorkspaceError("BINDING_MISMATCH", "DIM declaration did not produce the expected local numeric array")
+            raise WorkspaceError("BINDING_MISMATCH", "DIM declaration did not produce the expected local array")
         return symbol_id
 
     def _insert_array_assignment_tokens(self, doc: Document, function_id: str,
@@ -925,7 +940,7 @@ class Workspace:
         function = self._function_row(doc, function_id)
         array = doc.symbols.get(array_id)
         if array is None or array.kind != "array" or array.scope_id != function["scope_id"]:
-            raise WorkspaceError("UNSUPPORTED_TYPE", "Array assignment requires a numeric array in the current function")
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Array assignment requires a local array in the current function")
         before = doc.statements.get(before_statement_id)
         if before is None or before["containing_function_id"] != function_id:
             raise WorkspaceError("CROSS_SCOPE_STATEMENT", "Array assignment must be inserted inside its function")
@@ -963,7 +978,7 @@ class Workspace:
         """Build locals and result within the private candidate transaction."""
         from .typed_expr import expression_tokens, parse_request
 
-        name = self._numeric_identifier(operation.get("name"), "Function name")
+        name = self._function_identifier(operation.get("name"))
         function = next((f for f in doc.functions if f["kind"] == "function"
                          and f["name"].casefold() == name.casefold()
                          and doc.symbols.get(f["symbol_id"]) is not None
@@ -985,8 +1000,11 @@ class Workspace:
         if not isinstance(arrays_spec, list) or len(arrays_spec) > 32:
             raise WorkspaceError("INVALID_ARRAYS", "arrays must be an array of at most 32 declarations")
         for array_spec in arrays_spec:
-            if not isinstance(array_spec, dict) or set(array_spec) != {"name", "upper_bound"}:
-                raise WorkspaceError("INVALID_ARRAYS", "Each array declaration requires name and upper_bound")
+            if not isinstance(array_spec, dict) or set(array_spec) - {"name", "upper_bound", "element_type"} or not {"name", "upper_bound"}.issubset(array_spec):
+                raise WorkspaceError("INVALID_ARRAYS", "Each array declaration requires name and upper_bound, with optional element_type")
+            element_type = array_spec.get("element_type", "string" if str(array_spec["name"]).endswith("$") else "numeric")
+            if element_type not in ("numeric", "string") or (element_type == "string") != str(array_spec["name"]).endswith("$"):
+                raise WorkspaceError("TYPE_MISMATCH", "String arrays require a $ name and numeric arrays must be unsuffixed")
             array_id = self._insert_numeric_array_tokens(doc, function_id,
                 array_spec["name"], array_spec["upper_bound"], result_statement_id)
             array_name = doc.symbols[array_id].name.casefold()
@@ -1001,7 +1019,7 @@ class Workspace:
         for local in locals_spec:
             if not isinstance(local, dict) or set(local) != {"name", "expression"}:
                 raise WorkspaceError("INVALID_LOCALS", "Each local requires exactly name and expression")
-            local_name = self._numeric_identifier(local["name"], "Local name")
+            local_name = self._local_identifier(local["name"])
             key = local_name.casefold()
             if key in handles:
                 raise WorkspaceError("NAME_COLLISION", f"{local_name} already exists in this function")
@@ -1227,7 +1245,7 @@ class Workspace:
         else:
             if set(target) != {"kind", "name"}:
                 raise WorkspaceError("INVALID_ASSIGNMENT_TARGET", "local target requires kind and name")
-            target_name = self._numeric_identifier(target["name"], "Local name")
+            target_name = self._local_identifier(target["name"])
             if target_name.casefold() == owner.name.casefold():
                 raise WorkspaceError("NAME_COLLISION", "A local cannot have the containing function's name")
             if any(s.scope_id == function["scope_id"] and s.normalized == target_name.casefold()
@@ -1336,7 +1354,7 @@ class Workspace:
                     raise WorkspaceError("SYMBOL_NOT_FOUND", "Unknown symbol identity")
                 touched.setdefault(sid, candidate.symbols[sid].name)
                 self._move_function(candidate, sid, operation.get("before_symbol_id"))
-            elif kind == "create_numeric_function":
+            elif kind in ("create_numeric_function", "create_string_function"):
                 self._create_function_tokens(candidate, operation.get("name"), operation.get("parameters", []))
                 self._index(candidate)
                 self._populate_constructed_function(candidate, operation)
@@ -1376,7 +1394,7 @@ class Workspace:
         if errors:
             raise WorkspaceError("VALIDATION_FAILED", "Transaction would introduce invalid semantics", [self._diag_json(x) for x in errors])
         candidate.revision = current.revision + 1
-        if any(operation.get("operation") in ("create_numeric_function",
+        if any(operation.get("operation") in ("create_numeric_function", "create_string_function",
                                                 "edit_assignment_expression",
                                                 "insert_numeric_assignment")
                for operation in operations):
@@ -1477,6 +1495,23 @@ class Workspace:
             operation["body"] = body
         return self._transaction(document_id, expected_revision,
                                  operation)
+
+    def create_string_function(self, document_id: str, name: str, parameters: list[str],
+                               expected_revision: int, expression: Any = None,
+                               locals: list[dict[str, Any]] | None = None,
+                               arrays: list[dict[str, Any]] | None = None,
+                               array_assignments: list[dict[str, Any]] | None = None,
+                               body: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if not isinstance(name, str) or not name.endswith("$"):
+            raise WorkspaceError("INVALID_NAME", "String function names must end in '$'")
+        operation = {"operation": "create_string_function", "name": name,
+                     "parameters": parameters}
+        if expression is not None: operation["expression"] = expression
+        if locals is not None: operation["locals"] = locals
+        if arrays is not None: operation["arrays"] = arrays
+        if array_assignments is not None: operation["array_assignments"] = array_assignments
+        if body is not None: operation["body"] = body
+        return self._transaction(document_id, expected_revision, operation)
 
     def edit_assignment_expression(self, document_id: str, statement_id: str,
                                    expression: Any, expected_revision: int) -> dict[str, Any]:
@@ -1619,6 +1654,10 @@ class Workspace:
             "renumber_line": lambda: self.renumber_line(params["document_id"], params["old_line"], params["new_line"], params["expected_revision"]),
             "move_function": lambda: self.move_function(params["document_id"], params["symbol_id"], params.get("before_symbol_id"), params["expected_revision"]),
             "create_numeric_function": lambda: self.create_numeric_function(
+                params["document_id"], params["name"], params.get("parameters", []),
+                params["expected_revision"], params.get("expression"), params.get("locals"),
+                params.get("arrays"), params.get("array_assignments"), params.get("body")),
+            "create_string_function": lambda: self.create_string_function(
                 params["document_id"], params["name"], params.get("parameters", []),
                 params["expected_revision"], params.get("expression"), params.get("locals"),
                 params.get("arrays"), params.get("array_assignments"), params.get("body")),

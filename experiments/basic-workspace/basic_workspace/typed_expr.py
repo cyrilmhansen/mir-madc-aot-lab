@@ -28,6 +28,18 @@ def parse_request(value: Any, symbols: Mapping[str, Any], current_scope: str,
     if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
         raise WorkspaceError("INVALID_EXPRESSION", "Expression must be a typed object with a kind")
     kind = value["kind"]
+    if kind == "string":
+        if set(value) != {"kind", "value"} or not isinstance(value["value"], str):
+            raise WorkspaceError("INVALID_STRING", "string expression requires a string value")
+        try:
+            encoded = value["value"].encode("utf-8", "strict")
+        except UnicodeError as exc:
+            raise WorkspaceError("INVALID_UTF8", "String values must be valid UTF-8") from exc
+        if b"\0" in encoded or b"\n" in encoded or b"\r" in encoded:
+            raise WorkspaceError("INVALID_STRING", "String literals cannot contain NUL or line breaks")
+        if len(encoded) > 4096:
+            raise WorkspaceError("STRING_LIMIT", "String literals are limited to 4096 UTF-8 bytes")
+        return Expr("string", value["value"]), ()
     if kind == "number":
         if set(value) != {"kind", "value"}:
             raise WorkspaceError("INVALID_EXPRESSION", "number expression requires only kind and value")
@@ -45,7 +57,15 @@ def parse_request(value: Any, symbols: Mapping[str, Any], current_scope: str,
         symbol = symbols.get(sid)
         if symbol is None:
             raise WorkspaceError("SYMBOL_NOT_FOUND", "Expression refers to an unknown symbol identity")
-        if symbol.name.endswith("$") or symbol.kind == "function" and sid != current_function_id:
+        if symbol.kind == "array":
+            raise WorkspaceError("UNSUPPORTED_TYPE", f"{symbol.name} requires an indexed expression")
+        if symbol.name.endswith("$"):
+            if sid == current_function_id and symbol.kind == "function":
+                return Expr("result_string", sid), (sid,)
+            if symbol.kind not in ("parameter", "variable") or symbol.scope_id != current_scope:
+                raise WorkspaceError("CROSS_SCOPE_REFERENCE", f"{symbol.name} is outside the edited function scope")
+            return Expr("variable_string", sid), (sid,)
+        if symbol.kind == "function" and sid != current_function_id:
             raise WorkspaceError("UNSUPPORTED_TYPE", f"{symbol.name} is not a numeric local value")
         if sid == current_function_id:
             if symbol.kind != "function":
@@ -104,13 +124,16 @@ def parse_request(value: Any, symbols: Mapping[str, Any], current_scope: str,
         array_id = array_ref["symbol_id"]
         array = symbols.get(array_id)
         if array is None or array.kind != "array":
-            raise WorkspaceError("UNSUPPORTED_TYPE", "array_element must reference a declared numeric array")
+            raise WorkspaceError("UNSUPPORTED_TYPE", "array_element must reference a declared array")
         if array.scope_id != current_scope:
             raise WorkspaceError("CROSS_SCOPE_REFERENCE", f"Array {array.name} is outside the current function scope")
         index, index_refs = parse_request(value["index"], symbols, current_scope,
                                           current_function_id, function_parameters,
                                           depth + 1, max_depth)
-        return Expr("array_element", array_id, (index,)), (array_id,) + index_refs
+        if index.kind not in ("number", "variable", "result", "unary_minus", "binary", "call", "array_element"):
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Array indexes must be numeric")
+        return Expr("array_element_string" if array.name.endswith("$") else "array_element",
+                    array_id, (index,)), (array_id,) + index_refs
     raise WorkspaceError("UNSUPPORTED_EXPRESSION", f"Unsupported expression kind {kind!r}")
 
 
@@ -123,10 +146,15 @@ def expression_tokens(expr: Expr, symbols: Mapping[str, Any]) -> tuple[list[tupl
         text = str(int(magnitude)) if magnitude.is_integer() and magnitude < 1e16 else repr(magnitude)
         parts = ([ ("OP", "-") ] if negative else []) + [("NUMBER", text)]
         return parts, ()
+    if expr.kind == "string":
+        return [("STRING", '"' + str(expr.value).replace('"', '""') + '"')], ()
     if expr.kind == "variable":
         sid = str(expr.value)
         return [("IDENT", symbols[sid].name)], (sid,)
     if expr.kind == "result":
+        sid = str(expr.value)
+        return [("IDENT", symbols[sid].name)], (sid,)
+    if expr.kind in ("result_string", "variable_string"):
         sid = str(expr.value)
         return [("IDENT", symbols[sid].name)], (sid,)
     if expr.kind == "unary_minus":
@@ -154,7 +182,7 @@ def expression_tokens(expr: Expr, symbols: Mapping[str, Any]) -> tuple[list[tupl
             refs.extend(child_refs)
         output.append(("PUNCT", ")"))
         return output, tuple(refs)
-    if expr.kind == "array_element":
+    if expr.kind in ("array_element", "array_element_string"):
         sid = str(expr.value)
         child, child_refs = expression_tokens(expr.children[0], symbols)
         return ([ ("IDENT", symbols[sid].name), ("PUNCT", "(") ] + child + [("PUNCT", ")")],

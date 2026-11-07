@@ -20,11 +20,14 @@
 #define MAX_EXPR_DEPTH 256u
 #define MAX_CONTROL_DEPTH 16u
 #define MAX_LOOP_ITERATIONS 10000u
+#define MAX_STRING_BYTES 4096u
+#define MAX_TOTAL_STRING_BYTES (256u * 1024u)
 
 enum {
   EX_CONST = 1, EX_LOCAL = 2, EX_RESULT = 3, EX_ADD = 4, EX_SUB = 5,
   EX_MUL = 6, EX_DIV = 7, EX_NEG = 8, EX_CALL = 9, EX_ARRAY = 10,
-  EX_EQ = 11, EX_NE = 12, EX_LT = 13, EX_LE = 14, EX_GT = 15, EX_GE = 16
+  EX_EQ = 11, EX_NE = 12, EX_LT = 13, EX_LE = 14, EX_GT = 15, EX_GE = 16,
+  EX_STRING = 17
 };
 
 enum { ST_ASSIGN = 0, ST_IF = 1, ST_FOR = 2 };
@@ -38,6 +41,8 @@ struct Expr {
   uint32_t nargs;
   Expr **args;
   uint32_t array;
+  char *string;
+  uint32_t string_length;
   Expr *left;
   Expr *right;
 };
@@ -65,18 +70,23 @@ struct Statement {
 typedef struct {
   uint32_t lower;
   uint32_t upper;
+  uint8_t is_string;
   MIR_reg_t *elements;
   MIR_reg_t base;
   int memory_backed;
 } Array;
 
 static int use_memory_arrays;
+static struct Function *active_function;
+static size_t total_string_bytes;
 
-typedef struct {
+typedef struct Function {
   uint32_t nargs;
   uint32_t nlocals;
   uint32_t narrays;
   uint32_t nstatements;
+  uint8_t return_string;
+  uint8_t *slot_types;
   Array *arrays;
   Statement *statements;
 } Function;
@@ -94,6 +104,7 @@ static void free_expr(Expr *expr) {
   free_expr(expr->right);
   for (uint32_t i = 0; i < expr->nargs; i++) free_expr(expr->args[i]);
   free(expr->args);
+  free(expr->string);
   free(expr);
 }
 
@@ -119,6 +130,7 @@ static void free_functions(Function *functions, uint32_t nfunctions) {
         free(functions[i].arrays[j].elements);
       free(functions[i].arrays);
     }
+    free(functions[i].slot_types);
     free_statements(functions[i].statements, functions[i].nstatements);
   }
   free(functions);
@@ -143,6 +155,21 @@ static int read_u32(Reader *reader, uint32_t *out) {
   return 1;
 }
 
+static int valid_utf8(const unsigned char *s, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    unsigned char c = s[i++];
+    if (c < 0x80) continue;
+    unsigned need = c >= 0xC2 && c <= 0xDF ? 1 : c >= 0xE0 && c <= 0xEF ? 2 : c >= 0xF0 && c <= 0xF4 ? 3 : 99;
+    if (need == 99 || i + need > n) return 0;
+    unsigned char a = s[i];
+    if ((c == 0xE0 && a < 0xA0) || (c == 0xED && a >= 0xA0) ||
+        (c == 0xF0 && a < 0x90) || (c == 0xF4 && a >= 0x90)) return 0;
+    for (unsigned j = 0; j < need; j++) if ((s[i++] & 0xC0) != 0x80) return 0;
+  }
+  return 1;
+}
+
 static int read_double(Reader *reader, double *out) {
   uint8_t b[8];
   uint64_t bits = 0;
@@ -164,6 +191,24 @@ static Expr *read_expr(Reader *reader, uint32_t depth, uint32_t narrays) {
   }
   if (!read_u8(reader, &expr->kind)) goto fail;
   switch (expr->kind) {
+  case EX_STRING: {
+    if (!read_u32(reader, &expr->string_length) || expr->string_length > MAX_STRING_BYTES ||
+        expr->string_length > reader->length - reader->offset) {
+      reader->error = "invalid string literal length"; goto fail;
+    }
+    expr->string = malloc((size_t)expr->string_length + 1);
+    if (expr->string == NULL) { reader->error = "out of memory reading string"; goto fail; }
+    if (!read_bytes(reader, expr->string, expr->string_length)) goto fail;
+    if (memchr(expr->string, 0, expr->string_length) != NULL || !valid_utf8((unsigned char *)expr->string, expr->string_length)) {
+      reader->error = "string literal is not valid NUL-free UTF-8"; goto fail;
+    }
+    if (total_string_bytes > MAX_TOTAL_STRING_BYTES - expr->string_length - 1) {
+      reader->error = "aggregate string storage exceeds worker limit"; goto fail;
+    }
+    total_string_bytes += expr->string_length + 1;
+    expr->string[expr->string_length] = 0;
+    break;
+  }
   case EX_CONST:
     if (!read_double(reader, &expr->value)) goto fail;
     if (!isfinite(expr->value)) {
@@ -227,7 +272,7 @@ static int validate_expr(const Expr *expr, const Function *functions,
                          uint32_t nfunctions, uint32_t current_slots) {
   if (expr == NULL) return 0;
   switch (expr->kind) {
-  case EX_CONST: case EX_RESULT:
+  case EX_CONST: case EX_RESULT: case EX_STRING:
     return 1;
   case EX_LOCAL:
     return expr->slot < current_slots;
@@ -359,24 +404,76 @@ static int validate_statement(const Statement *statement, const Function *functi
   return 0;
 }
 
+static int expression_string_type(const Expr *expr, const Function *function,
+                                  const Function *functions, uint32_t nfunctions) {
+  if (expr == NULL) return -1;
+  switch (expr->kind) {
+  case EX_STRING: return 1;
+  case EX_CONST: return 0;
+  case EX_RESULT: return function->return_string ? 1 : 0;
+  case EX_LOCAL: return expr->slot < function->nargs + function->nlocals &&
+      function->slot_types != NULL ? function->slot_types[expr->slot] : 0;
+  case EX_ARRAY: return expr->array < function->narrays ? function->arrays[expr->array].is_string : -1;
+  case EX_CALL:
+    if (expr->callee >= nfunctions || functions[expr->callee].return_string) return -1;
+    for (uint32_t i = 0; i < expr->nargs; i++)
+      if (expression_string_type(expr->args[i], function, functions, nfunctions) != 0) return -1;
+    return 0;
+  case EX_NEG:
+    return expression_string_type(expr->left, function, functions, nfunctions) == 0 ? 0 : -1;
+  case EX_ADD: case EX_SUB: case EX_MUL: case EX_DIV:
+  case EX_EQ: case EX_NE: case EX_LT: case EX_LE: case EX_GT: case EX_GE:
+    return expression_string_type(expr->left, function, functions, nfunctions) == 0 &&
+           expression_string_type(expr->right, function, functions, nfunctions) == 0 ? 0 : -1;
+  default: return -1;
+  }
+}
+
+static int validate_statement_types(const Statement *st, const Function *fn,
+                                    const Function *functions, uint32_t nfunctions,
+                                    uint32_t depth) {
+  if (depth > MAX_CONTROL_DEPTH) return 0;
+  if (st->kind == ST_ASSIGN) {
+    int expected = st->target_kind == 1 ? fn->return_string :
+                   st->target_kind == 2 ? fn->arrays[st->slot].is_string :
+                   fn->slot_types != NULL ? fn->slot_types[st->slot] : 0;
+    if (st->target_kind == 2 && expression_string_type(st->index, fn, functions, nfunctions) != 0) return 0;
+    return expression_string_type(st->value, fn, functions, nfunctions) == expected;
+  }
+  if (st->kind == ST_IF) {
+    if (expression_string_type(st->condition, fn, functions, nfunctions) != 0) return 0;
+    for (uint32_t i = 0; i < st->nthen; i++) if (!validate_statement_types(&st->then_body[i], fn, functions, nfunctions, depth + 1)) return 0;
+    for (uint32_t i = 0; i < st->nelse; i++) if (!validate_statement_types(&st->else_body[i], fn, functions, nfunctions, depth + 1)) return 0;
+    return 1;
+  }
+  if (st->kind == ST_FOR) {
+    if (st->start->kind != EX_CONST || st->end->kind != EX_CONST || st->step->kind != EX_CONST) return 0;
+    for (uint32_t i = 0; i < st->nbody; i++) if (!validate_statement_types(&st->body[i], fn, functions, nfunctions, depth + 1)) return 0;
+    return 1;
+  }
+  return 0;
+}
+
 static Function *read_projection(const uint8_t *data, size_t length,
                                  uint32_t *engine, uint32_t *target,
                                  uint32_t *nfunctions, uint32_t *call_argc,
                                  double call_args[MAX_ARGS], const char **error) {
   Reader reader = {data, length, 0, NULL};
+  total_string_bytes = 0;
   uint8_t magic[4];
   uint32_t version;
   if (!read_bytes(&reader, magic, sizeof(magic)) ||
       (memcmp(magic, "BWM1", 4) != 0 && memcmp(magic, "BWM2", 4) != 0 &&
-       memcmp(magic, "BWM3", 4) != 0) ||
+       memcmp(magic, "BWM3", 4) != 0 && memcmp(magic, "BWM4", 4) != 0) ||
       !read_u32(&reader, &version) || !read_u32(&reader, engine) ||
       !read_u32(&reader, target) || !read_u32(&reader, nfunctions)) {
     *error = reader.error != NULL ? reader.error : "invalid binary projection header";
     return NULL;
   }
-  int version3 = memcmp(magic, "BWM3", 4) == 0;
+  int version4 = memcmp(magic, "BWM4", 4) == 0;
+  int version3 = memcmp(magic, "BWM3", 4) == 0 || version4;
   int version2 = memcmp(magic, "BWM2", 4) == 0 || version3;
-  if (version != (version3 ? 3u : version2 ? 2u : 1u) || *engine > 1 || *nfunctions == 0 || *nfunctions > MAX_FUNCTIONS ||
+  if (version != (version4 ? 4u : version3 ? 3u : version2 ? 2u : 1u) || *engine > 1 || *nfunctions == 0 || *nfunctions > MAX_FUNCTIONS ||
       *target >= *nfunctions) {
     *error = "unsupported binary projection header values";
     return NULL;
@@ -394,6 +491,20 @@ static Function *read_projection(const uint8_t *data, size_t length,
       if (!read_u32(&reader, &function->narrays)) goto fail;
     }
     if (!read_u32(&reader, &function->nstatements)) goto fail;
+    if (version4) {
+      uint32_t return_type;
+      if (!read_u32(&reader, &return_type) || return_type > 1) goto fail;
+      function->return_string = (uint8_t)return_type;
+      size_t slot_count = (size_t)function->nargs + function->nlocals;
+      function->slot_types = calloc(slot_count == 0 ? 1 : slot_count, 1);
+      if (function->slot_types == NULL) { reader.error = "out of memory reading slot types"; goto fail; }
+      for (size_t k = 0; k < slot_count; k++) {
+        if (!read_u8(&reader, &function->slot_types[k]) || function->slot_types[k] > 1 ||
+            (k < function->nargs && function->slot_types[k] != 0)) {
+          reader.error = "invalid local or argument type"; goto fail;
+        }
+      }
+    }
     if (function->nargs > MAX_ARGS || function->nlocals > MAX_LOCALS ||
         function->narrays > MAX_ARRAYS ||
         function->nstatements > MAX_STATEMENTS) {
@@ -407,6 +518,7 @@ static Function *read_projection(const uint8_t *data, size_t length,
       for (uint32_t j = 0; j < function->narrays; j++) {
         Array *array = &function->arrays[j];
         if (!read_u32(&reader, &array->lower) || !read_u32(&reader, &array->upper)) goto fail;
+        if (version4 && (!read_u8(&reader, &array->is_string) || array->is_string > 1)) { reader.error = "invalid array element type"; goto fail; }
         if (array->lower != 0 || array->upper >= MAX_ARRAY_ELEMENTS) {
           reader.error = "array bounds exceed supported fixed numeric-array limits";
           goto fail;
@@ -459,8 +571,8 @@ static Function *read_projection(const uint8_t *data, size_t length,
           ? validate_statement(statement, functions, *nfunctions, function->nargs, slots, function->narrays, 0)
           : ((statement->index == NULL || validate_expr(statement->index, functions, *nfunctions, slots)) &&
              validate_expr(statement->value, functions, *nfunctions, slots));
-      if (!valid) {
-        reader.error = "invalid function, local, array, or control-flow reference in projection";
+      if (!valid || !validate_statement_types(statement, function, functions, *nfunctions, 0)) {
+        reader.error = "invalid function, local, array, value type, or control-flow reference in projection";
         goto fail;
       }
     }
@@ -484,10 +596,12 @@ fail:
   return NULL;
 }
 
+static MIR_reg_t new_temp_t(MIR_context_t ctx, MIR_func_t function, uint32_t *counter, MIR_type_t type) {
+  char name[40]; snprintf(name, sizeof(name), "tmp_%u", (*counter)++);
+  return MIR_new_func_reg(ctx, function, type == MIR_T_P ? MIR_T_I64 : type, name);
+}
 static MIR_reg_t new_temp(MIR_context_t ctx, MIR_func_t function, uint32_t *counter) {
-  char name[40];
-  snprintf(name, sizeof(name), "tmp_%u", (*counter)++);
-  return MIR_new_func_reg(ctx, function, MIR_T_D, name);
+  return new_temp_t(ctx, function, counter, MIR_T_D);
 }
 
 static void emit_double_move(MIR_context_t ctx, MIR_item_t item, MIR_reg_t dst, MIR_op_t src) {
@@ -541,8 +655,8 @@ static MIR_reg_t lower_checked_index(MIR_context_t ctx, MIR_item_t item, MIR_reg
 static int lower_array_store(MIR_context_t ctx, MIR_item_t item, Array *array,
                              MIR_reg_t index, MIR_reg_t value) {
   if (array->memory_backed) {
-    MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DMOV,
-        MIR_new_mem_op(ctx, MIR_T_D, 0, array->base, index, 8), MIR_new_reg_op(ctx, value)));
+    MIR_append_insn(ctx, item, MIR_new_insn(ctx, array->is_string ? MIR_MOV : MIR_DMOV,
+        MIR_new_mem_op(ctx, array->is_string ? MIR_T_P : MIR_T_D, 0, array->base, index, 8), MIR_new_reg_op(ctx, value)));
     return 1;
   }
   uint32_t capacity = array->upper - array->lower + 1;
@@ -587,6 +701,11 @@ static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots
   MIR_func_t function = item->u.func;
   MIR_reg_t dst;
   switch (expr->kind) {
+  case EX_STRING: {
+    dst = new_temp_t(ctx, function, temp_counter, MIR_T_P);
+    MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, dst), MIR_new_int_op(ctx, (int64_t)(intptr_t)expr->string)));
+    return dst;
+  }
   case EX_CONST:
     dst = new_temp(ctx, function, temp_counter);
     emit_double_move(ctx, item, dst, MIR_new_double_op(ctx, expr->value));
@@ -657,9 +776,9 @@ static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots
     if (constant_array_index(expr->left, &arrays[expr->array], &constant_slot)) {
       if (!arrays[expr->array].memory_backed)
         return arrays[expr->array].elements[constant_slot];
-      dst = new_temp(ctx, function, temp_counter);
-      MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DMOV, MIR_new_reg_op(ctx, dst),
-          MIR_new_mem_op(ctx, MIR_T_D, (int64_t) constant_slot * 8,
+      dst = new_temp_t(ctx, function, temp_counter, arrays[expr->array].is_string ? MIR_T_P : MIR_T_D);
+      MIR_append_insn(ctx, item, MIR_new_insn(ctx, arrays[expr->array].is_string ? MIR_MOV : MIR_DMOV, MIR_new_reg_op(ctx, dst),
+          MIR_new_mem_op(ctx, arrays[expr->array].is_string ? MIR_T_P : MIR_T_D, (int64_t) constant_slot * 8,
                          arrays[expr->array].base, 0, 1)));
       return dst;
     }
@@ -667,10 +786,11 @@ static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots
         protos, forwards, slot_count, arrays, narrays, bounds_bad, expr->left,
         expr->array, temp_counter);
     if (index == 0) return 0;
-    dst = new_temp(ctx, function, temp_counter);
+    dst = new_temp_t(ctx, function, temp_counter, arrays[expr->array].is_string ? MIR_T_P : MIR_T_D);
     if (arrays[expr->array].memory_backed) {
-      MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DMOV, MIR_new_reg_op(ctx, dst),
-          MIR_new_mem_op(ctx, MIR_T_D, 0, arrays[expr->array].base, index, 8)));
+      MIR_append_insn(ctx, item, MIR_new_insn(ctx, arrays[expr->array].is_string ? MIR_MOV : MIR_DMOV,
+          MIR_new_reg_op(ctx, dst), MIR_new_mem_op(ctx, arrays[expr->array].is_string ? MIR_T_P : MIR_T_D,
+          0, arrays[expr->array].base, index, 8)));
       return dst;
     }
     MIR_label_t done = MIR_new_label(ctx);
@@ -714,8 +834,8 @@ static int lower_statement(MIR_context_t ctx, MIR_item_t item, const Statement *
       uint32_t constant_slot;
       if (constant_array_index(statement->index, array, &constant_slot)) {
         if (array->memory_backed)
-          MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DMOV,
-              MIR_new_mem_op(ctx, MIR_T_D, (int64_t) constant_slot * 8, array->base, 0, 1),
+          MIR_append_insn(ctx, item, MIR_new_insn(ctx, array->is_string ? MIR_MOV : MIR_DMOV,
+              MIR_new_mem_op(ctx, array->is_string ? MIR_T_P : MIR_T_D, (int64_t) constant_slot * 8, array->base, 0, 1),
               MIR_new_reg_op(ctx, value)));
         else
           emit_double_move(ctx, item, array->elements[constant_slot], MIR_new_reg_op(ctx, value));
@@ -728,7 +848,10 @@ static int lower_statement(MIR_context_t ctx, MIR_item_t item, const Statement *
     }
     MIR_reg_t destination = statement->target_kind == 1 ? result_reg : slots[statement->slot];
     if (destination == 0) return 0;
-    emit_double_move(ctx, item, destination, MIR_new_reg_op(ctx, value));
+    int is_string = statement->target_kind == 1 ? active_function->return_string :
+                    active_function->slot_types != NULL && active_function->slot_types[statement->slot];
+    MIR_append_insn(ctx, item, MIR_new_insn(ctx, is_string ? MIR_MOV : MIR_DMOV,
+        MIR_new_reg_op(ctx, destination), MIR_new_reg_op(ctx, value)));
     return 1;
   }
   if (statement->kind == ST_IF) {
@@ -801,8 +924,40 @@ static double call_native(void *address, uint32_t argc, const double *a, uint32_
   }
 }
 
+static const char *call_native_string(void *address, uint32_t argc, const double *a, uint32_t *error_status) {
+  switch (argc) {
+  case 0: return ((const char *(*)(void *))address)(error_status);
+  case 1: return ((const char *(*)(double, void *))address)(a[0], error_status);
+  case 2: return ((const char *(*)(double, double, void *))address)(a[0], a[1], error_status);
+  case 3: return ((const char *(*)(double, double, double, void *))address)(a[0], a[1], a[2], error_status);
+  case 4: return ((const char *(*)(double, double, double, double, void *))address)(a[0], a[1], a[2], a[3], error_status);
+  case 5: return ((const char *(*)(double, double, double, double, double, void *))address)(a[0], a[1], a[2], a[3], a[4], error_status);
+  case 6: return ((const char *(*)(double, double, double, double, double, double, void *))address)(a[0], a[1], a[2], a[3], a[4], a[5], error_status);
+  default: return NULL;
+  }
+}
+
 static void report_error(const char *code, const char *message) {
   printf("{\"ok\":false,\"code\":\"%s\",\"message\":\"%s\"}\n", code, message);
+}
+
+static char *json_escape_string(const char *value, size_t length) {
+  if (length > (SIZE_MAX - 1) / 6) return NULL;
+  char *escaped = malloc(length * 6 + 1);
+  if (escaped == NULL) return NULL;
+  size_t out = 0;
+  for (size_t i = 0; i < length; i++) {
+    unsigned char c = (unsigned char)value[i];
+    if (c == '\\' || c == '"') escaped[out++] = '\\';
+    if (c < 0x20) {
+      static const char hex[] = "0123456789abcdef";
+      escaped[out++] = '\\'; escaped[out++] = 'u';
+      escaped[out++] = '0'; escaped[out++] = '0';
+      escaped[out++] = hex[c >> 4]; escaped[out++] = hex[c & 15];
+    } else escaped[out++] = (char)c;
+  }
+  escaped[out] = 0;
+  return escaped;
 }
 
 static double monotonic_ms(void) {
@@ -884,7 +1039,7 @@ int main(void) {
     char function_name[48], proto_name[52];
     snprintf(function_name, sizeof(function_name), "bw_func_%u", i);
     snprintf(proto_name, sizeof(proto_name), "bw_func_%u_p", i);
-    result_types[i] = MIR_T_D;
+    result_types[i] = functions[i].return_string ? MIR_T_P : MIR_T_D;
     MIR_var_t *function_vars = vars + (size_t)i * (MAX_ARGS + 1);
     for (uint32_t j = 0; j < functions[i].nargs; j++) {
       snprintf(names[i][j], sizeof(names[i][j]), "arg_%u_%u", i, j);
@@ -910,6 +1065,7 @@ int main(void) {
                                 functions[i].nargs + 1, function_vars);
     if (items[i] == NULL) { failed = 1; break; }
     MIR_func_t mir_func = items[i]->u.func;
+    active_function = &functions[i];
     uint32_t slot_count = functions[i].nargs + functions[i].nlocals;
     MIR_reg_t *slots = calloc(slot_count == 0 ? 1 : slot_count, sizeof(*slots));
     if (slots == NULL) { failed = 1; break; }
@@ -920,13 +1076,16 @@ int main(void) {
     for (uint32_t j = 0; j < functions[i].nlocals; j++) {
       char local_name[48];
       snprintf(local_name, sizeof(local_name), "local_%u", j);
-      slots[functions[i].nargs + j] = MIR_new_func_reg(ctx, mir_func, MIR_T_D, local_name);
-      emit_double_move(ctx, items[i], slots[functions[i].nargs + j], MIR_new_double_op(ctx, 0.0));
+      MIR_type_t type = functions[i].slot_types != NULL && functions[i].slot_types[functions[i].nargs + j] ? MIR_T_P : MIR_T_D;
+      slots[functions[i].nargs + j] = MIR_new_func_reg(ctx, mir_func, type == MIR_T_P ? MIR_T_I64 : type, local_name);
+      if (type == MIR_T_P) MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_MOV,
+          MIR_new_reg_op(ctx, slots[functions[i].nargs + j]), MIR_new_int_op(ctx, (int64_t)(intptr_t)"" )));
+      else emit_double_move(ctx, items[i], slots[functions[i].nargs + j], MIR_new_double_op(ctx, 0.0));
     }
     for (uint32_t j = 0; j < functions[i].narrays; j++) {
       Array *array = &functions[i].arrays[j];
       uint32_t capacity = array->upper - array->lower + 1;
-      array->memory_backed = use_memory_arrays;
+      array->memory_backed = use_memory_arrays || array->is_string;
       if (array->memory_backed) {
         char array_name[48];
         snprintf(array_name, sizeof(array_name), "array_mem_%u", j);
@@ -939,9 +1098,9 @@ int main(void) {
         MIR_prepend_insn(ctx, items[i], MIR_new_insn(ctx, MIR_ALLOCA,
             MIR_new_reg_op(ctx, array->base), MIR_new_int_op(ctx, (int64_t) capacity * 8)));
         for (uint32_t k = 0; k < capacity; k++)
-          MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_DMOV,
-              MIR_new_mem_op(ctx, MIR_T_D, (int64_t) k * 8, array->base, 0, 1),
-              MIR_new_double_op(ctx, 0.0)));
+          MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, array->is_string ? MIR_MOV : MIR_DMOV,
+              MIR_new_mem_op(ctx, array->is_string ? MIR_T_P : MIR_T_D, (int64_t) k * 8, array->base, 0, 1),
+              array->is_string ? MIR_new_int_op(ctx, (int64_t)(intptr_t)"" ) : MIR_new_double_op(ctx, 0.0)));
       } else {
         array->elements = calloc(capacity, sizeof(*array->elements));
         if (array->elements == NULL) { failed = 1; break; }
@@ -954,8 +1113,10 @@ int main(void) {
       }
     }
     if (failed) { free(slots); break; }
-    MIR_reg_t return_reg = MIR_new_func_reg(ctx, mir_func, MIR_T_D, "basic_result");
-    emit_double_move(ctx, items[i], return_reg, MIR_new_double_op(ctx, 0.0));
+    MIR_reg_t return_reg = MIR_new_func_reg(ctx, mir_func, functions[i].return_string ? MIR_T_I64 : MIR_T_D, "basic_result");
+    if (functions[i].return_string) MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_MOV,
+        MIR_new_reg_op(ctx, return_reg), MIR_new_int_op(ctx, (int64_t)(intptr_t)"" )));
+    else emit_double_move(ctx, items[i], return_reg, MIR_new_double_op(ctx, 0.0));
     MIR_label_t bounds_bad = NULL, loop_bad = NULL;
     for (uint32_t j = 0; j < functions[i].nstatements; j++) {
       Statement *statement = &functions[i].statements[j];
@@ -971,13 +1132,13 @@ int main(void) {
           MIR_append_insn(ctx, items[i], bounds_bad);
           MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_MOV,
               MIR_new_mem_op(ctx, MIR_T_I32, 0, error_reg, 0, 1), MIR_new_int_op(ctx, 1)));
-          MIR_append_insn(ctx, items[i], MIR_new_ret_insn(ctx, 1, MIR_new_double_op(ctx, NAN)));
+          MIR_append_insn(ctx, items[i], MIR_new_ret_insn(ctx, 1, functions[i].return_string ? MIR_new_int_op(ctx, (int64_t)(intptr_t)"" ) : MIR_new_double_op(ctx, NAN)));
         }
         if (loop_bad != NULL) {
           MIR_append_insn(ctx, items[i], loop_bad);
           MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_MOV,
               MIR_new_mem_op(ctx, MIR_T_I32, 0, error_reg, 0, 1), MIR_new_int_op(ctx, 2)));
-          MIR_append_insn(ctx, items[i], MIR_new_ret_insn(ctx, 1, MIR_new_double_op(ctx, NAN)));
+          MIR_append_insn(ctx, items[i], MIR_new_ret_insn(ctx, 1, functions[i].return_string ? MIR_new_int_op(ctx, (int64_t)(intptr_t)"" ) : MIR_new_double_op(ctx, NAN)));
         }
         MIR_append_insn(ctx, items[i], normal_exit);
       }
@@ -996,6 +1157,7 @@ int main(void) {
   build_ms = monotonic_ms() - build_started;
   if (getenv("BASIC_WORKSPACE_MIR_DUMP") != NULL) MIR_output(ctx, stderr);
   double result = 0.0;
+  const char *string_result = NULL;
   uint32_t worker_error = 0;
   double link_started = monotonic_ms();
   if (engine == 0) {
@@ -1007,7 +1169,8 @@ int main(void) {
     double invoke_started = monotonic_ms();
     MIR_interp_arr(ctx, items[target], results, argc + 1, values);
     invoke_ms = monotonic_ms() - invoke_started;
-    result = results[0].d;
+    if (functions[target].return_string) string_result = (const char *)results[0].a;
+    else result = results[0].d;
   } else {
     MIR_gen_init(ctx);
     MIR_link(ctx, MIR_set_gen_interface, NULL);
@@ -1021,7 +1184,8 @@ int main(void) {
       goto cleanup;
     }
     double invoke_started = monotonic_ms();
-    result = call_native(address, argc, args, &worker_error);
+    if (functions[target].return_string) string_result = call_native_string(address, argc, args, &worker_error);
+    else result = call_native(address, argc, args, &worker_error);
     invoke_ms = monotonic_ms() - invoke_started;
     MIR_gen_finish(ctx);
   }
@@ -1029,16 +1193,34 @@ int main(void) {
     report_error("ARRAY_BOUNDS", "numeric array index is outside its declared bounds");
   } else if (worker_error == 2) {
     report_error("LOOP_LIMIT", "bounded FOR exceeded its runtime iteration limit");
-  } else if (!isfinite(result)) {
+  } else if (!functions[target].return_string && !isfinite(result)) {
     report_error("NON_FINITE_RESULT", "execution produced a non-finite double result");
+  } else if (functions[target].return_string && string_result == NULL) {
+    report_error("INVALID_STRING_RESULT", "MIR returned a null string pointer");
   } else {
     struct rusage usage;
     long maxrss_kib = getrusage(RUSAGE_SELF, &usage) == 0 ? usage.ru_maxrss : -1;
-    printf("{\"ok\":true,\"result_hex\":\"%a\",\"timings_ms\":{\"mir_build\":%.6f,\"link\":%.6f,\"jit_compile\":%.6f,\"invoke\":%.6f},\"maxrss_kib\":%ld}\n",
-           result, build_ms, link_ms, jit_compile_ms, invoke_ms, maxrss_kib);
+    if (functions[target].return_string) {
+      double copy_started = monotonic_ms();
+      size_t n = strnlen(string_result, MAX_STRING_BYTES + 1);
+      if (n > MAX_STRING_BYTES || !valid_utf8((const unsigned char *)string_result, n)) {
+        report_error("INVALID_STRING_RESULT", "MIR returned an invalid or oversized string");
+        goto cleanup;
+      }
+      char *escaped = json_escape_string(string_result, n);
+      if (escaped == NULL) { report_error("OUT_OF_MEMORY", "could not copy string result to JSON"); goto cleanup; }
+      double result_copy_ms = monotonic_ms() - copy_started;
+      printf("{\"ok\":true,\"result_type\":\"string\",\"result_length\":%zu,\"result\":\"%s\",\"timings_ms\":{\"mir_build\":%.6f,\"link\":%.6f,\"jit_compile\":%.6f,\"invoke\":%.6f,\"result_copy_json\":%.6f},\"maxrss_kib\":%ld}\n",
+             n, escaped, build_ms, link_ms, jit_compile_ms, invoke_ms, result_copy_ms, maxrss_kib);
+      free(escaped);
+    } else {
+      printf("{\"ok\":true,\"result_type\":\"double\",\"result_hex\":\"%a\",\"timings_ms\":{\"mir_build\":%.6f,\"link\":%.6f,\"jit_compile\":%.6f,\"invoke\":%.6f},\"maxrss_kib\":%ld}\n",
+             result, build_ms, link_ms, jit_compile_ms, invoke_ms, maxrss_kib);
+    }
   }
 
 cleanup:
+  MIR_finish(ctx);
   free_functions(functions, nfunctions);
   free(protos);
   free(forwards);
@@ -1046,6 +1228,5 @@ cleanup:
   free(vars);
   free(names);
   free(result_types);
-  MIR_finish(ctx);
   return 0;
 }

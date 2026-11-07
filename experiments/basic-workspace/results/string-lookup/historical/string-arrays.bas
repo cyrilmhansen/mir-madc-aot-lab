@@ -1,0 +1,5 @@
+DIM NAMES$(1)
+NAMES$(0) = "Alice"
+NAMES$(1) = "Chloé"
+PRINT NAMES$(0)
+PRINT NAMES$(1)
