@@ -1478,6 +1478,21 @@ class Workspace:
         preview.pop("_created_statements", None)
         return preview
 
+    def preview_transaction_semantics(self, document_id: str, expected_revision: int,
+                                      operations: list[dict[str, Any]]) -> dict[str, Any]:
+        """Return a typed candidate projection without mutating the live document.
+
+        This is intentionally a narrow inspection API for controlled policy
+        gateways. It uses the same private candidate validation as ordinary
+        preview/commit and does not expose or install the candidate Document.
+        """
+        candidate, preview = self._prepare_transaction(document_id, expected_revision, operations)
+        from .projection import build_projection_from_document, projection_semantics
+        projection = build_projection_from_document(self, candidate, candidate.revision)
+        preview.pop("_created_entities", None)
+        preview.pop("_created_statements", None)
+        return {"preview": preview, "candidate_semantics": projection_semantics(projection)}
+
     def apply_transaction(self, document_id: str, expected_revision: int,
                           operations: list[dict[str, Any]]) -> dict[str, Any]:
         candidate, preview = self._prepare_transaction(document_id, expected_revision, operations)
@@ -1695,6 +1710,7 @@ class Workspace:
             "rename_symbol": lambda: self.rename_symbol(params["document_id"], params["symbol_id"], params["new_name"], params["expected_revision"]),
             "apply_transaction": lambda: self.apply_transaction(params["document_id"], params["expected_revision"], params["operations"]),
             "preview_transaction": lambda: self.preview_transaction(params["document_id"], params["expected_revision"], params["operations"], params.get("include_diff", False)),
+            "preview_transaction_semantics": lambda: self.preview_transaction_semantics(params["document_id"], params["expected_revision"], params["operations"]),
             "renumber_line": lambda: self.renumber_line(params["document_id"], params["old_line"], params["new_line"], params["expected_revision"]),
             "move_function": lambda: self.move_function(params["document_id"], params["symbol_id"], params.get("before_symbol_id"), params["expected_revision"]),
             "create_numeric_function": lambda: self.create_numeric_function(

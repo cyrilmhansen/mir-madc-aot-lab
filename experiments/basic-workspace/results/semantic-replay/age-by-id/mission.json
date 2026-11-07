@@ -1,0 +1,76 @@
+{
+  "schema": "basic-workspace.mission-contract",
+  "version": 1,
+  "mission_id": "mission.age-by-logical-id.205.v1",
+  "objective": "Update the age of the person whose logical ID is 205 from 42 to 47, without modifying entity IDs, other ages, function interfaces, control flow or unrelated statements.",
+  "base_document_revision": 1,
+  "execution_profile": "basic-workspace.numeric-control.v1",
+  "enforcement": {
+    "allowed_operations": [
+      "edit_assignment_expression"
+    ],
+    "allowed_target_handle": "people.age.205",
+    "numeric_literal_range": {
+      "minimum": 0,
+      "maximum": 130
+    },
+    "target_resolution": "Resolve the unique logical ID 205 in PERSON_ID initial assignments, then authorize the corresponding PERSON_AGE slot; never equate entity ID with array index.",
+    "candidate_invariants": [
+      "all declarations and signatures unchanged",
+      "all bindings unchanged",
+      "all control flow and statement ordering unchanged",
+      "exactly one selected assignment RHS changes"
+    ],
+    "commit_checks": [
+      "mission id",
+      "execution profile",
+      "expected current revision",
+      "discovered target identity",
+      "range check",
+      "candidate projection semantic diff",
+      "same checks repeated immediately before atomic commit"
+    ],
+    "forbidden_operations": [
+      "rename_symbol",
+      "edit any other assignment",
+      "edit condition or loop bounds",
+      "arbitrary source replacement"
+    ]
+  },
+  "functional_goal": {
+    "logical_id": 205,
+    "old_age": 42,
+    "new_age": 47
+  },
+  "required_invariants": [
+    "PERSON_ID unchanged",
+    "ages for 101 and 900 unchanged",
+    "function signature and nested control flow unchanged"
+  ],
+  "required_post_edit_validations": [
+    {
+      "engine": "interp",
+      "function_handle": "age_by_id.function",
+      "arguments": [
+        205
+      ],
+      "expected": 47.0
+    },
+    {
+      "engine": "jit",
+      "function_handle": "age_by_id.function",
+      "arguments": [
+        205
+      ],
+      "expected": 47.0
+    }
+  ],
+  "advisory_preferences": [
+    "Use the smallest semantic edit."
+  ],
+  "human_approval": {
+    "required_for": [],
+    "approval_token_supported": false
+  },
+  "trust_boundary": "Enforced only through the tools exposed by this campaign gateway; unrestricted Workspace, process, shell, filesystem or direct model access is outside this boundary."
+}

@@ -17,6 +17,7 @@ class Assignment:
     line: int
     target_index: Expr | None = None
     target_is_array: bool = False
+    statement_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -383,8 +384,10 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                                            else target.name.endswith("$")) else "numeric")
             if _expr_type(expression, {a.symbol_id: a.element_type for a in array_rows}) != expected_type:
                 raise _fail("TYPE_MISMATCH", f"Assignment to {target.name} requires a {expected_type} expression", target_token)
+            statement_id = next((statement_id for statement_id, row in doc.statements.items()
+                                 if row["anchor_token_id"] == target_token.uid), None)
             return Assignment(target.id, is_result, expression, target_token.line,
-                              target_index, target_is_array)
+                              target_index, target_is_array, statement_id)
 
         cursor = 0
 
@@ -511,6 +514,57 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
     for function_id in call_graph:
         visit(function_id)
     return CompilableProjection(doc.id, doc.revision, tuple(compiled))
+
+
+def projection_semantics(projection: CompilableProjection) -> dict[str, Any]:
+    """Serialize the immutable typed projection for candidate-policy checks.
+
+    This is a derived, read-only view. It is not a parser input or editable AST.
+    Physical line numbers and transient token IDs are intentionally excluded.
+    """
+    def expression(node: Expr | None) -> dict[str, Any] | None:
+        if node is None:
+            return None
+        return {"kind": node.kind, "value": node.value,
+                "children": [expression(child) for child in node.children]}
+
+    def statement(node: ProjectedStatement) -> dict[str, Any]:
+        if isinstance(node, Assignment):
+            return {"kind": "array_assignment" if node.target_is_array else "assignment",
+                    "statement_id": node.statement_id,
+                    "target_symbol_id": node.target_symbol_id,
+                    "target_is_result": node.target_is_result,
+                    "target_index": expression(node.target_index),
+                    "expression": expression(node.expression)}
+        if isinstance(node, IfBlock):
+            return {"kind": "if", "condition": expression(node.condition),
+                    "then": [statement(x) for x in node.then_body],
+                    "else": [statement(x) for x in node.else_body]}
+        if isinstance(node, ForLoop):
+            return {"kind": "for", "variable_id": node.variable_id,
+                    "start": node.start, "end": node.end, "step": node.step,
+                    "iteration_limit": node.iteration_limit,
+                    "body": [statement(x) for x in node.body]}
+        raise TypeError(f"unsupported projected statement {type(node).__name__}")
+
+    return {"schema": "basic-workspace.typed-projection", "version": 1,
+            "document_id": projection.document_id, "revision": projection.revision,
+            "functions": [{
+                "symbol_id": function.symbol_id, "name": function.name,
+                "scope_id": function.scope_id,
+                "parameter_ids": list(function.parameter_ids),
+                "local_ids": list(function.local_ids),
+                "local_types": list(function.local_types),
+                "return_type": function.return_type,
+                "arrays": [{"symbol_id": array.symbol_id, "name": array.name,
+                            "lower_bound": array.lower_bound,
+                            "upper_bound": array.upper_bound,
+                            "element_type": array.element_type,
+                            "shared": array.shared,
+                            "shared_slot": array.shared_slot}
+                           for array in function.arrays],
+                "statements": [statement(row) for row in function.statements],
+            } for function in projection.functions]}
 
 
 def _validate_calls(expr: Expr, functions: set[str], _count: int, doc: Document) -> None:

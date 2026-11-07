@@ -50,13 +50,30 @@ def frame(events: list[dict[str, Any]], index: int, clear: bool) -> None:
                     ("DENIED — STATE UNCHANGED", "red") if kind == "transaction_rejected" else \
                     ("PREVIEW — NOT COMMITTED", "amber") if kind == "preview_accepted" else \
                     ("OBSERVED", "blue")
-    print(f"{COLORS['blue']}SEMANTIC REPLAY  {index + 1}/{len(events)}{COLORS['reset']}")
+    start = next((e for e in events if e["event"] == "session_started"), {})
+    campaign = start.get("campaign", "semantic operation trace")
+    campaign_kind = start.get("campaign_kind", "unknown")
+    print(f"{COLORS['blue']}{campaign} · {campaign_kind}  {index + 1}/{len(events)}{COLORS['reset']}")
     print(f"{COLORS[color]}{status}{COLORS['reset']}  {LABELS.get(kind, kind)}")
     print(f"{COLORS['muted']}phase={event.get('phase', '—')}  seq={event.get('sequence')}  "
           f"base={event.get('base_revision', '—')}  result={event.get('resulting_revision', event.get('revision', '—'))}{COLORS['reset']}")
-    for key in ("operation", "target_handle", "handle", "name", "code", "message", "passed", "outputs", "equivalence"):
+    for key in ("operation", "tool", "target_handle", "target_statement_id", "statement_handle",
+                "handle", "name", "new_age", "code", "message", "passed", "outputs",
+                "expected", "engine_results", "structural_equivalence", "binding_equivalence",
+                "behavioral_equivalence"):
         if key in event:
             print(f"{key}: {json.dumps(event[key], ensure_ascii=False) if isinstance(event[key], (dict, list)) else event[key]}")
+    if event.get("statement"):
+        statement = event["statement"]
+        print(f"semantic statement: {statement.get('kind')} at {statement.get('nesting_path')} · "
+              f"target={event.get('target_handle', statement.get('target_symbol_id'))} · "
+              f"index={statement.get('target_index')} · value={statement.get('expression')}")
+    result = event.get("result")
+    if isinstance(result, dict):
+        visible = {k: result[k] for k in ("ok", "committed", "code", "message", "revision",
+                                           "target_handle", "new_age", "passed", "results", "expected") if k in result}
+        if visible:
+            print("tool result: " + json.dumps(visible, ensure_ascii=False))
     if event.get("preview_diff"):
         print(f"\n{COLORS['amber']}PROPOSED PREVIEW DIFF (not current state){COLORS['reset']}")
         print(event["preview_diff"])
