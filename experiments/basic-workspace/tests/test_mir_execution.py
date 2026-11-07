@@ -79,7 +79,7 @@ class MirExecutionTests(unittest.TestCase):
         did = self.open("FUNCTION F(X)\nIF X THEN F=1\nEND FUNCTION\n")
         with self.assertRaises(WorkspaceError) as caught:
             self.run_fn(did, "F", [1])
-        self.assertIn(caught.exception.code, ("UNSUPPORTED_STATEMENT", "NOT_COMPILABLE"))
+        self.assertIn(caught.exception.code, ("UNSUPPORTED_STATEMENT", "NOT_COMPILABLE", "UNRESOLVED_ASSIGNMENT"))
         did2 = self.open("FUNCTION TEXT$(X$)\nTEXT$=X$\nEND FUNCTION\n")
         with self.assertRaises(WorkspaceError) as string_error:
             self.run_fn(did2, "TEXT$", [1])

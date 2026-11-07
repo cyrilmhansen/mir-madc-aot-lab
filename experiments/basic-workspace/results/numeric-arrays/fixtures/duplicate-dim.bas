@@ -1,0 +1,7 @@
+FUNCTION DUP(I)
+  DIM A(2)
+  A(1) = 7
+  DIM A(2)
+  DUP = A(1)
+END FUNCTION
+PRINT DUP(1)

@@ -27,6 +27,12 @@ def _check_discovered_expression(workspace: Workspace, document_id: str, express
     elif kind == "binary":
         _check_discovered_expression(workspace, document_id, expression.get("left"))
         _check_discovered_expression(workspace, document_id, expression.get("right"))
+    elif kind == "array_element":
+        array_ref = expression.get("array_ref", {})
+        if isinstance(array_ref, dict) and array_ref.get("kind") == "symbol_ref":
+            if not workspace.symbol_was_discovered(document_id, array_ref.get("symbol_id")):
+                raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover arrays before using their identities")
+        _check_discovered_expression(workspace, document_id, expression.get("index"))
 
 
 def _check_discovered_operations(workspace: Workspace, document_id: str,
@@ -48,6 +54,16 @@ def _check_discovered_operations(workspace: Workspace, document_id: str,
             for local in operation.get("locals", []):
                 if isinstance(local, dict) and "expression" in local:
                     _check_discovered_expression(workspace, document_id, local["expression"])
+            for assignment in operation.get("array_assignments", []):
+                if isinstance(assignment, dict):
+                    ref = assignment.get("array_ref", {})
+                    if isinstance(ref, dict) and ref.get("kind") == "symbol_ref":
+                        sid = ref.get("symbol_id")
+                        if not workspace.symbol_was_discovered(document_id, sid):
+                            raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover arrays before using their identities")
+                    for field in ("index", "expression"):
+                        if field in assignment:
+                            _check_discovered_expression(workspace, document_id, assignment[field])
 
 
 def serve() -> None:
@@ -81,6 +97,16 @@ def serve() -> None:
                 for local in params.get("locals", []):
                     if isinstance(local, dict) and "expression" in local:
                         _check_discovered_expression(workspace, document_id, local["expression"])
+                for assignment in params.get("array_assignments", []):
+                    if isinstance(assignment, dict):
+                        ref = assignment.get("array_ref", {})
+                        if isinstance(ref, dict) and ref.get("kind") == "symbol_ref":
+                            sid = ref.get("symbol_id")
+                            if not workspace.symbol_was_discovered(document_id, sid):
+                                raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover arrays before using their identities")
+                        for field in ("index", "expression"):
+                            if field in assignment:
+                                _check_discovered_expression(workspace, document_id, assignment[field])
                 result = workspace.protocol_call(method, params)
             elif method in ("edit_assignment_expression", "insert_numeric_assignment"):
                 document_id = params["document_id"]

@@ -134,13 +134,14 @@ Implemented indexes and edits:
   array/function-like calls.
 
 The expression grammar is intentionally not reconstructed. `DATA`, `READ`,
-`RESTORE`, `IF`, `FOR`, `NEXT`, arrays, `ON ERROR`, computed branches, and
-many dialect extensions are preserved losslessly, but only the listed
-name/target relationships are indexed. Dynamic/evaluated source, array-vs-call
-ambiguities and unsupported constructs remain explicit limitations. The
-frontend must not be used to claim compiler-level semantic correctness for
-programs outside the supported subset. Full source equivalence is not proof of
-behavior equivalence.
+`RESTORE`, `IF`, `FOR`, `NEXT`, array forms outside the fixed local numeric
+subset, `ON ERROR`, computed branches, and many dialect extensions are
+preserved losslessly. Numeric array declarations and references are indexed
+only within the documented MIR execution subset. Dynamic/evaluated source,
+array-vs-call ambiguities and unsupported constructs remain explicit
+limitations. The frontend must not be used to claim compiler-level semantic
+correctness for programs outside the supported subset. Full source equivalence
+is not proof of behavior equivalence.
 
 The baseline interpreter and JIT were run on
 `tests/fixtures/semantic-before.bas` and the semantically transformed
@@ -165,6 +166,16 @@ the current document revision, numeric arguments, and `engine: "interp"` or
 `"jit"`. Unsupported constructs return explicit diagnostics. Scope, API,
 differential results and limitations are documented in
 `results/mir-execution/REPORT.md`.
+
+The numeric projection also supports function-local, one-dimensional numeric
+arrays declared with `DIM NAME(n)`, where `n` is an inclusive upper bound
+(0..255). Typed construction can declare arrays, write indexed elements and
+read them with `array_element`; each invocation initializes cells to zero and
+invalid dynamic access returns `ARRAY_BOUNDS`. This does not add strings,
+loops, conditions, shared state, or a general ECS. Run
+`python3 numeric_array_demo.py` from this directory; historical comparison,
+performance data and subset limits are in
+`results/numeric-arrays/REPORT.md`.
 
 ## JSON-RPC and optional LSP
 

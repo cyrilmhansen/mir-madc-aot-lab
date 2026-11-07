@@ -13,12 +13,15 @@
 #define MAX_FUNCTIONS 128u
 #define MAX_ARGS 6u
 #define MAX_LOCALS 512u
+#define MAX_ARRAYS 32u
+#define MAX_ARRAY_ELEMENTS 256u
+#define MAX_TOTAL_ARRAY_ELEMENTS 4096u
 #define MAX_STATEMENTS 8192u
 #define MAX_EXPR_DEPTH 256u
 
 enum {
   EX_CONST = 1, EX_LOCAL = 2, EX_RESULT = 3, EX_ADD = 4, EX_SUB = 5,
-  EX_MUL = 6, EX_DIV = 7, EX_NEG = 8, EX_CALL = 9
+  EX_MUL = 6, EX_DIV = 7, EX_NEG = 8, EX_CALL = 9, EX_ARRAY = 10
 };
 
 typedef struct Expr Expr;
@@ -29,6 +32,7 @@ struct Expr {
   uint32_t callee;
   uint32_t nargs;
   Expr **args;
+  uint32_t array;
   Expr *left;
   Expr *right;
 };
@@ -36,13 +40,22 @@ struct Expr {
 typedef struct {
   uint8_t target_kind;
   uint32_t slot;
+  Expr *index;
   Expr *value;
 } Statement;
 
 typedef struct {
+  uint32_t lower;
+  uint32_t upper;
+  MIR_reg_t *elements;
+} Array;
+
+typedef struct {
   uint32_t nargs;
   uint32_t nlocals;
+  uint32_t narrays;
   uint32_t nstatements;
+  Array *arrays;
   Statement *statements;
 } Function;
 
@@ -65,8 +78,13 @@ static void free_expr(Expr *expr) {
 static void free_functions(Function *functions, uint32_t nfunctions) {
   if (functions == NULL) return;
   for (uint32_t i = 0; i < nfunctions; i++) {
+    if (functions[i].arrays != NULL) {
+      for (uint32_t j = 0; j < functions[i].narrays; j++)
+        free(functions[i].arrays[j].elements);
+      free(functions[i].arrays);
+    }
     for (uint32_t j = 0; j < functions[i].nstatements; j++)
-      free_expr(functions[i].statements[j].value);
+      { free_expr(functions[i].statements[j].index); free_expr(functions[i].statements[j].value); }
     free(functions[i].statements);
   }
   free(functions);
@@ -100,7 +118,7 @@ static int read_double(Reader *reader, double *out) {
   return 1;
 }
 
-static Expr *read_expr(Reader *reader, uint32_t depth) {
+static Expr *read_expr(Reader *reader, uint32_t depth, uint32_t narrays) {
   if (depth > MAX_EXPR_DEPTH) {
     reader->error = "expression nesting limit exceeded";
     return NULL;
@@ -121,12 +139,12 @@ static Expr *read_expr(Reader *reader, uint32_t depth) {
   case EX_RESULT:
     break;
   case EX_NEG:
-    expr->left = read_expr(reader, depth + 1);
+    expr->left = read_expr(reader, depth + 1, narrays);
     if (expr->left == NULL) goto fail;
     break;
   case EX_ADD: case EX_SUB: case EX_MUL: case EX_DIV:
-    expr->left = read_expr(reader, depth + 1);
-    expr->right = read_expr(reader, depth + 1);
+    expr->left = read_expr(reader, depth + 1, narrays);
+    expr->right = read_expr(reader, depth + 1, narrays);
     if (expr->left == NULL || expr->right == NULL) goto fail;
     break;
   case EX_CALL:
@@ -141,9 +159,17 @@ static Expr *read_expr(Reader *reader, uint32_t depth) {
       goto fail;
     }
     for (uint32_t i = 0; i < expr->nargs; i++) {
-      expr->args[i] = read_expr(reader, depth + 1);
+      expr->args[i] = read_expr(reader, depth + 1, narrays);
       if (expr->args[i] == NULL) goto fail;
     }
+    break;
+  case EX_ARRAY:
+    if (!read_u32(reader, &expr->array) || expr->array >= narrays) {
+      reader->error = "invalid array expression reference";
+      goto fail;
+    }
+    expr->left = read_expr(reader, depth + 1, narrays);
+    if (expr->left == NULL) goto fail;
     break;
   default:
     reader->error = "unknown expression opcode";
@@ -155,6 +181,36 @@ fail:
   return NULL;
 }
 
+/* Validate cross-function and slot references only after all function
+   signatures have been read. A malformed worker payload must never turn an
+   unchecked function index into an out-of-bounds read during MIR lowering. */
+static int validate_expr(const Expr *expr, const Function *functions,
+                         uint32_t nfunctions, uint32_t current_slots) {
+  if (expr == NULL) return 0;
+  switch (expr->kind) {
+  case EX_CONST: case EX_RESULT:
+    return 1;
+  case EX_LOCAL:
+    return expr->slot < current_slots;
+  case EX_NEG:
+    return validate_expr(expr->left, functions, nfunctions, current_slots);
+  case EX_ADD: case EX_SUB: case EX_MUL: case EX_DIV:
+    return validate_expr(expr->left, functions, nfunctions, current_slots) &&
+           validate_expr(expr->right, functions, nfunctions, current_slots);
+  case EX_CALL:
+    if (expr->callee >= nfunctions ||
+        expr->nargs != functions[expr->callee].nargs) return 0;
+    for (uint32_t i = 0; i < expr->nargs; i++)
+      if (!validate_expr(expr->args[i], functions, nfunctions, current_slots)) return 0;
+    return 1;
+  case EX_ARRAY:
+    return expr->array < 32 &&
+           validate_expr(expr->left, functions, nfunctions, current_slots);
+  default:
+    return 0;
+  }
+}
+
 static Function *read_projection(const uint8_t *data, size_t length,
                                  uint32_t *engine, uint32_t *target,
                                  uint32_t *nfunctions, uint32_t *call_argc,
@@ -162,13 +218,15 @@ static Function *read_projection(const uint8_t *data, size_t length,
   Reader reader = {data, length, 0, NULL};
   uint8_t magic[4];
   uint32_t version;
-  if (!read_bytes(&reader, magic, sizeof(magic)) || memcmp(magic, "BWM1", 4) != 0 ||
+  if (!read_bytes(&reader, magic, sizeof(magic)) ||
+      (memcmp(magic, "BWM1", 4) != 0 && memcmp(magic, "BWM2", 4) != 0) ||
       !read_u32(&reader, &version) || !read_u32(&reader, engine) ||
       !read_u32(&reader, target) || !read_u32(&reader, nfunctions)) {
     *error = reader.error != NULL ? reader.error : "invalid binary projection header";
     return NULL;
   }
-  if (version != 1 || *engine > 1 || *nfunctions == 0 || *nfunctions > MAX_FUNCTIONS ||
+  int version2 = memcmp(magic, "BWM2", 4) == 0;
+  if (version != (version2 ? 2u : 1u) || *engine > 1 || *nfunctions == 0 || *nfunctions > MAX_FUNCTIONS ||
       *target >= *nfunctions) {
     *error = "unsupported binary projection header values";
     return NULL;
@@ -180,12 +238,34 @@ static Function *read_projection(const uint8_t *data, size_t length,
   }
   for (uint32_t i = 0; i < *nfunctions; i++) {
     Function *function = &functions[i];
-    if (!read_u32(&reader, &function->nargs) || !read_u32(&reader, &function->nlocals) ||
-        !read_u32(&reader, &function->nstatements)) goto fail;
+    if (!read_u32(&reader, &function->nargs) || !read_u32(&reader, &function->nlocals)) goto fail;
+    if (version2) {
+      if (!read_u32(&reader, &function->narrays)) goto fail;
+    }
+    if (!read_u32(&reader, &function->nstatements)) goto fail;
     if (function->nargs > MAX_ARGS || function->nlocals > MAX_LOCALS ||
+        function->narrays > MAX_ARRAYS ||
         function->nstatements > MAX_STATEMENTS) {
       reader.error = "function exceeds supported MIR worker limits";
       goto fail;
+    }
+    if (function->narrays != 0) {
+      function->arrays = calloc(function->narrays, sizeof(*function->arrays));
+      if (function->arrays == NULL) { reader.error = "out of memory reading arrays"; goto fail; }
+      uint32_t total_elements = 0;
+      for (uint32_t j = 0; j < function->narrays; j++) {
+        Array *array = &function->arrays[j];
+        if (!read_u32(&reader, &array->lower) || !read_u32(&reader, &array->upper)) goto fail;
+        if (array->lower != 0 || array->upper >= MAX_ARRAY_ELEMENTS) {
+          reader.error = "array bounds exceed supported fixed numeric-array limits";
+          goto fail;
+        }
+        total_elements += array->upper - array->lower + 1;
+        if (total_elements > MAX_TOTAL_ARRAY_ELEMENTS) {
+          reader.error = "function exceeds supported total array capacity";
+          goto fail;
+        }
+      }
     }
     function->statements = calloc(function->nstatements == 0 ? 1 : function->nstatements,
                                   sizeof(*function->statements));
@@ -198,13 +278,34 @@ static Function *read_projection(const uint8_t *data, size_t length,
       if (!read_u8(&reader, &statement->target_kind)) goto fail;
       reader.offset += 3; /* reserved bytes */
       if (reader.offset > reader.length || !read_u32(&reader, &statement->slot)) goto fail;
-      if (statement->target_kind > 1 ||
+      if (statement->target_kind > 2 ||
           (statement->target_kind == 0 && statement->slot >= function->nargs + function->nlocals)) {
         reader.error = "invalid assignment target slot";
         goto fail;
       }
-      statement->value = read_expr(&reader, 0);
+      if (statement->target_kind == 2 && statement->slot >= function->narrays) {
+        reader.error = "invalid array assignment target";
+        goto fail;
+      }
+      if (statement->target_kind == 2) {
+        statement->index = read_expr(&reader, 0, function->narrays);
+        if (statement->index == NULL) goto fail;
+      }
+      statement->value = read_expr(&reader, 0, function->narrays);
       if (statement->value == NULL) goto fail;
+    }
+  }
+  for (uint32_t i = 0; i < *nfunctions; i++) {
+    Function *function = &functions[i];
+    uint32_t slots = function->nargs + function->nlocals;
+    for (uint32_t j = 0; j < function->nstatements; j++) {
+      Statement *statement = &function->statements[j];
+      if ((statement->index != NULL &&
+           !validate_expr(statement->index, functions, *nfunctions, slots)) ||
+          !validate_expr(statement->value, functions, *nfunctions, slots)) {
+        reader.error = "invalid function, local, or array reference in expression";
+        goto fail;
+      }
     }
   }
   uint32_t payload_target;
@@ -236,9 +337,78 @@ static void emit_double_move(MIR_context_t ctx, MIR_item_t item, MIR_reg_t dst, 
   MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DMOV, MIR_new_reg_op(ctx, dst), src));
 }
 
+static MIR_reg_t lower_expr(MIR_context_t, MIR_item_t, MIR_reg_t *, MIR_reg_t,
+                            MIR_reg_t, MIR_item_t *, MIR_item_t *, uint32_t,
+                            Array *, uint32_t, MIR_label_t *, const Expr *, uint32_t *);
+
+static MIR_reg_t lower_checked_index(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots,
+                                     MIR_reg_t result_reg, MIR_reg_t error_reg,
+                                     MIR_item_t *protos, MIR_item_t *forwards,
+                                     uint32_t slot_count, Array *arrays, uint32_t narrays,
+                                     MIR_label_t *bounds_bad, const Expr *index_expr,
+                                     uint32_t array_slot, uint32_t *temp_counter) {
+  (void) error_reg;
+  if (array_slot >= narrays) return 0;
+  MIR_reg_t raw = lower_expr(ctx, item, slots, result_reg, error_reg, protos, forwards,
+                             slot_count, arrays, narrays, bounds_bad, index_expr, temp_counter);
+  if (raw == 0) return 0;
+  if (*bounds_bad == NULL) *bounds_bad = MIR_new_label(ctx);
+  MIR_func_t function = item->u.func;
+  char index_name[40];
+  snprintf(index_name, sizeof(index_name), "array_index_%u", (*temp_counter)++);
+  MIR_reg_t index = MIR_new_func_reg(ctx, function, MIR_T_I64, index_name);
+  MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DBNE, MIR_new_label_op(ctx, *bounds_bad),
+                                          MIR_new_reg_op(ctx, raw), MIR_new_reg_op(ctx, raw)));
+  MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DBLT, MIR_new_label_op(ctx, *bounds_bad),
+                                          MIR_new_reg_op(ctx, raw), MIR_new_double_op(ctx, -1.0)));
+  MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DBGE, MIR_new_label_op(ctx, *bounds_bad),
+                                          MIR_new_reg_op(ctx, raw),
+                                          MIR_new_double_op(ctx, (double) arrays[array_slot].upper + 1.0)));
+  MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_D2I, MIR_new_reg_op(ctx, index),
+                                          MIR_new_reg_op(ctx, raw)));
+  return index;
+}
+
+static int lower_array_store(MIR_context_t ctx, MIR_item_t item, Array *array,
+                             MIR_reg_t index, MIR_reg_t value) {
+  uint32_t capacity = array->upper - array->lower + 1;
+  MIR_label_t done = MIR_new_label(ctx);
+  MIR_label_t *cases = calloc(capacity, sizeof(*cases));
+  if (cases == NULL) return 0;
+  for (uint32_t i = 0; i < capacity; i++) {
+    cases[i] = MIR_new_label(ctx);
+    MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, cases[i]),
+                                            MIR_new_reg_op(ctx, index),
+                                            MIR_new_int_op(ctx, (int64_t) i)));
+  }
+  MIR_label_t bad = MIR_new_label(ctx);
+  MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, bad)));
+  for (uint32_t i = 0; i < capacity; i++) {
+    MIR_append_insn(ctx, item, cases[i]);
+    emit_double_move(ctx, item, array->elements[i], MIR_new_reg_op(ctx, value));
+    MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, done)));
+  }
+  MIR_append_insn(ctx, item, bad);
+  MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, done)));
+  MIR_append_insn(ctx, item, done);
+  free(cases);
+  return 1;
+}
+
+static int constant_array_index(const Expr *expr, const Array *array, uint32_t *slot) {
+  if (expr == NULL || expr->kind != EX_CONST || !isfinite(expr->value)) return 0;
+  double raw = expr->value;
+  if (raw <= -1.0 || raw >= (double) array->upper + 1.0) return 0;
+  int64_t index = (int64_t) raw; /* historical BASIC converts by truncating toward zero */
+  if (index < (int64_t) array->lower || index > (int64_t) array->upper) return 0;
+  *slot = (uint32_t) index;
+  return 1;
+}
+
 static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots,
-                            MIR_reg_t result_reg, MIR_item_t *protos,
-                            MIR_item_t *forwards, uint32_t slot_count, const Expr *expr,
+                            MIR_reg_t result_reg, MIR_reg_t error_reg, MIR_item_t *protos,
+                            MIR_item_t *forwards, uint32_t slot_count, Array *arrays,
+                            uint32_t narrays, MIR_label_t *bounds_bad, const Expr *expr,
                             uint32_t *temp_counter) {
   MIR_func_t function = item->u.func;
   MIR_reg_t dst;
@@ -253,18 +423,18 @@ static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots
   case EX_RESULT:
     return result_reg;
   case EX_NEG: {
-    MIR_reg_t operand = lower_expr(ctx, item, slots, result_reg, protos, forwards,
-                                   slot_count, expr->left, temp_counter);
+    MIR_reg_t operand = lower_expr(ctx, item, slots, result_reg, error_reg, protos, forwards,
+                                   slot_count, arrays, narrays, bounds_bad, expr->left, temp_counter);
     dst = new_temp(ctx, function, temp_counter);
     MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_DNEG, MIR_new_reg_op(ctx, dst),
                                             MIR_new_reg_op(ctx, operand)));
     return dst;
   }
   case EX_ADD: case EX_SUB: case EX_MUL: case EX_DIV: {
-    MIR_reg_t left = lower_expr(ctx, item, slots, result_reg, protos, forwards,
-                                slot_count, expr->left, temp_counter);
-    MIR_reg_t right = lower_expr(ctx, item, slots, result_reg, protos, forwards,
-                                 slot_count, expr->right, temp_counter);
+    MIR_reg_t left = lower_expr(ctx, item, slots, result_reg, error_reg, protos, forwards,
+                                slot_count, arrays, narrays, bounds_bad, expr->left, temp_counter);
+    MIR_reg_t right = lower_expr(ctx, item, slots, result_reg, error_reg, protos, forwards,
+                                 slot_count, arrays, narrays, bounds_bad, expr->right, temp_counter);
     MIR_insn_code_t code = expr->kind == EX_ADD ? MIR_DADD : expr->kind == EX_SUB ? MIR_DSUB :
                            expr->kind == EX_MUL ? MIR_DMUL : MIR_DDIV;
     dst = new_temp(ctx, function, temp_counter);
@@ -273,18 +443,50 @@ static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots
     return dst;
   }
   case EX_CALL: {
-    MIR_op_t call_ops[3 + MAX_ARGS];
+    MIR_op_t call_ops[4 + MAX_ARGS];
     if (expr->callee >= MAX_FUNCTIONS || expr->nargs > MAX_ARGS) return 0;
     dst = new_temp(ctx, function, temp_counter);
     call_ops[0] = MIR_new_ref_op(ctx, protos[expr->callee]);
     call_ops[1] = MIR_new_ref_op(ctx, forwards[expr->callee]);
     call_ops[2] = MIR_new_reg_op(ctx, dst);
     for (uint32_t i = 0; i < expr->nargs; i++) {
-      MIR_reg_t arg = lower_expr(ctx, item, slots, result_reg, protos, forwards,
-                                 slot_count, expr->args[i], temp_counter);
+      MIR_reg_t arg = lower_expr(ctx, item, slots, result_reg, error_reg, protos, forwards,
+                                 slot_count, arrays, narrays, bounds_bad, expr->args[i], temp_counter);
       call_ops[3 + i] = MIR_new_reg_op(ctx, arg);
     }
-    MIR_append_insn(ctx, item, MIR_new_insn_arr(ctx, MIR_CALL, 3 + expr->nargs, call_ops));
+    call_ops[3 + expr->nargs] = MIR_new_reg_op(ctx, error_reg);
+    MIR_append_insn(ctx, item, MIR_new_insn_arr(ctx, MIR_CALL, 4 + expr->nargs, call_ops));
+    return dst;
+  }
+  case EX_ARRAY: {
+    if (expr->array >= narrays) return 0;
+    uint32_t constant_slot;
+    if (constant_array_index(expr->left, &arrays[expr->array], &constant_slot))
+      return arrays[expr->array].elements[constant_slot];
+    MIR_reg_t index = lower_checked_index(ctx, item, slots, result_reg, error_reg,
+        protos, forwards, slot_count, arrays, narrays, bounds_bad, expr->left,
+        expr->array, temp_counter);
+    if (index == 0) return 0;
+    dst = new_temp(ctx, function, temp_counter);
+    MIR_label_t done = MIR_new_label(ctx);
+    MIR_label_t *cases = calloc(arrays[expr->array].upper - arrays[expr->array].lower + 1,
+                                sizeof(*cases));
+    if (cases == NULL) return 0;
+    uint32_t capacity = arrays[expr->array].upper - arrays[expr->array].lower + 1;
+    for (uint32_t i = 0; i < capacity; i++) {
+      cases[i] = MIR_new_label(ctx);
+      MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, cases[i]),
+                                              MIR_new_reg_op(ctx, index),
+                                              MIR_new_int_op(ctx, (int64_t) i)));
+    }
+    MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, *bounds_bad)));
+    for (uint32_t i = 0; i < capacity; i++) {
+      MIR_append_insn(ctx, item, cases[i]);
+      emit_double_move(ctx, item, dst, MIR_new_reg_op(ctx, arrays[expr->array].elements[i]));
+      MIR_append_insn(ctx, item, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, done)));
+    }
+    MIR_append_insn(ctx, item, done);
+    free(cases);
     return dst;
   }
   default:
@@ -292,15 +494,15 @@ static MIR_reg_t lower_expr(MIR_context_t ctx, MIR_item_t item, MIR_reg_t *slots
   }
 }
 
-static double call_native(void *address, uint32_t argc, const double *a) {
+static double call_native(void *address, uint32_t argc, const double *a, uint32_t *error_status) {
   switch (argc) {
-  case 0: return ((double (*)(void))address)();
-  case 1: return ((double (*)(double))address)(a[0]);
-  case 2: return ((double (*)(double, double))address)(a[0], a[1]);
-  case 3: return ((double (*)(double, double, double))address)(a[0], a[1], a[2]);
-  case 4: return ((double (*)(double, double, double, double))address)(a[0], a[1], a[2], a[3]);
-  case 5: return ((double (*)(double, double, double, double, double))address)(a[0], a[1], a[2], a[3], a[4]);
-  case 6: return ((double (*)(double, double, double, double, double, double))address)(a[0], a[1], a[2], a[3], a[4], a[5]);
+  case 0: return ((double (*)(void *))address)(error_status);
+  case 1: return ((double (*)(double, void *))address)(a[0], error_status);
+  case 2: return ((double (*)(double, double, void *))address)(a[0], a[1], error_status);
+  case 3: return ((double (*)(double, double, double, void *))address)(a[0], a[1], a[2], error_status);
+  case 4: return ((double (*)(double, double, double, double, void *))address)(a[0], a[1], a[2], a[3], error_status);
+  case 5: return ((double (*)(double, double, double, double, double, void *))address)(a[0], a[1], a[2], a[3], a[4], error_status);
+  case 6: return ((double (*)(double, double, double, double, double, double, void *))address)(a[0], a[1], a[2], a[3], a[4], a[5], error_status);
   default: return NAN;
   }
 }
@@ -370,8 +572,8 @@ int main(void) {
   MIR_item_t *protos = calloc(nfunctions, sizeof(*protos));
   MIR_item_t *forwards = calloc(nfunctions, sizeof(*forwards));
   MIR_item_t *items = calloc(nfunctions, sizeof(*items));
-  MIR_var_t *vars = calloc((size_t)nfunctions * MAX_ARGS, sizeof(*vars));
-  char (*names)[MAX_ARGS][32] = calloc(nfunctions, sizeof(*names));
+  MIR_var_t *vars = calloc((size_t)nfunctions * (MAX_ARGS + 1), sizeof(*vars));
+  char (*names)[MAX_ARGS + 1][32] = calloc(nfunctions, sizeof(*names));
   MIR_type_t *result_types = calloc(nfunctions, sizeof(*result_types));
   int failed = module == NULL || protos == NULL || forwards == NULL || items == NULL ||
                vars == NULL || names == NULL || result_types == NULL;
@@ -385,15 +587,19 @@ int main(void) {
     snprintf(function_name, sizeof(function_name), "bw_func_%u", i);
     snprintf(proto_name, sizeof(proto_name), "bw_func_%u_p", i);
     result_types[i] = MIR_T_D;
-    MIR_var_t *function_vars = vars + (size_t)i * MAX_ARGS;
+    MIR_var_t *function_vars = vars + (size_t)i * (MAX_ARGS + 1);
     for (uint32_t j = 0; j < functions[i].nargs; j++) {
       snprintf(names[i][j], sizeof(names[i][j]), "arg_%u_%u", i, j);
       function_vars[j].type = MIR_T_D;
       function_vars[j].name = names[i][j];
       function_vars[j].size = 0;
     }
+    snprintf(names[i][functions[i].nargs], sizeof(names[i][functions[i].nargs]), "bw_error_%u", i);
+    function_vars[functions[i].nargs].type = MIR_T_P;
+    function_vars[functions[i].nargs].name = names[i][functions[i].nargs];
+    function_vars[functions[i].nargs].size = 0;
     protos[i] = MIR_new_proto_arr(ctx, proto_name, 1, &result_types[i],
-                                  functions[i].nargs, function_vars);
+                                  functions[i].nargs + 1, function_vars);
     forwards[i] = MIR_new_forward(ctx, function_name);
     if (protos[i] == NULL || forwards[i] == NULL) { failed = 1; break; }
   }
@@ -401,9 +607,9 @@ int main(void) {
   for (uint32_t i = 0; !failed && i < nfunctions; i++) {
     char function_name[48];
     snprintf(function_name, sizeof(function_name), "bw_func_%u", i);
-    MIR_var_t *function_vars = vars + (size_t)i * MAX_ARGS;
+    MIR_var_t *function_vars = vars + (size_t)i * (MAX_ARGS + 1);
     items[i] = MIR_new_func_arr(ctx, function_name, 1, &result_types[i],
-                                functions[i].nargs, function_vars);
+                                functions[i].nargs + 1, function_vars);
     if (items[i] == NULL) { failed = 1; break; }
     MIR_func_t mir_func = items[i]->u.func;
     uint32_t slot_count = functions[i].nargs + functions[i].nlocals;
@@ -411,6 +617,7 @@ int main(void) {
     if (slots == NULL) { failed = 1; break; }
     for (uint32_t j = 0; j < functions[i].nargs; j++)
       slots[j] = MIR_reg(ctx, names[i][j], mir_func);
+    MIR_reg_t error_reg = MIR_reg(ctx, names[i][functions[i].nargs], mir_func);
     uint32_t temp_counter = 0;
     for (uint32_t j = 0; j < functions[i].nlocals; j++) {
       char local_name[48];
@@ -418,18 +625,58 @@ int main(void) {
       slots[functions[i].nargs + j] = MIR_new_func_reg(ctx, mir_func, MIR_T_D, local_name);
       emit_double_move(ctx, items[i], slots[functions[i].nargs + j], MIR_new_double_op(ctx, 0.0));
     }
+    for (uint32_t j = 0; j < functions[i].narrays; j++) {
+      Array *array = &functions[i].arrays[j];
+      uint32_t capacity = array->upper - array->lower + 1;
+      array->elements = calloc(capacity, sizeof(*array->elements));
+      if (array->elements == NULL) { failed = 1; break; }
+      for (uint32_t k = 0; k < capacity; k++) {
+        char array_name[48];
+        snprintf(array_name, sizeof(array_name), "array_%u_%u", j, k);
+        array->elements[k] = MIR_new_func_reg(ctx, mir_func, MIR_T_D, array_name);
+        emit_double_move(ctx, items[i], array->elements[k], MIR_new_double_op(ctx, 0.0));
+      }
+    }
+    if (failed) { free(slots); break; }
     MIR_reg_t return_reg = MIR_new_func_reg(ctx, mir_func, MIR_T_D, "basic_result");
     emit_double_move(ctx, items[i], return_reg, MIR_new_double_op(ctx, 0.0));
+    MIR_label_t bounds_bad = NULL;
     for (uint32_t j = 0; j < functions[i].nstatements; j++) {
       Statement *statement = &functions[i].statements[j];
-      MIR_reg_t value = lower_expr(ctx, items[i], slots, return_reg, protos, forwards,
-                                   slot_count, statement->value, &temp_counter);
-      MIR_reg_t destination = statement->target_kind == 1 ? return_reg : slots[statement->slot];
-      if (value == 0 || destination == 0) { failed = 1; break; }
-      MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_DMOV, MIR_new_reg_op(ctx, destination),
-                                                  MIR_new_reg_op(ctx, value)));
+      MIR_reg_t value = lower_expr(ctx, items[i], slots, return_reg, error_reg, protos, forwards,
+                                   slot_count, functions[i].arrays, functions[i].narrays,
+                                   &bounds_bad, statement->value, &temp_counter);
+      if (value == 0) { failed = 1; break; }
+      if (statement->target_kind == 2) {
+        Array *array = &functions[i].arrays[statement->slot];
+        uint32_t constant_slot;
+        if (constant_array_index(statement->index, array, &constant_slot)) {
+          emit_double_move(ctx, items[i], array->elements[constant_slot], MIR_new_reg_op(ctx, value));
+        } else {
+          MIR_reg_t index = lower_checked_index(ctx, items[i], slots, return_reg, error_reg,
+              protos, forwards, slot_count, functions[i].arrays, functions[i].narrays,
+              &bounds_bad, statement->index, statement->slot, &temp_counter);
+          if (index == 0 || !lower_array_store(ctx, items[i], array, index, value)) {
+            failed = 1; break;
+          }
+        }
+      } else {
+        MIR_reg_t destination = statement->target_kind == 1 ? return_reg : slots[statement->slot];
+        if (destination == 0) { failed = 1; break; }
+        MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_DMOV, MIR_new_reg_op(ctx, destination),
+                                                    MIR_new_reg_op(ctx, value)));
+      }
     }
     if (!failed) {
+      if (bounds_bad != NULL) {
+        MIR_label_t normal_exit = MIR_new_label(ctx);
+        MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, normal_exit)));
+        MIR_append_insn(ctx, items[i], bounds_bad);
+        MIR_append_insn(ctx, items[i], MIR_new_insn(ctx, MIR_MOV,
+            MIR_new_mem_op(ctx, MIR_T_I32, 0, error_reg, 0, 1), MIR_new_int_op(ctx, 1)));
+        MIR_append_insn(ctx, items[i], MIR_new_ret_insn(ctx, 1, MIR_new_double_op(ctx, NAN)));
+        MIR_append_insn(ctx, items[i], normal_exit);
+      }
       MIR_append_insn(ctx, items[i], MIR_new_ret_insn(ctx, 1, MIR_new_reg_op(ctx, return_reg)));
       MIR_finish_func(ctx);
     }
@@ -445,14 +692,16 @@ int main(void) {
   build_ms = monotonic_ms() - build_started;
   if (getenv("BASIC_WORKSPACE_MIR_DUMP") != NULL) MIR_output(ctx, stderr);
   double result = 0.0;
+  uint32_t bounds_error = 0;
   double link_started = monotonic_ms();
   if (engine == 0) {
     MIR_link(ctx, MIR_set_interp_interface, NULL);
     link_ms = monotonic_ms() - link_started;
-    MIR_val_t values[MAX_ARGS], results[1];
+    MIR_val_t values[MAX_ARGS + 1], results[1];
     for (uint32_t i = 0; i < argc; i++) values[i].d = args[i];
+    values[argc].a = &bounds_error;
     double invoke_started = monotonic_ms();
-    MIR_interp_arr(ctx, items[target], results, argc, values);
+    MIR_interp_arr(ctx, items[target], results, argc + 1, values);
     invoke_ms = monotonic_ms() - invoke_started;
     result = results[0].d;
   } else {
@@ -468,11 +717,13 @@ int main(void) {
       goto cleanup;
     }
     double invoke_started = monotonic_ms();
-    result = call_native(address, argc, args);
+    result = call_native(address, argc, args, &bounds_error);
     invoke_ms = monotonic_ms() - invoke_started;
     MIR_gen_finish(ctx);
   }
-  if (!isfinite(result)) {
+  if (bounds_error != 0) {
+    report_error("ARRAY_BOUNDS", "numeric array index is outside its declared bounds");
+  } else if (!isfinite(result)) {
     report_error("NON_FINITE_RESULT", "execution produced a non-finite double result");
   } else {
     struct rusage usage;

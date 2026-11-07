@@ -92,6 +92,23 @@ def parse_request(value: Any, symbols: Mapping[str, Any], current_scope: str,
             children.append(child)
             refs.extend(child_refs)
         return Expr("call", callee_id, tuple(children)), tuple(refs)
+    if kind == "array_element":
+        if set(value) != {"kind", "array_ref", "index"}:
+            raise WorkspaceError("INVALID_EXPRESSION", "array_element requires kind, array_ref, and index")
+        array_ref = value["array_ref"]
+        if (not isinstance(array_ref, dict) or set(array_ref) != {"kind", "symbol_id"}
+                or array_ref.get("kind") != "symbol_ref" or not isinstance(array_ref["symbol_id"], str)):
+            raise WorkspaceError("INVALID_ARRAY_REFERENCE", "array_ref must contain a discovered array symbol identity")
+        array_id = array_ref["symbol_id"]
+        array = symbols.get(array_id)
+        if array is None or array.kind != "array":
+            raise WorkspaceError("UNSUPPORTED_TYPE", "array_element must reference a declared numeric array")
+        if array.scope_id != current_scope:
+            raise WorkspaceError("CROSS_SCOPE_REFERENCE", f"Array {array.name} is outside the current function scope")
+        index, index_refs = parse_request(value["index"], symbols, current_scope,
+                                          current_function_id, function_parameters,
+                                          depth + 1, max_depth)
+        return Expr("array_element", array_id, (index,)), (array_id,) + index_refs
     raise WorkspaceError("UNSUPPORTED_EXPRESSION", f"Unsupported expression kind {kind!r}")
 
 
@@ -130,4 +147,9 @@ def expression_tokens(expr: Expr, symbols: Mapping[str, Any]) -> tuple[list[tupl
             refs.extend(child_refs)
         output.append(("PUNCT", ")"))
         return output, tuple(refs)
+    if expr.kind == "array_element":
+        sid = str(expr.value)
+        child, child_refs = expression_tokens(expr.children[0], symbols)
+        return ([ ("IDENT", symbols[sid].name), ("PUNCT", "(") ] + child + [("PUNCT", ")")],
+                (sid,) + child_refs)
     raise WorkspaceError("UNSUPPORTED_EXPRESSION", f"Unsupported projection node {expr.kind!r}")

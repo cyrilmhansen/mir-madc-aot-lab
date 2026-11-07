@@ -203,8 +203,8 @@ END FUNCTION
     def test_dim_array_use_is_not_guessed_as_a_function(self):
         did = self.open("DIM A(10)\nPRINT A(1)\nEND\n")
         self.assertNotIn("AMBIGUOUS_CALL_OR_ARRAY", {d["code"] for d in self.ws.get_diagnostics(did)})
-        a = self.symbol(did, "variable", "A")
-        self.assertEqual(2, a["reference_count"])
+        a = self.symbol(did, "array", "A")
+        self.assertEqual(1, a["reference_count"])
 
     def test_json_rpc_stdio_roundtrip(self):
         root = pathlib.Path(__file__).resolve().parents[1]

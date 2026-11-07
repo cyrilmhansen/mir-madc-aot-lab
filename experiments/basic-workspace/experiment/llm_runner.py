@@ -94,6 +94,16 @@ EXPRESSION_SCHEMA = {"type": "object", "properties": {
     "arguments": {"type": "array", "items": {"type": "object"}},
 }, "required": ["kind"], "additionalProperties": False,
     "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."}
+EXPRESSION_SCHEMA["properties"]["kind"]["enum"].append("array_element")
+EXPRESSION_SCHEMA["properties"]["array_ref"] = {"type": "object", "properties": {
+    "kind": {"type": "string", "enum": ["symbol_ref", "local_ref"]},
+    "symbol_id": STR, "name": STR}, "required": ["kind"], "additionalProperties": False}
+EXPRESSION_SCHEMA["properties"]["index"] = {"type": "object"}
+EXPRESSION_SCHEMA["description"] += ", array_element(array_ref,index) for a discovered numeric array"
+
+ARRAY_REFERENCE_SCHEMA = {"type": "object", "properties": {
+    "kind": {"type": "string", "enum": ["symbol_ref", "local_ref"]},
+    "symbol_id": STR, "name": STR}, "required": ["kind"], "additionalProperties": False}
 
 CONSTRUCTION_SEMANTIC_TOOLS = [
     schema("workspace_structure", "Discover functions, line labels, revision, and diagnostics without returning source text.",
@@ -101,13 +111,20 @@ CONSTRUCTION_SEMANTIC_TOOLS = [
     schema("workspace_symbols", "Filter and discover semantic symbols and their opaque IDs.",
            {"kind": STR, "exact_name": STR, "unique": BOOL, "scope_id": STR,
             "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
-    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION and body in one revision. In expression/local initializer trees use local_ref(name) for parameters or earlier locals declared by this request. Returns stable function, parameter, local, and statement IDs.",
+    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION and body in one revision. Optional fixed numeric arrays use zero-based inclusive upper_bound; array_assignments writes indexed values in order. In expression/local initializer trees use local_ref(name) for parameters, earlier locals, or constructor-local arrays. Returns stable function, parameter, local, array, and statement IDs.",
            {"expected_revision": INT, "name": STR,
             "parameters": {"type": "array", "items": STR, "maxItems": 6},
             "expression": EXPRESSION_SCHEMA,
             "locals": {"type": "array", "maxItems": 16, "items": {"type": "object",
                 "properties": {"name": STR, "expression": EXPRESSION_SCHEMA},
-                "required": ["name", "expression"], "additionalProperties": False}}},
+                "required": ["name", "expression"], "additionalProperties": False}},
+            "arrays": {"type": "array", "maxItems": 32, "items": {"type": "object",
+                "properties": {"name": STR, "upper_bound": {"type": "integer", "minimum": 0, "maximum": 255}},
+                "required": ["name", "upper_bound"], "additionalProperties": False}},
+            "array_assignments": {"type": "array", "maxItems": 4096, "items": {"type": "object",
+                "properties": {"array_ref": ARRAY_REFERENCE_SCHEMA,
+                    "index": EXPRESSION_SCHEMA, "expression": EXPRESSION_SCHEMA},
+                "required": ["array_ref", "index", "expression"], "additionalProperties": False}}},
            ["expected_revision", "name", "parameters", "expression"]),
     schema("workspace_statements", "Discover bounded assignment statements in a discovered function, including stable IDs and referenced symbols.",
            {"function_id": STR, "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["function_id"]),

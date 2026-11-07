@@ -38,6 +38,8 @@ class Symbol:
     declaration_token: str
     line: int
     implicit: bool = False
+    array_lower: int | None = None
+    array_upper: int | None = None
     references: list[str] = field(default_factory=list)
 
 
@@ -62,6 +64,8 @@ class Document:
     labels: dict[int, str] = field(default_factory=dict)
     label_tokens: dict[str, str] = field(default_factory=dict)
     line_refs: dict[str, int] = field(default_factory=dict)
+    # Derived from DIM statements on every index rebuild: symbol ID -> (lower, upper).
+    array_bounds: dict[str, tuple[int, int]] = field(default_factory=dict)
     lines: list[dict[str, Any]] = field(default_factory=list)
     functions: list[dict[str, Any]] = field(default_factory=list)
     statements: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -241,6 +245,7 @@ class Workspace:
         doc.labels = {}
         doc.label_tokens = {}
         doc.line_refs = {}
+        doc.array_bounds = {}
         doc.diagnostics = []
         doc.lines = []
         doc.functions = []
@@ -425,17 +430,66 @@ class Workspace:
                                     doc.token_symbol[sig[j + 1].uid] = label_symbol.id
                             j += 2
 
+        # Index the fixed, one-dimensional numeric DIM subset. Bounds and array
+        # symbols are derived from canonical tokens; only DIM A(nonnegative-int)
+        # is admitted here. The executable projection further checks scope/use.
+        array_symbols: dict[tuple[str, str], Symbol] = {}
+        for statement_index, st in enumerate(statements):
+            sig = st["tokens"]
+            if not sig or sig[0].text.upper() != "DIM":
+                continue
+            enclosing = next((f for f in function_ranges
+                              if f["start_statement"] < statement_index
+                              and f["end_statement"] is not None
+                              and statement_index < f["end_statement"]), None)
+            scope_id = enclosing["scope_id"] if enclosing else "module"
+            if (len(sig) != 5 or sig[1].kind != "IDENT" or sig[2].text != "("
+                    or sig[3].kind != "NUMBER" or not sig[3].text.isdigit()
+                    or sig[4].text != ")"):
+                doc.diagnostics.append(Diagnostic(
+                    "UNSUPPORTED_DIM", "Only DIM NAME(nonnegative-integer) is indexed by this Workspace subset",
+                    "warning", sig[0].line, sig[0].column))
+                continue
+            name_token = sig[1]
+            key = (scope_id, name_token.text.casefold())
+            try:
+                upper = int(sig[3].text)
+            except ValueError:
+                upper = 0
+            if upper > 255:
+                doc.diagnostics.append(Diagnostic("ARRAY_CAPACITY_LIMIT",
+                    "Numeric arrays are limited to 256 elements (upper bound 255)",
+                    "error", sig[3].line, sig[3].column))
+                continue
+            if key in array_symbols:
+                doc.diagnostics.append(Diagnostic("DUPLICATE_DIM",
+                    f"Array {name_token.text} is dimensioned more than once in the same scope",
+                    "error", name_token.line, name_token.column))
+                continue
+            existing = next((s for s in doc.symbols.values()
+                             if s.normalized == key[1]
+                             and ((s.scope_id == scope_id and s.kind == "parameter")
+                                  or (s.scope_id == "module" and s.kind in (
+                                      "function", "procedure", "external_function",
+                                      "external_procedure")))), None)
+            if existing is not None:
+                doc.diagnostics.append(Diagnostic("ARRAY_NAME_COLLISION",
+                    f"Array {name_token.text} collides with {existing.kind} {existing.name}",
+                    "error", name_token.line, name_token.column))
+                continue
+            sid = previous_ids.get(f"array:{name_token.uid}") or opaque("sym")
+            symbol = Symbol(sid, "array", name_token.text, name_token.text.casefold(),
+                            scope_id, doc.id, name_token.uid, name_token.line,
+                            array_lower=0, array_upper=upper)
+            doc.symbols[sid] = symbol
+            doc.token_symbol[name_token.uid] = sid
+            doc.array_bounds[sid] = (0, upper)
+            array_symbols[key] = symbol
+
         # Resolve implicit variables per function/module scope. The declaration
         # identity is the first occurrence token; the dialect has no explicit
         # variable declaration requirement for this subset.
         var_symbols: dict[tuple[str, str], Symbol] = {}
-        array_names: set[str] = set()
-        for st in statements:
-            sig = st["tokens"]
-            if sig and sig[0].text.upper() == "DIM":
-                for t in sig[1:]:
-                    if t.kind == "IDENT" and t.text.upper() not in KEYWORDS:
-                        array_names.add(t.text.casefold())
         for sym in doc.symbols.values():
             if sym.kind == "parameter":
                 var_symbols[(sym.scope_id, sym.normalized)] = sym
@@ -458,6 +512,15 @@ class Workspace:
                     continue
                 if t.uid in doc.line_refs:
                     continue
+                array = array_symbols.get((scope_id, t.text.casefold()))
+                if array is not None:
+                    if i + 1 >= len(sig) or sig[i + 1].text != "(":
+                        doc.diagnostics.append(Diagnostic("ARRAY_SCALAR_COLLISION",
+                            f"{t.text} is an array and must be used with an index", "error",
+                            t.line, t.column))
+                    array.references.append(t.uid)
+                    doc.token_symbol[t.uid] = array.id
+                    continue
                 # Calls bind normally; a function's own bare name inside its body
                 # is the return-value assignment/reference in this BASIC dialect.
                 if t.text.casefold() in func_by_name:
@@ -478,7 +541,7 @@ class Workspace:
                 if i + 1 < len(sig) and sig[i + 1].text == "(":
                     # Array variables are common; known statement context and assignment
                     # indicate arrays. Otherwise retain an ambiguity rather than guessing.
-                    if (t.text.casefold() in array_names or any(x.text == "=" for x in sig[:i + 1])
+                    if (any(x.text == "=" for x in sig[:i + 1])
                             or (i > 0 and sig[i - 1].text.upper() == "DIM")
                             or word in ("DIM", "FOR", "NEXT", "READ", "INPUT")):
                         pass
@@ -487,6 +550,11 @@ class Workspace:
                         continue
                 key = (scope_id, t.text.casefold())
                 sym = var_symbols.get(key)
+                if key in array_symbols:
+                    doc.diagnostics.append(Diagnostic("ARRAY_SCALAR_COLLISION",
+                        f"{t.text} is a numeric array and cannot also be used as a scalar", "error",
+                        t.line, t.column))
+                    continue
                 if sym is None:
                     skey = f"implicit:{scope_id}:{t.uid}"
                     sid = previous_ids.get(skey) or opaque("sym")
@@ -503,7 +571,15 @@ class Workspace:
         for statement_index, st in enumerate(statements):
             sig = st["tokens"]
             offset = 1 if sig and sig[0].text.upper() == "LET" else 0
-            if len(sig) < offset + 3 or sig[offset].kind != "IDENT" or sig[offset + 1].text != "=":
+            target_end = offset + 1
+            is_array_target = False
+            if (len(sig) > offset + 4 and sig[offset].kind == "IDENT"
+                    and sig[offset + 1].text == "("):
+                close = next((j for j in range(offset + 2, len(sig)) if sig[j].text == ")"), None)
+                if close is not None and close + 1 < len(sig) and sig[close + 1].text == "=":
+                    target_end = close + 1
+                    is_array_target = True
+            if len(sig) < target_end + 2 or sig[offset].kind != "IDENT" or sig[target_end].text != "=":
                 continue
             owner = next((f for f in function_ranges
                           if f["start_statement"] < statement_index
@@ -516,17 +592,27 @@ class Workspace:
             target_symbol = doc.symbols.get(target_id) if target_id else None
             if target_symbol is None:
                 continue
+            if is_array_target and target_symbol.kind != "array":
+                continue
+            if not is_array_target and target_symbol.kind == "array":
+                continue
             statement_id = previous_statement_ids.get(target.uid) or opaque("stmt")
             referenced: list[str] = []
-            for token in sig[offset + 2:]:
+            if is_array_target:
+                for token in sig[offset + 2:target_end - 1]:
+                    sid = doc.token_symbol.get(token.uid)
+                    if sid and sid not in referenced:
+                        referenced.append(sid)
+            expression_start = target_end + 1
+            for token in sig[expression_start:]:
                 sid = doc.token_symbol.get(token.uid)
                 if sid and token.uid != target.uid and sid not in referenced:
                     referenced.append(sid)
-            expression_summary = "".join(token.text for token in sig[offset + 2:])[:120]
+            expression_summary = "".join(token.text for token in sig[expression_start:])[:120]
             doc.statements[statement_id] = {
                 "statement_id": statement_id,
                 "anchor_token_id": target.uid,
-                "kind": "assignment",
+                "kind": "array_assignment" if is_array_target else "assignment",
                 "containing_function_id": owner["symbol_id"],
                 "target_symbol_id": target_id,
                 "target_name": target_symbol.name,
@@ -535,6 +621,8 @@ class Workspace:
                 "line": st["line"],
                 "physical_statement_index": statement_index,
             }
+            if is_array_target:
+                doc.statements[statement_id]["index_token_ids"] = [t.uid for t in sig[offset + 2:target_end - 1]]
             doc._statement_ids[target.uid] = statement_id
 
         # Preserve IDs through the next reindex, keyed by declaration token.
@@ -550,6 +638,8 @@ class Workspace:
                 doc._symbol_ids[f"parameter:{sym.declaration_token}"] = sym.id
             elif sym.implicit:
                 doc._symbol_ids[f"implicit:{sym.scope_id}:{sym.declaration_token}"] = sym.id
+            elif sym.kind == "array":
+                doc._symbol_ids[f"array:{sym.declaration_token}"] = sym.id
             elif sym.kind == "line_label":
                 doc._symbol_ids[f"line_label:{sym.declaration_token}"] = sym.id
 
@@ -655,10 +745,15 @@ class Workspace:
 
     @staticmethod
     def _symbol_json(s: Symbol) -> dict[str, Any]:
-        return {"symbol_id": s.id, "kind": s.kind, "name": s.name,
+        row = {"symbol_id": s.id, "kind": s.kind, "name": s.name,
                 "scope_id": s.scope_id, "document_id": s.document_id,
                 "declaration_token_id": s.declaration_token, "line": s.line,
                 "implicit": s.implicit, "reference_count": len(s.references)}
+        if s.kind == "array":
+            row.update({"element_type": "numeric", "lower_bound": s.array_lower,
+                        "upper_bound": s.array_upper,
+                        "capacity": s.array_upper - s.array_lower + 1})
+        return row
 
     def find_definition(self, document_id: str, symbol_id: str) -> dict[str, Any]:
         d = self._doc(document_id)
@@ -779,8 +874,90 @@ class Workspace:
                 raise WorkspaceError("INVALID_EXPRESSION", "call arguments must be an array")
             return {**expression, "arguments": [Workspace._resolve_constructor_handles(x, handles)
                                                    for x in args]}
+        if kind == "array_element":
+            array_ref = expression.get("array_ref")
+            if not isinstance(array_ref, dict):
+                raise WorkspaceError("INVALID_ARRAY_REFERENCE", "array_ref must be a typed reference")
+            if array_ref.get("kind") == "local_ref":
+                name = array_ref.get("name")
+                if not isinstance(name, str) or name.casefold() not in handles:
+                    raise WorkspaceError("UNKNOWN_TRANSACTION_HANDLE", "array_ref name is not declared by this constructor")
+                array_ref = {"kind": "symbol_ref", "symbol_id": handles[name.casefold()]}
+            return {**expression, "array_ref": array_ref,
+                    "index": Workspace._resolve_constructor_handles(expression.get("index"), handles)}
         # number and symbol_ref are validated by the shared expression parser.
         return expression
+
+    def _insert_numeric_array_tokens(self, doc: Document, function_id: str,
+                                     name: Any, upper_bound: Any,
+                                     before_statement_id: str) -> str:
+        name = self._numeric_identifier(name, "Array name")
+        if isinstance(upper_bound, bool) or not isinstance(upper_bound, int) or not 0 <= upper_bound <= 255:
+            raise WorkspaceError("INVALID_ARRAY_BOUND", "Numeric array upper_bound must be an integer from 0 through 255")
+        function = self._function_row(doc, function_id)
+        result = doc.statements.get(before_statement_id)
+        if result is None or result["containing_function_id"] != function_id:
+            raise WorkspaceError("CROSS_SCOPE_STATEMENT", "Array declaration must be inserted inside its function")
+        parts = [("WS", "  "), ("IDENT", "DIM"), ("WS", " "), ("IDENT", name),
+                 ("PUNCT", "("), ("NUMBER", str(upper_bound)), ("PUNCT", ")"), ("NEWLINE", "\n")]
+        generated = self._new_tokens(parts)
+        line = result["line"]
+        index = next((i for i, token in enumerate(doc.tokens) if token.line == line), None)
+        if index is None:
+            raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not locate result statement for DIM insertion")
+        doc.tokens[index:index] = generated
+        self._recolumn(doc)
+        self._index(doc)
+        row = self._function_row(doc, function_id)
+        symbol_id = doc.token_symbol.get(generated[3].uid)
+        symbol = doc.symbols.get(symbol_id) if symbol_id else None
+        if (symbol is None or symbol.kind != "array" or symbol.scope_id != row["scope_id"]
+                or doc.array_bounds.get(symbol_id) != (0, upper_bound)):
+            raise WorkspaceError("BINDING_MISMATCH", "DIM declaration did not produce the expected local numeric array")
+        return symbol_id
+
+    def _insert_array_assignment_tokens(self, doc: Document, function_id: str,
+                                        array_id: str, index_expression: Any,
+                                        value_expression: Any,
+                                        before_statement_id: str) -> Token:
+        from .typed_expr import expression_tokens, parse_request
+
+        function = self._function_row(doc, function_id)
+        array = doc.symbols.get(array_id)
+        if array is None or array.kind != "array" or array.scope_id != function["scope_id"]:
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Array assignment requires a numeric array in the current function")
+        before = doc.statements.get(before_statement_id)
+        if before is None or before["containing_function_id"] != function_id:
+            raise WorkspaceError("CROSS_SCOPE_STATEMENT", "Array assignment must be inserted inside its function")
+        parameters, symbols = self._expression_context(doc)
+        index_expr, index_refs = parse_request(index_expression, symbols, function["scope_id"],
+                                                function_id, parameters)
+        value_expr, value_refs = parse_request(value_expression, symbols, function["scope_id"],
+                                                function_id, parameters)
+        index_tokens, emitted_index_refs = expression_tokens(index_expr, symbols)
+        value_tokens, emitted_value_refs = expression_tokens(value_expr, symbols)
+        if index_refs != emitted_index_refs or value_refs != emitted_value_refs:
+            raise WorkspaceError("INTERNAL_BINDING_ERROR", "Array assignment expression binding list changed during serialization")
+        parts = [("WS", "  "), ("IDENT", array.name), ("PUNCT", "(")] + index_tokens + [
+            ("PUNCT", ")"), ("WS", " "), ("OP", "="), ("WS", " ")] + value_tokens + [("NEWLINE", "\n")]
+        generated = self._new_tokens(parts)
+        line = before["line"]
+        position = next((i for i, token in enumerate(doc.tokens) if token.line == line), None)
+        if position is None:
+            raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not locate function result for array assignment")
+        doc.tokens[position:position] = generated
+        self._recolumn(doc)
+        self._index(doc)
+        actual = tuple(doc.token_symbol.get(token.uid) for token in generated if token.kind == "IDENT")
+        expected = (array_id,) + index_refs + value_refs
+        if actual != expected:
+            raise WorkspaceError("BINDING_MISMATCH", "Generated array assignment resolved to different semantic identities",
+                                 {"expected": list(expected), "actual": list(actual)})
+        statement_id = doc._statement_ids.get(generated[1].uid)
+        statement = doc.statements.get(statement_id) if statement_id else None
+        if statement is None or statement["kind"] != "array_assignment" or statement["target_symbol_id"] != array_id:
+            raise WorkspaceError("STATEMENT_CREATION_FAILED", "Indexed array assignment did not receive a stable statement identity")
+        return generated[1]
 
     def _populate_constructed_function(self, doc: Document, operation: dict[str, Any]) -> None:
         """Build locals and result within the private candidate transaction."""
@@ -800,6 +977,20 @@ class Workspace:
         if result_statement is None:
             raise WorkspaceError("STATEMENT_CREATION_FAILED", "Function result assignment was not indexed")
         result_statement_id = result_statement["statement_id"]
+
+        arrays_spec = operation.get("arrays", [])
+        if not isinstance(arrays_spec, list) or len(arrays_spec) > 32:
+            raise WorkspaceError("INVALID_ARRAYS", "arrays must be an array of at most 32 declarations")
+        for array_spec in arrays_spec:
+            if not isinstance(array_spec, dict) or set(array_spec) != {"name", "upper_bound"}:
+                raise WorkspaceError("INVALID_ARRAYS", "Each array declaration requires name and upper_bound")
+            array_id = self._insert_numeric_array_tokens(doc, function_id,
+                array_spec["name"], array_spec["upper_bound"], result_statement_id)
+            array_name = doc.symbols[array_id].name.casefold()
+            if array_name in handles:
+                raise WorkspaceError("NAME_COLLISION", f"{array_name} already names a parameter or local")
+            handles[array_name] = array_id
+            result_statement = doc.statements.get(result_statement_id)
 
         locals_spec = operation.get("locals", [])
         if not isinstance(locals_spec, list) or len(locals_spec) > 16:
@@ -826,6 +1017,30 @@ class Workspace:
             result_statement = doc.statements.get(result_statement_id)
             if result_statement is None:
                 raise WorkspaceError("STATEMENT_CREATION_FAILED", "Result statement identity changed during construction")
+
+        array_assignments = operation.get("array_assignments", [])
+        if not isinstance(array_assignments, list) or len(array_assignments) > 4096:
+            raise WorkspaceError("INVALID_ARRAY_ASSIGNMENTS", "array_assignments must contain at most 4096 rows")
+        for assignment in array_assignments:
+            if (not isinstance(assignment, dict)
+                    or set(assignment) != {"array_ref", "index", "expression"}):
+                raise WorkspaceError("INVALID_ARRAY_ASSIGNMENT", "Each row requires array_ref, index, and expression")
+            array_ref = assignment["array_ref"]
+            if (not isinstance(array_ref, dict)
+                    or array_ref.get("kind") not in ("local_ref", "symbol_ref")):
+                raise WorkspaceError("INVALID_ARRAY_REFERENCE", "array_ref must be a local_ref name or symbol_ref ID")
+            if array_ref["kind"] == "local_ref":
+                handle_name = array_ref.get("name")
+                if not isinstance(handle_name, str) or handle_name.casefold() not in handles:
+                    raise WorkspaceError("UNKNOWN_TRANSACTION_HANDLE", "Array assignment names an undeclared array")
+                array_id = handles[handle_name.casefold()]
+            else:
+                array_id = array_ref.get("symbol_id")
+            resolved_index = self._resolve_constructor_handles(assignment["index"], handles)
+            resolved_value = self._resolve_constructor_handles(assignment["expression"], handles)
+            self._insert_array_assignment_tokens(doc, function_id, array_id, resolved_index,
+                                                 resolved_value, result_statement_id)
+            result_statement = doc.statements.get(result_statement_id)
 
         if "expression" in operation:
             resolved = self._resolve_constructor_handles(operation["expression"], handles)
@@ -1094,13 +1309,19 @@ class Workspace:
 
     def create_numeric_function(self, document_id: str, name: str, parameters: list[str],
                                 expected_revision: int, expression: Any = None,
-                                locals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                                locals: list[dict[str, Any]] | None = None,
+                                arrays: list[dict[str, Any]] | None = None,
+                                array_assignments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         operation = {"operation": "create_numeric_function", "name": name,
                      "parameters": parameters}
         if expression is not None:
             operation["expression"] = expression
         if locals is not None:
             operation["locals"] = locals
+        if arrays is not None:
+            operation["arrays"] = arrays
+        if array_assignments is not None:
+            operation["array_assignments"] = array_assignments
         return self._transaction(document_id, expected_revision,
                                  operation)
 
@@ -1246,7 +1467,8 @@ class Workspace:
             "move_function": lambda: self.move_function(params["document_id"], params["symbol_id"], params.get("before_symbol_id"), params["expected_revision"]),
             "create_numeric_function": lambda: self.create_numeric_function(
                 params["document_id"], params["name"], params.get("parameters", []),
-                params["expected_revision"], params.get("expression"), params.get("locals")),
+                params["expected_revision"], params.get("expression"), params.get("locals"),
+                params.get("arrays"), params.get("array_assignments")),
             "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "render_document": lambda: self.render_document(params["document_id"]),

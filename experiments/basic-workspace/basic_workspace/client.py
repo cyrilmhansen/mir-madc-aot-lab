@@ -217,19 +217,31 @@ class WorkspaceClient:
 
     def workspace_create_function(self, expected_revision: int, name: str,
                                   parameters: list[str], expression: Any = None,
-                                  locals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                                  locals: list[dict[str, Any]] | None = None,
+                                  arrays: list[dict[str, Any]] | None = None,
+                                  array_assignments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         self._check_expected_revision(expected_revision)
         if expression is not None:
             self._validate_expression_symbols(expression, allow_local_ref=True)
         for local in locals or []:
             if isinstance(local, dict) and "expression" in local:
                 self._validate_expression_symbols(local["expression"], allow_local_ref=True)
+        for assignment in array_assignments or []:
+            if isinstance(assignment, dict):
+                self._validate_array_reference(assignment.get("array_ref"), True)
+                for field in ("index", "expression"):
+                    if field in assignment:
+                        self._validate_expression_symbols(assignment[field], allow_local_ref=True)
         params = {"expected_revision": expected_revision, "name": name,
                   "parameters": parameters}
         if expression is not None:
             params["expression"] = expression
         if locals is not None:
             params["locals"] = locals
+        if arrays is not None:
+            params["arrays"] = arrays
+        if array_assignments is not None:
+            params["array_assignments"] = array_assignments
         result = self._rpc("create_numeric_function", self._doc_params(**params))
         self.revision = result["revision"]
         self._remember_created(result)
@@ -320,6 +332,12 @@ class WorkspaceClient:
                 for local in op.get("locals", []):
                     if isinstance(local, dict) and "expression" in local:
                         self._validate_expression_symbols(local["expression"], allow_local_ref=True)
+                for assignment in op.get("array_assignments", []):
+                    if isinstance(assignment, dict):
+                        self._validate_array_reference(assignment.get("array_ref"), True)
+                        for field in ("index", "expression"):
+                            if field in assignment:
+                                self._validate_expression_symbols(assignment[field], allow_local_ref=True)
 
     def _validate_expression_symbols(self, expression: Any, allow_local_ref: bool = False) -> None:
         if not isinstance(expression, dict):
@@ -338,11 +356,28 @@ class WorkspaceClient:
         elif kind == "binary":
             self._validate_expression_symbols(expression.get("left"), allow_local_ref)
             self._validate_expression_symbols(expression.get("right"), allow_local_ref)
+        elif kind == "array_element":
+            if set(expression) != {"kind", "array_ref", "index"}:
+                raise RpcError("INVALID_EXPRESSION", "array_element requires array_ref and index")
+            self._validate_array_reference(expression.get("array_ref"), allow_local_ref)
+            self._validate_expression_symbols(expression.get("index"), allow_local_ref)
         elif kind == "local_ref" and allow_local_ref:
             if not isinstance(expression.get("name"), str):
                 raise RpcError("INVALID_TRANSACTION_HANDLE", "local_ref requires a name")
         elif kind != "number":
             raise RpcError("UNSUPPORTED_EXPRESSION", f"Unknown typed expression kind {kind!r}")
+
+    def _validate_array_reference(self, reference: Any, allow_local_ref: bool = False) -> None:
+        if not isinstance(reference, dict):
+            raise RpcError("INVALID_ARRAY_REFERENCE", "array_ref must be a typed reference")
+        if reference.get("kind") == "symbol_ref" and set(reference) == {"kind", "symbol_id"}:
+            if reference["symbol_id"] not in self._known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "Discover arrays before using their identities")
+            return
+        if (allow_local_ref and reference.get("kind") == "local_ref"
+                and set(reference) == {"kind", "name"} and isinstance(reference.get("name"), str)):
+            return
+        raise RpcError("INVALID_ARRAY_REFERENCE", "Use a discovered array ID or constructor-local name")
 
     def _remember_created(self, result: dict[str, Any]) -> None:
         self._known_symbols.update(x["symbol_id"] for x in result.get("created_entities", []))
@@ -363,7 +398,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "workspace_execute_function": {"required": ["expected_revision", "function_id", "arguments"],
                                    "optional": ["engine"]},
     "workspace_create_function": {"required": ["expected_revision", "name", "parameters"],
-                                   "optional": ["expression", "locals"]},
+                                   "optional": ["expression", "locals", "arrays", "array_assignments"]},
     "workspace_statements": {"required": ["function_id"], "optional": ["offset", "limit"]},
     "workspace_edit_expression": {"required": ["expected_revision", "statement_id", "expression"], "optional": []},
     "workspace_insert_assignment": {"required": ["expected_revision", "function_id", "target", "expression"],
@@ -440,6 +475,12 @@ class AgentToolAdapter:
                 for local in args.get("locals", []):
                     if isinstance(local, dict) and "expression" in local:
                         self._validate_expression_symbols(local["expression"], allow_local_ref=True)
+                for assignment in args.get("array_assignments", []):
+                    if isinstance(assignment, dict):
+                        self._validate_array_reference(assignment.get("array_ref"), True)
+                        for field in ("index", "expression"):
+                            if field in assignment:
+                                self._validate_expression_symbols(assignment[field], allow_local_ref=True)
             else:
                 self._validate_expression_symbols(args["expression"])
         result = getattr(self.client, name)(**args)
@@ -496,7 +537,18 @@ class AgentToolAdapter:
                 if before is not None and before not in self.known_statements:
                     raise RpcError("UNKNOWN_STATEMENT_ID", "This agent must discover the insertion position")
             if "expression" in operation:
-                self._validate_expression_symbols(operation["expression"])
+                self._validate_expression_symbols(operation["expression"],
+                    allow_local_ref=operation.get("operation") == "create_numeric_function")
+            if operation.get("operation") == "create_numeric_function":
+                for local in operation.get("locals", []):
+                    if isinstance(local, dict) and "expression" in local:
+                        self._validate_expression_symbols(local["expression"], True)
+                for assignment in operation.get("array_assignments", []):
+                    if isinstance(assignment, dict):
+                        self._validate_array_reference(assignment.get("array_ref"), True)
+                        for field in ("index", "expression"):
+                            if field in assignment:
+                                self._validate_expression_symbols(assignment[field], True)
 
     def _validate_expression_symbols(self, expression: Any, allow_local_ref: bool = False) -> None:
         if not isinstance(expression, dict):
@@ -515,8 +567,25 @@ class AgentToolAdapter:
         elif kind == "binary":
             self._validate_expression_symbols(expression.get("left"), allow_local_ref)
             self._validate_expression_symbols(expression.get("right"), allow_local_ref)
+        elif kind == "array_element":
+            if set(expression) != {"kind", "array_ref", "index"}:
+                raise RpcError("INVALID_EXPRESSION", "array_element requires array_ref and index")
+            self._validate_array_reference(expression.get("array_ref"), allow_local_ref)
+            self._validate_expression_symbols(expression.get("index"), allow_local_ref)
         elif kind == "local_ref" and allow_local_ref:
             if not isinstance(expression.get("name"), str):
                 raise RpcError("INVALID_TRANSACTION_HANDLE", "local_ref requires a name")
         elif kind != "number":
             raise RpcError("UNSUPPORTED_EXPRESSION", f"Unsupported typed expression {kind!r}")
+
+    def _validate_array_reference(self, reference: Any, allow_local_ref: bool = False) -> None:
+        if not isinstance(reference, dict):
+            raise RpcError("INVALID_ARRAY_REFERENCE", "array_ref must be a typed reference")
+        if reference.get("kind") == "symbol_ref" and set(reference) == {"kind", "symbol_id"}:
+            if reference["symbol_id"] not in self.known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "Discover arrays before using their identities")
+            return
+        if (allow_local_ref and reference.get("kind") == "local_ref"
+                and set(reference) == {"kind", "name"} and isinstance(reference.get("name"), str)):
+            return
+        raise RpcError("INVALID_ARRAY_REFERENCE", "Use a discovered array ID or constructor-local name")

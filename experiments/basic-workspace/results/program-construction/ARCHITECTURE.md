@@ -68,8 +68,36 @@ The existing `preview_transaction` and `apply_transaction` accept these
 operations too. Preview reports a created-entity count/summary rather than
 ephemeral candidate IDs; commit returns stable published IDs.
 
+## Fixed numeric arrays (Cycle 7)
+
+The same token-based construction boundary now recognizes function-local,
+one-dimensional numeric `DIM NAME(n)` declarations. The declaration symbol,
+inclusive zero-based bounds, indexed reads, and indexed assignment targets
+are derived from canonical tokens. The typed construction operation accepts
+array declarations and ordered indexed writes; expressions can use a
+transaction-local array handle while building a function or a discovered
+array ID in later edits. Reindexing verifies the new token bindings before a
+transaction commits.
+
+The immutable projection carries array bounds and typed element expressions
+through BWM2. The worker allocates MIR double registers for each cell and
+initializes them on every function invocation. Constant indexes lower to
+direct register accesses; dynamic indexes use checked dispatch, not exposed
+pointers. BWM1 scalar payloads are still accepted. The worker limits each
+array to 256 cells, each function to 32 arrays and 4096 total cells. OOB and
+non-finite indexes return a structured execution diagnostic.
+
+This remains a narrow subset. It does not support strings, multidimensional
+or dynamic arrays, module-level/shared storage, conditions, loops, or
+cross-function mutation. The pinned historical compiler uses zero-based
+inclusive DIM bounds by default and truncates numeric indexes in tested
+cases. Its size-one DIM fallback differs from this workspace: `DIM A(0)` is
+one element here. Details and differential evidence are in
+`results/numeric-arrays/REPORT.md`.
+
 ## Limits
 
-The constructive language remains the existing numeric function subset. No
-control flow, strings, arrays, imports, global statements, or deletion is
-introduced. No second editable AST or BASIC source import/reparse is added.
+The constructive language remains a numeric function subset with fixed local
+numeric arrays. No control flow, strings, imports, global statements, or
+deletion is introduced. No second editable AST or BASIC source import/reparse
+is added.

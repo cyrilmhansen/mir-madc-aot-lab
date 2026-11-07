@@ -15,6 +15,9 @@ from .projection import CompilableProjection, Expr, FunctionProjection, build_pr
 
 WORKER_TIMEOUT_SECONDS = 2.0
 MAX_ARGUMENTS = 6
+MAX_ARRAYS_PER_FUNCTION = 32
+MAX_ARRAY_ELEMENTS = 256
+MAX_TOTAL_ARRAY_ELEMENTS = 4096
 
 
 class MirExecutionService:
@@ -101,7 +104,7 @@ def _u32(value: int) -> bytes:
 
 
 def _encode_expr(expr: Expr, function_slots: dict[str, int], local_slots: dict[str, int],
-                 result_symbol_id: str) -> bytes:
+                 array_slots: dict[str, int], result_symbol_id: str) -> bytes:
     if expr.kind == "number":
         number = float(expr.value)
         if not math.isfinite(number):
@@ -116,14 +119,15 @@ def _encode_expr(expr: Expr, function_slots: dict[str, int], local_slots: dict[s
     if expr.kind == "result":
         return b"\x03"
     if expr.kind == "unary_minus":
-        return b"\x08" + _encode_expr(expr.children[0], function_slots, local_slots, result_symbol_id)
+        return b"\x08" + _encode_expr(expr.children[0], function_slots, local_slots,
+                                       array_slots, result_symbol_id)
     if expr.kind == "binary":
         opcodes = {"+": b"\x04", "-": b"\x05", "*": b"\x06", "/": b"\x07"}
         if expr.value not in opcodes:
             raise WorkspaceError("UNSUPPORTED_OPERATOR", f"Unsupported arithmetic operator {expr.value}")
         return (opcodes[str(expr.value)] +
-                _encode_expr(expr.children[0], function_slots, local_slots, result_symbol_id) +
-                _encode_expr(expr.children[1], function_slots, local_slots, result_symbol_id))
+                _encode_expr(expr.children[0], function_slots, local_slots, array_slots, result_symbol_id) +
+                _encode_expr(expr.children[1], function_slots, local_slots, array_slots, result_symbol_id))
     if expr.kind == "call":
         try:
             callee = function_slots[str(expr.value)]
@@ -133,8 +137,15 @@ def _encode_expr(expr: Expr, function_slots: dict[str, int], local_slots: dict[s
             raise WorkspaceError("UNSUPPORTED_ARITY", f"Numeric calls support at most {MAX_ARGUMENTS} arguments")
         encoded = bytearray(b"\x09" + _u32(callee) + _u32(len(expr.children)))
         for child in expr.children:
-            encoded.extend(_encode_expr(child, function_slots, local_slots, result_symbol_id))
+            encoded.extend(_encode_expr(child, function_slots, local_slots, array_slots, result_symbol_id))
         return bytes(encoded)
+    if expr.kind == "array_element":
+        try:
+            array_slot = array_slots[str(expr.value)]
+        except KeyError as exc:
+            raise WorkspaceError("UNRESOLVED_ARRAY", "Array identity is absent from the function projection") from exc
+        return (b"\x0a" + _u32(array_slot) +
+                _encode_expr(expr.children[0], function_slots, local_slots, array_slots, result_symbol_id))
     raise WorkspaceError("UNSUPPORTED_EXPRESSION", f"Unsupported projection expression kind {expr.kind}")
 
 
@@ -143,8 +154,8 @@ def encode_projection(projection: CompilableProjection, target_index: int,
     function_slots = {f.symbol_id: i for i, f in enumerate(projection.functions)}
     if not 0 <= target_index < len(projection.functions):
         raise WorkspaceError("SYMBOL_NOT_FOUND", "Requested function is absent from this projection")
-    output = bytearray(b"BWM1")
-    output.extend(struct.pack("<IIII", 1, 0 if engine == "interp" else 1,
+    output = bytearray(b"BWM2")
+    output.extend(struct.pack("<IIII", 2, 0 if engine == "interp" else 1,
                               target_index, len(projection.functions)))
     for function in projection.functions:
         argc = len(function.parameter_ids)
@@ -152,16 +163,38 @@ def encode_projection(projection: CompilableProjection, target_index: int,
             raise WorkspaceError("UNSUPPORTED_ARITY", f"Function {function.name} exceeds {MAX_ARGUMENTS} parameters")
         local_slots = {sid: argc + i for i, sid in enumerate(function.local_ids)}
         local_slots.update({sid: i for i, sid in enumerate(function.parameter_ids)})
-        output.extend(struct.pack("<III", argc, len(function.local_ids), len(function.statements)))
+        if len(function.arrays) > MAX_ARRAYS_PER_FUNCTION:
+            raise WorkspaceError("ARRAY_LIMIT", f"Function {function.name} exceeds {MAX_ARRAYS_PER_FUNCTION} arrays")
+        total_elements = 0
+        for array in function.arrays:
+            capacity = array.upper_bound - array.lower_bound + 1
+            if (array.lower_bound != 0 or capacity < 1 or capacity > MAX_ARRAY_ELEMENTS):
+                raise WorkspaceError("ARRAY_LIMIT", f"Array {array.name} is outside the supported zero-based capacity")
+            total_elements += capacity
+        if total_elements > MAX_TOTAL_ARRAY_ELEMENTS:
+            raise WorkspaceError("ARRAY_LIMIT", f"Function {function.name} exceeds {MAX_TOTAL_ARRAY_ELEMENTS} total array elements")
+        output.extend(struct.pack("<IIII", argc, len(function.local_ids),
+                                  len(function.arrays), len(function.statements)))
+        array_slots = {array.symbol_id: i for i, array in enumerate(function.arrays)}
+        for array in function.arrays:
+            output.extend(_u32(array.lower_bound))
+            output.extend(_u32(array.upper_bound))
         for statement in function.statements:
-            if statement.target_is_result:
+            if statement.target_is_array:
+                target_kind, slot = 2, array_slots.get(statement.target_symbol_id, -1)
+            elif statement.target_is_result:
                 target_kind, slot = 1, 0
             else:
                 target_kind, slot = 0, local_slots.get(statement.target_symbol_id, -1)
                 if slot < 0:
                     raise WorkspaceError("UNRESOLVED_SYMBOL", "Assignment target identity is absent from the projection")
             output.extend(struct.pack("<B3xI", target_kind, slot))
-            output.extend(_encode_expr(statement.expression, function_slots, local_slots,
+            if statement.target_is_array:
+                if statement.target_index is None:
+                    raise WorkspaceError("INVALID_ARRAY_ASSIGNMENT", "Indexed assignment is missing its index")
+                output.extend(_encode_expr(statement.target_index, function_slots, local_slots,
+                                           array_slots, function.symbol_id))
+            output.extend(_encode_expr(statement.expression, function_slots, local_slots, array_slots,
                                        function.symbol_id))
     output.extend(_u32(target_index))
     output.extend(_u32(len(arguments)))
