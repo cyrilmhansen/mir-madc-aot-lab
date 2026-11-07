@@ -5,13 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .model import Document, Token, Workspace, WorkspaceError
-
-
-@dataclass(frozen=True)
-class Expr:
-    kind: str
-    value: str | float | None = None
-    children: tuple["Expr", ...] = ()
+from .typed_expr import Expr
 
 
 @dataclass(frozen=True)
@@ -164,7 +158,11 @@ class _ExpressionParser:
 
 def build_projection(workspace: Workspace, document_id: str,
                      expected_revision: int | None = None) -> CompilableProjection:
-    doc = workspace._doc(document_id)
+    return build_projection_from_document(workspace, workspace._doc(document_id), expected_revision)
+
+
+def build_projection_from_document(workspace: Workspace, doc: Document,
+                                   expected_revision: int | None = None) -> CompilableProjection:
     if expected_revision is not None and expected_revision != doc.revision:
         raise WorkspaceError("STALE_REVISION", f"Expected revision {expected_revision}, current revision is {doc.revision}",
                              {"current_revision": doc.revision})
@@ -268,10 +266,28 @@ def build_projection(workspace: Workspace, document_id: str,
                                            locals_ordered, tuple(statements)))
 
     function_ids = {f.symbol_id for f in compiled}
+    call_graph: dict[str, set[str]] = {f.symbol_id: set() for f in compiled}
     for function in compiled:
         for statement in function.statements:
             _validate_calls(statement.expression, function_ids, len(compiled), doc)
-    return CompilableProjection(document_id, doc.revision, tuple(compiled))
+            call_graph[function.symbol_id].update(_called_functions(statement.expression))
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(function_id: str) -> None:
+        if function_id in visiting:
+            raise WorkspaceError("RECURSIVE_CALL_UNSUPPORTED", "Recursive numeric FUNCTION call graphs are not supported")
+        if function_id in visited:
+            return
+        visiting.add(function_id)
+        for callee_id in call_graph[function_id]:
+            visit(callee_id)
+        visiting.remove(function_id)
+        visited.add(function_id)
+
+    for function_id in call_graph:
+        visit(function_id)
+    return CompilableProjection(doc.id, doc.revision, tuple(compiled))
 
 
 def _validate_calls(expr: Expr, functions: set[str], _count: int, doc: Document) -> None:
@@ -284,3 +300,10 @@ def _validate_calls(expr: Expr, functions: set[str], _count: int, doc: Document)
             raise WorkspaceError("ARGUMENT_COUNT", f"Function {row['name']} expects {len(row['parameters'])} arguments, got {len(expr.children)}")
     for child in expr.children:
         _validate_calls(child, functions, _count, doc)
+
+
+def _called_functions(expr: Expr) -> set[str]:
+    result = {str(expr.value)} if expr.kind == "call" else set()
+    for child in expr.children:
+        result.update(_called_functions(child))
+    return result

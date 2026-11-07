@@ -312,3 +312,15 @@ workloads show it is necessary.
 4. Add an in-memory compiler adapter only after the canonical model is stable:
    model → MIR → interpreter/JIT feedback, with AOT as an explicit downstream
    consumer. Text export remains useful for debugging but not authoritative.
+
+## Structured program construction
+
+The numeric construction prototype starts with an empty virtual document and
+creates/edit functions through typed semantic tools, then runs the committed
+revision through MIR interpreter or JIT. See
+[`results/program-construction/REPORT.md`](results/program-construction/REPORT.md)
+for the API as presented to the agent, prompt/schema/context measurements, and
+the revised continued-session study design. That report distinguishes the
+validated numeric slice from the proposed graphics-animation and related
+address-book sessions, which require additional language and execution
+capabilities before a fair semantic-versus-text trial.

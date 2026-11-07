@@ -23,6 +23,7 @@ if sys_path not in sys.path:
     sys.path.insert(0, sys_path)
 from basic_workspace.client import AgentToolAdapter, RpcError, WorkspaceClient
 from basic_workspace.model import Workspace, WorkspaceError
+from basic_workspace.mir_execution import MirExecutionService
 
 RESULTS = ROOT / "results" / "llm-editing"
 CORPUS = ROOT / "results" / "agent-editing" / "tasks.json"
@@ -82,6 +83,54 @@ TEXT_TOOLS = [
     schema("inspect_diff", "Show the unified diff from the original buffer.", {}, []),
     schema("text_diagnostics", "Run the BASIC subset diagnostics on the current buffer without changing it.", {}, []),
     schema("validate_program", "Validate current buffer with the available BASIC subset parser; no compilation side effects.", {}, []),
+]
+
+EXPRESSION_SCHEMA = {"type": "object", "properties": {
+    "kind": {"type": "string", "enum": ["number", "symbol_ref", "unary", "binary", "call"]},
+    "value": {"type": "number"}, "symbol_id": STR, "function_id": STR,
+    "operator": {"type": "string", "enum": ["+", "-", "*", "/"]},
+    "left": {"type": "object"}, "right": {"type": "object"},
+    "operand": {"type": "object"},
+    "arguments": {"type": "array", "items": {"type": "object"}},
+}, "required": ["kind"], "additionalProperties": False,
+    "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."}
+
+CONSTRUCTION_SEMANTIC_TOOLS = [
+    schema("workspace_create_empty", "Create a new empty in-memory BASIC document; accepts no source text.",
+           {}, []),
+    schema("workspace_structure", "Discover functions, line labels, revision, and diagnostics without returning source text.",
+           {"offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
+    schema("workspace_symbols", "Filter and discover semantic symbols and their opaque IDs.",
+           {"kind": STR, "exact_name": STR, "unique": BOOL, "scope_id": STR,
+            "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
+    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION initialized to return zero. Returns function, parameter, and assignment IDs.",
+           {"expected_revision": INT, "name": STR,
+            "parameters": {"type": "array", "items": STR, "maxItems": 6}},
+           ["expected_revision", "name", "parameters"]),
+    schema("workspace_statements", "Discover bounded assignment statements in a discovered function, including stable IDs and referenced symbols.",
+           {"function_id": STR, "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["function_id"]),
+    schema("workspace_edit_expression", "Replace only a discovered assignment's typed right-hand expression; commits one revision atomically.",
+           {"expected_revision": INT, "statement_id": STR, "expression": EXPRESSION_SCHEMA},
+           ["expected_revision", "statement_id", "expression"]),
+    schema("workspace_insert_assignment", "Insert a numeric local or function-result assignment at the end of a function or before a discovered statement.",
+           {"expected_revision": INT, "function_id": STR,
+            "target": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["local", "result"]}, "name": STR}, "required": ["kind"], "additionalProperties": False},
+            "expression": EXPRESSION_SCHEMA, "before_statement_id": STR},
+           ["expected_revision", "function_id", "target", "expression"]),
+    schema("workspace_execute_function", "Compile the current committed revision to MIR and execute a discovered numeric function using interp or jit.",
+           {"expected_revision": INT, "function_id": STR,
+            "arguments": {"type": "array", "items": {"type": "number"}},
+            "engine": {"type": "string", "enum": ["interp", "jit"]}},
+           ["expected_revision", "function_id", "arguments"]),
+]
+
+CONSTRUCTION_TEXT_TOOLS = TEXT_TOOLS + [
+    schema("write_source", "Generate the initial BASIC source into the empty in-memory text buffer. Use no filesystem.",
+           {"expected_version": INT, "source": STR}, ["expected_version", "source"]),
+    schema("execute_program", "Compile the in-memory source with the same numeric BASIC/MIR subset as the semantic arm and execute a named numeric function.",
+           {"function": STR, "arguments": {"type": "array", "items": {"type": "number"}},
+            "engine": {"type": "string", "enum": ["interp", "jit"]}},
+           ["function", "arguments", "engine"]),
 ]
 
 
@@ -144,6 +193,8 @@ class ToolRunner:
         self.block_commit = False
         self.require_stale_commit_revision: int | None = None
         self.stale_commit_rejected = False
+        self.construction_stale_once = False
+        self.construction_created: dict[str, Any] | None = None
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         started = time.perf_counter()
@@ -176,7 +227,21 @@ class ToolRunner:
                               "message": "The deterministic multi-agent scheduler has not released commits yet. Keep the proposal and wait."}
                     self.tool_errors.append(result)
                     return result
+                if (self.construction_stale_once and name == "workspace_edit_expression"
+                        and self.construction_created):
+                    created = self.construction_created
+                    parameter = next((x for x in created["created_entities"] if x["kind"] == "parameter"), None)
+                    statement = next(iter(created.get("created_statements", [])), None)
+                    if parameter and statement:
+                        revision = self.client.revision
+                        self.client._rpc("edit_assignment_expression", self.client._doc_params(
+                            expected_revision=revision, statement_id=statement["statement_id"],
+                            expression={"kind": "symbol_ref", "symbol_id": parameter["symbol_id"]}))
+                        self.client.revision = revision + 1
+                        self.construction_stale_once = False
                 result = self.adapter.call(name, arguments)
+                if name == "workspace_create_function":
+                    self.construction_created = result
                 if (self.arm == "semantic" and name == "workspace_commit" and
                         self.require_stale_commit_revision is not None and
                         isinstance(result, dict) and result.get("code") == "STALE_REVISION"):
@@ -201,6 +266,20 @@ class ToolRunner:
             self.tool_time_ms += (time.perf_counter() - started) * 1000
 
     def _text_call(self, name: str, a: dict[str, Any]) -> Any:
+        if name == "write_source":
+            expected = int(a["expected_version"])
+            if expected != self.version:
+                raise ValueError(f"STALE_VERSION: expected {expected}, current {self.version}")
+            if self.buffer:
+                raise ValueError("SOURCE_BUFFER_NOT_EMPTY")
+            self.buffer = a["source"]
+            self.version += 1
+            reported_version = self.version
+            if self.construction_stale_once:
+                self.buffer += "' concurrent text edit\n"
+                self.version += 1
+                self.construction_stale_once = False
+            return {"ok": True, "version": reported_version, "changed": True}
         if name == "read_source":
             lines = self.buffer.splitlines(keepends=True)
             start = max(1, int(a.get("start_line", 1)))
@@ -250,6 +329,22 @@ class ToolRunner:
             return {"valid": not errors, "diagnostics": diagnostics[:100],
                     "diagnostics_truncated": len(diagnostics) > 100,
                     "buffer_version": self.version}
+        if name == "execute_program":
+            parser = Workspace()
+            did = parser.open_document_from_string(self.buffer)["document_id"]
+            structure = parser.get_document_structure(did)
+            matches = [f for f in structure["functions"]
+                       if f["name"].casefold() == str(a["function"]).casefold()]
+            if len(matches) != 1:
+                raise ValueError(f"EXPECTED_ONE_FUNCTION: found {len(matches)}")
+            engine = a.get("engine", "interp")
+            if engine not in ("interp", "jit"):
+                raise ValueError("UNSUPPORTED_ENGINE")
+            executed = MirExecutionService().execute_function(
+                parser, did, parser.get_revision(did), matches[0]["symbol_id"],
+                a["arguments"], engine)
+            return {"buffer_version": self.version, "function": a["function"],
+                    "engine": engine, "result": executed["result"]}
         raise ValueError(f"UNKNOWN_TEXT_TOOL: {name}")
 
 
@@ -278,6 +373,8 @@ def dispatch_tools(runner: ToolRunner, tool_calls: list[dict[str, Any]]) -> tupl
 
 def descriptions(task: dict[str, Any]) -> str:
     ident = task["id"]
+    if task.get("construction"):
+        return task["instruction"]
     if task.get("unsupported"):
         return ("Inspect this BASIC program. It contains an incomplete or ambiguous construct. "
                 "Determine whether the requested operation can be supported safely. If the "
@@ -331,17 +428,21 @@ def source_text_payload_bytes(tool_calls: list[dict[str, Any]]) -> int:
 SYSTEM_SEMANTIC = """Use only the exact structured tools listed. The document is loaded in a private in-memory workspace. There is no workspace_rename_symbol or text-replacement tool. For edits call workspace_preview/workspace_commit with operations such as {\"operation\":\"rename_symbol\",\"symbol_id\":\"...\",\"new_name\":\"...\"}; renumber_line uses old_line/new_line; move_function uses symbol_id/before_symbol_id. Discover symbols or labels before using IDs. For a unique match, workspace_symbols with exact_name and unique=true returns opaque ID, scope, type, reference count, revision and diagnostic counts together. Call workspace_references only when details are useful. Preview is optional but useful for multi-operation changes; commit revalidates revision. For collisions, ambiguity, incomplete source or stale revisions, refuse or inspect current state; never guess. Do not return a full source listing unless needed. Finish with whether you committed or refused."""
 SYSTEM_TEXT = """You edit BASIC source through conventional in-memory text tools. Read/search source as needed, then use exact-context patches with the current buffer version. A patch must match exactly once; inspect the diff and diagnostics after editing. If a patch is stale or ambiguous, read/search again and repair carefully. For collisions, ambiguity, incomplete source, or stale revisions, refuse or inspect the current state; never guess. Do not use shell or filesystem access. Finish with a short result and whether you edited or refused."""
 
+SYSTEM_CONSTRUCTION_SEMANTIC = """You author numeric BASIC programs using only the structured semantic tools. The workspace starts empty; create functions and parameters by identity. Functions initially return zero, so discover their assignment statement and replace its typed expression. Use only returned symbol and statement IDs; never invent IDs or submit BASIC source strings. Expression nodes are number, symbol_ref, unary, binary, and call. Each mutation commits one revision and requires its current expected_revision. Discover a function's statements before editing them. Execute the current revision with workspace_execute_function when requested. If a request refers to an unavailable identity or a stale revision, inspect the workspace and recover safely; refuse when the requested relationship cannot be established. Do not render source during construction."""
+SYSTEM_CONSTRUCTION_TEXT = """You author a numeric BASIC program in an in-memory text buffer. Use supported FUNCTION declarations with numeric parameters and assignments to the function result. Use write_source for its initial source, then exact-context patches for changes. Run diagnostics and execute the named function with execute_program when requested; it compiles this buffer through the same numeric BASIC/MIR subset as the semantic arm. A stale or ambiguous patch must not be forced; refresh the current buffer/version and retry carefully. Do not use shell or filesystem access."""
+
 
 def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
                 runner: ToolRunner, max_calls: int, max_iterations: int,
                 prompt_override: str | None = None,
                 initial_messages: list[dict[str, Any]] | None = None,
                 include_private: bool = False,
-                max_context_bytes: int = 64000) -> dict[str, Any]:
-    tools = SEMANTIC_TOOLS if arm == "semantic" else TEXT_TOOLS
+                max_context_bytes: int = 64000,
+                construction: bool = False) -> dict[str, Any]:
+    tools = (CONSTRUCTION_SEMANTIC_TOOLS if arm == "semantic" else CONSTRUCTION_TEXT_TOOLS) if construction else (SEMANTIC_TOOLS if arm == "semantic" else TEXT_TOOLS)
     visible_task = descriptions(task)
     messages: list[dict[str, Any]] = copy.deepcopy(initial_messages) if initial_messages else [
-        {"role": "system", "content": SYSTEM_SEMANTIC if arm == "semantic" else SYSTEM_TEXT},
+        {"role": "system", "content": (SYSTEM_CONSTRUCTION_SEMANTIC if arm == "semantic" else SYSTEM_CONSTRUCTION_TEXT) if construction else (SYSTEM_SEMANTIC if arm == "semantic" else SYSTEM_TEXT)},
         {"role": "user", "content": f"Task {task['id']}: {visible_task}"},
     ]
     if initial_messages is not None:
@@ -402,27 +503,86 @@ def run_session(endpoint: ChatEndpoint, arm: str, task: dict[str, Any],
     else:
         if runner.tool_calls >= max_calls:
             terminal = "tool_call_limit"
-    current = runner.buffer if arm == "text" else None
-    if arm == "semantic":
-        try:
-            rendered = runner.client._rpc("render_document", {"document_id": runner.client.document_id})
-            current = rendered[:20000]
-        except Exception as exc:
-            current = None
-            trace.append({"evaluation_render_error": str(exc)})
-    expect_unchanged = bool(task.get("reject") or task.get("unsupported"))
-    correct_text = current == task["expected"]
     refusal_words = ("refus", "ambigu", "collid", "cannot", "unsupported", "incomplete",
                      "not safe", "must not", "should not", "won't", "will not")
     explicit_refusal = any(word in final_text.casefold() for word in refusal_words)
-    safe_outcome = (expect_unchanged and current == task["source"] and
-                    explicit_refusal)
-    correct = safe_outcome if expect_unchanged else correct_text
+    construction_execution = None
+    current = runner.buffer if arm == "text" else None
+    if construction:
+        construction_execution = {"engine_results": {}, "valid": False}
+        if task.get("must_refuse"):
+            if arm == "semantic":
+                if runner.client.document_id is None:
+                    unchanged = True
+                else:
+                    structure = runner.client.workspace_structure()
+                    unchanged = not structure["functions"] and not structure["line_labels"]
+                construction_execution.update({"valid": unchanged, "workspace_empty": unchanged})
+            else:
+                unchanged = runner.buffer == ""
+                construction_execution.update({"valid": unchanged, "workspace_empty": unchanged})
+            safe_outcome = unchanged and explicit_refusal
+            correct = safe_outcome
+            correct_text = None
+        else:
+            try:
+                if arm == "semantic":
+                    structure = runner.client.workspace_structure()
+                    matching = [f for f in structure["functions"]
+                                if f["name"].casefold() == task["function"].casefold()]
+                    if len(matching) != 1:
+                        raise RuntimeError(f"expected one {task['function']} definition, found {len(matching)}")
+                    for engine_name in ("interp", "jit"):
+                        executed = runner.client.workspace_execute_function(
+                            runner.client.revision, matching[0]["symbol_id"],
+                            task["arguments"], engine_name)
+                        construction_execution["engine_results"][engine_name] = executed["result"]
+                    current = runner.client.workspace_render()["text"]
+                else:
+                    oracle = Workspace()
+                    opened = oracle.open_document_from_string(runner.buffer)
+                    docid = opened["document_id"]
+                    structure = oracle.get_document_structure(docid)
+                    matching = [f for f in structure["functions"]
+                                if f["name"].casefold() == task["function"].casefold()]
+                    if len(matching) != 1:
+                        raise RuntimeError(f"expected one {task['function']} definition, found {len(matching)}")
+                    executor = MirExecutionService()
+                    for engine_name in ("interp", "jit"):
+                        executed = executor.execute_function(oracle, docid,
+                            oracle.get_revision(docid), matching[0]["symbol_id"],
+                            task["arguments"], engine_name)
+                        construction_execution["engine_results"][engine_name] = executed["result"]
+                target = float(task["expected_result"])
+                correct = all(abs(float(value) - target) <= 1e-12
+                              for value in construction_execution["engine_results"].values())
+                correct = correct and set(construction_execution["engine_results"]) == {"interp", "jit"}
+                construction_execution.update({"valid": bool(correct), "expected_result": target})
+                correct_text = None
+                safe_outcome = False
+            except Exception as exc:
+                construction_execution.update({"valid": False, "error": str(exc)[:1000]})
+                correct, correct_text, safe_outcome = False, None, False
+    else:
+        if arm == "semantic":
+            try:
+                rendered = runner.client._rpc("render_document", {"document_id": runner.client.document_id})
+                current = rendered[:20000]
+            except Exception as exc:
+                current = None
+                trace.append({"evaluation_render_error": str(exc)})
+        expect_unchanged = bool(task.get("reject") or task.get("unsupported"))
+        correct_text = current == task["expected"]
+        safe_outcome = (expect_unchanged and current == task["source"] and explicit_refusal)
+        correct = safe_outcome if expect_unchanged else correct_text
+    system_prompt = ((SYSTEM_CONSTRUCTION_SEMANTIC if arm == "semantic" else SYSTEM_CONSTRUCTION_TEXT)
+                     if construction else (SYSTEM_SEMANTIC if arm == "semantic" else SYSTEM_TEXT))
     result = {"arm": arm, "task_id": task["id"], "status": terminal,
-        "system_prompt": SYSTEM_SEMANTIC if arm == "semantic" else SYSTEM_TEXT,
+        "system_prompt": system_prompt,
         "user_prompt": prompt_override or f"Task {task['id']}: {visible_task}",
         "correct": bool(correct), "safe_refusal": bool(safe_outcome),
-        "final_source_matches_oracle": bool(correct_text), "final_text": final_text,
+        "final_source_matches_oracle": None if correct_text is None else bool(correct_text),
+        "construction_execution": construction_execution, "final_text": final_text,
         "final_revision": runner.client.revision if arm == "semantic" and runner.client else runner.version,
         "model_turns": model_turns, "model_tool_calls": runner.tool_calls,
         "transaction_previews": sum(1 for turn in trace for c in turn.get("tool_calls", []) if c["name"] == "workspace_preview"),

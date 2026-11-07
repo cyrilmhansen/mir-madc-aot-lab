@@ -33,6 +33,7 @@ class WorkspaceClient:
         self.revision: int | None = None
         self._known_symbols: set[str] = set()
         self._known_lines: set[int] = set()
+        self._known_statements: set[str] = set()
         self.metrics = {"requests": 0, "request_bytes": 0, "response_bytes": 0,
                         "response_bytes_by_method": {}, "wall_ms": 0.0, "methods": {}}
 
@@ -138,6 +139,15 @@ class WorkspaceClient:
         self.document_id, self.revision = result["document_id"], result["revision"]
         self._known_symbols.clear()
         self._known_lines.clear()
+        self._known_statements.clear()
+        return result
+
+    def workspace_create_empty(self, uri: str | None = None) -> dict[str, Any]:
+        result = self._rpc("create_empty_document", {"uri": uri})
+        self.document_id, self.revision = result["document_id"], result["revision"]
+        self._known_symbols.clear()
+        self._known_lines.clear()
+        self._known_statements.clear()
         return result
 
     def workspace_structure(self, offset: int = 0, limit: int = 50) -> dict[str, Any]:
@@ -172,6 +182,18 @@ class WorkspaceClient:
             self.revision = result["revision"]
         return result
 
+    def workspace_statements(self, function_id: str, offset: int = 0,
+                             limit: int = 50) -> dict[str, Any]:
+        self._require_symbol(function_id)
+        result = self._rpc("list_function_statements", self._doc_params(
+            function_id=function_id, offset=offset, limit=limit))
+        self.revision = result["revision"]
+        for row in result["items"]:
+            self._known_statements.add(row["statement_id"])
+            self._known_symbols.add(row["target_symbol_id"])
+            self._known_symbols.update(row["referenced_symbol_ids"])
+        return result
+
     def workspace_references(self, symbol_id: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
         self._require_symbol(symbol_id)
         return self._rpc("find_references_page", self._doc_params(symbol_id=symbol_id,
@@ -189,7 +211,47 @@ class WorkspaceClient:
         result = self._rpc("apply_transaction", self._doc_params(expected_revision=expected_revision,
                                                                    operations=operations))
         self.revision = result["revision"]
+        self._remember_created(result)
         # Re-querying obtains identities valid at the new revision; stable IDs are retained by model.
+        return result
+
+    def workspace_create_function(self, expected_revision: int, name: str,
+                                  parameters: list[str]) -> dict[str, Any]:
+        self._check_expected_revision(expected_revision)
+        result = self._rpc("create_numeric_function", self._doc_params(
+            expected_revision=expected_revision, name=name, parameters=parameters))
+        self.revision = result["revision"]
+        self._remember_created(result)
+        return result
+
+    def workspace_edit_expression(self, expected_revision: int, statement_id: str,
+                                  expression: dict[str, Any]) -> dict[str, Any]:
+        self._check_expected_revision(expected_revision)
+        if statement_id not in self._known_statements:
+            raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the assignment through workspace_statements first")
+        self._validate_expression_symbols(expression)
+        result = self._rpc("edit_assignment_expression", self._doc_params(
+            expected_revision=expected_revision, statement_id=statement_id,
+            expression=expression))
+        self.revision = result["revision"]
+        self._remember_created(result)
+        return result
+
+    def workspace_insert_assignment(self, expected_revision: int, function_id: str,
+                                    target: dict[str, Any], expression: dict[str, Any],
+                                    before_statement_id: str | None = None) -> dict[str, Any]:
+        self._check_expected_revision(expected_revision)
+        self._require_symbol(function_id)
+        if before_statement_id is not None and before_statement_id not in self._known_statements:
+            raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the insertion point through workspace_statements first")
+        self._validate_expression_symbols(expression)
+        params = self._doc_params(expected_revision=expected_revision, function_id=function_id,
+                                  target=target, expression=expression)
+        if before_statement_id is not None:
+            params["before_statement_id"] = before_statement_id
+        result = self._rpc("insert_numeric_assignment", params)
+        self.revision = result["revision"]
+        self._remember_created(result)
         return result
 
     def workspace_diagnostics(self) -> list[dict[str, Any]]:
@@ -217,9 +279,12 @@ class WorkspaceClient:
             raise RpcError("UNKNOWN_SYMBOL_ID", "Discover the symbol through workspace_symbols first")
 
     def _validate_ops(self, revision: int, operations: list[dict[str, Any]]) -> None:
+        self._check_expected_revision(revision)
+        self._validate_operation_symbols(operations)
+
+    def _check_expected_revision(self, revision: int) -> None:
         if self.revision is None or revision != self.revision:
             raise RpcError("STALE_LOCAL_REVISION", "Refresh workspace state before preview or commit")
-        self._validate_operation_symbols(operations)
 
     def _validate_operation_symbols(self, operations: list[dict[str, Any]]) -> None:
         for op in operations:
@@ -229,9 +294,45 @@ class WorkspaceClient:
                 self._require_symbol(op["before_symbol_id"])
             if op.get("operation") == "renumber_line" and int(op["old_line"]) not in self._known_lines:
                 raise RpcError("UNKNOWN_LINE_LABEL", "Discover the line label through workspace_structure or workspace_symbols first")
+            if op.get("operation") == "edit_assignment_expression" and op.get("statement_id") not in self._known_statements:
+                raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the assignment through workspace_statements first")
+            if op.get("operation") == "insert_numeric_assignment":
+                if op.get("function_id") not in self._known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "Discover the function before inserting an assignment")
+                before = op.get("before_statement_id")
+                if before is not None and before not in self._known_statements:
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the insertion point first")
+            if "expression" in op:
+                self._validate_expression_symbols(op["expression"])
+
+    def _validate_expression_symbols(self, expression: Any) -> None:
+        if not isinstance(expression, dict):
+            raise RpcError("INVALID_EXPRESSION", "Expression must be a typed object")
+        kind = expression.get("kind")
+        if kind == "symbol_ref":
+            if expression.get("symbol_id") not in self._known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "Discover expression symbols before using their identities")
+        elif kind == "call":
+            if expression.get("function_id") not in self._known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "Discover called functions before using their identities")
+            for child in expression.get("arguments", []):
+                self._validate_expression_symbols(child)
+        elif kind == "unary":
+            self._validate_expression_symbols(expression.get("operand"))
+        elif kind == "binary":
+            self._validate_expression_symbols(expression.get("left"))
+            self._validate_expression_symbols(expression.get("right"))
+        elif kind != "number":
+            raise RpcError("UNSUPPORTED_EXPRESSION", f"Unknown typed expression kind {kind!r}")
+
+    def _remember_created(self, result: dict[str, Any]) -> None:
+        self._known_symbols.update(x["symbol_id"] for x in result.get("created_entities", []))
+        self._known_statements.update(x["statement_id"] for x in result.get("created_statements", []))
+        self._known_statements.update(result.get("affected_statement_ids", []))
 
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "workspace_create_empty": {"required": [], "optional": ["uri"]},
     "workspace_open": {"required": ["text"], "optional": ["uri"]},
     "workspace_structure": {"required": [], "optional": ["offset", "limit"]},
     "workspace_symbols": {"required": [], "optional": ["kind", "name_query", "exact_name", "unique", "scope_id", "offset", "limit"]},
@@ -242,6 +343,11 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "workspace_render": {"required": [], "optional": ["max_chars"]},
     "workspace_execute_function": {"required": ["expected_revision", "function_id", "arguments"],
                                    "optional": ["engine"]},
+    "workspace_create_function": {"required": ["expected_revision", "name", "parameters"], "optional": []},
+    "workspace_statements": {"required": ["function_id"], "optional": ["offset", "limit"]},
+    "workspace_edit_expression": {"required": ["expected_revision", "statement_id", "expression"], "optional": []},
+    "workspace_insert_assignment": {"required": ["expected_revision", "function_id", "target", "expression"],
+                                    "optional": ["before_statement_id"]},
 }
 
 
@@ -252,6 +358,7 @@ class AgentToolAdapter:
         self.observed_revision = client.revision
         self.known_symbols: set[str] = set()
         self.known_lines: set[int] = set()
+        self.known_statements: set[str] = set()
 
     def fork(self) -> "AgentToolAdapter":
         """Create another agent view over the same persistent workspace process."""
@@ -275,7 +382,11 @@ class AgentToolAdapter:
             result = self.client._rpc("apply_transaction", self.client._doc_params(
                 expected_revision=expected, operations=args["operations"]))
             self.client.revision = result["revision"]
+            self.client._remember_created(result)
             self.observed_revision = result["revision"]
+            self.known_symbols.update(x["symbol_id"] for x in result.get("created_entities", []))
+            self.known_statements.update(x["statement_id"] for x in result.get("created_statements", []))
+            self.known_statements.update(result.get("affected_statement_ids", []))
             return result
         if name == "workspace_preview":
             expected = args["expected_revision"]
@@ -290,17 +401,44 @@ class AgentToolAdapter:
         if name == "workspace_execute_function":
             if args.get("function_id") not in self.known_symbols:
                 raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover the function before executing it")
+        if name == "workspace_statements" and args.get("function_id") not in self.known_symbols:
+            raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover the function before querying its statements")
+        if name in ("workspace_create_function", "workspace_edit_expression", "workspace_insert_assignment"):
+            if self.observed_revision is None or args["expected_revision"] != self.observed_revision:
+                raise RpcError("STALE_LOCAL_REVISION", "Construction request does not match this agent's observed revision")
+            if name == "workspace_edit_expression" and args["statement_id"] not in self.known_statements:
+                raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the assignment before editing it")
+            if name == "workspace_insert_assignment":
+                if args["function_id"] not in self.known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "Discover the function before inserting an assignment")
+                before = args.get("before_statement_id")
+                if before is not None and before not in self.known_statements:
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the insertion point first")
+            if name != "workspace_create_function":
+                self._validate_expression_symbols(args["expression"])
         result = getattr(self.client, name)(**args)
-        if name == "workspace_open":
+        if name in ("workspace_open", "workspace_create_empty"):
             self.observed_revision = result["revision"]
             self.known_symbols.clear()
             self.known_lines.clear()
+            self.known_statements.clear()
         elif name == "workspace_structure":
             self.observed_revision = result["revision"]
             self.known_symbols.update(x.get("symbol_id") for x in result["functions"] + result["line_labels"] if x.get("symbol_id"))
             self.known_lines.update(int(x["line"]) for x in result["line_labels"])
         elif name == "workspace_symbols" and "revision" in result:
             self.observed_revision = result["revision"]
+        elif name == "workspace_statements":
+            self.observed_revision = result["revision"]
+            for row in result["items"]:
+                self.known_statements.add(row["statement_id"])
+                self.known_symbols.add(row["target_symbol_id"])
+                self.known_symbols.update(row["referenced_symbol_ids"])
+        elif name in ("workspace_create_function", "workspace_edit_expression", "workspace_insert_assignment"):
+            self.observed_revision = result["revision"]
+            self.known_symbols.update(x["symbol_id"] for x in result.get("created_entities", []))
+            self.known_statements.update(x["statement_id"] for x in result.get("created_statements", []))
+            self.known_statements.update(result.get("affected_statement_ids", []))
         if name == "workspace_symbols":
             self.known_symbols.update(x["symbol_id"] for x in result.get("items", []))
             symbol = result.get("unique_symbol")
@@ -322,3 +460,34 @@ class AgentToolAdapter:
             if (operation.get("operation") == "renumber_line" and
                     int(operation["old_line"]) not in self.known_lines):
                 raise RpcError("UNKNOWN_LINE_LABEL", "This agent must discover the line label before renumbering")
+            if (operation.get("operation") == "edit_assignment_expression" and
+                    operation.get("statement_id") not in self.known_statements):
+                raise RpcError("UNKNOWN_STATEMENT_ID", "This agent must discover the assignment before editing it")
+            if operation.get("operation") == "insert_numeric_assignment":
+                if operation.get("function_id") not in self.known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover the containing function")
+                before = operation.get("before_statement_id")
+                if before is not None and before not in self.known_statements:
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "This agent must discover the insertion position")
+            if "expression" in operation:
+                self._validate_expression_symbols(operation["expression"])
+
+    def _validate_expression_symbols(self, expression: Any) -> None:
+        if not isinstance(expression, dict):
+            raise RpcError("INVALID_EXPRESSION", "Expression must be a typed object")
+        kind = expression.get("kind")
+        if kind == "symbol_ref":
+            if expression.get("symbol_id") not in self.known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover expression symbols first")
+        elif kind == "call":
+            if expression.get("function_id") not in self.known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover called functions first")
+            for child in expression.get("arguments", []):
+                self._validate_expression_symbols(child)
+        elif kind == "unary":
+            self._validate_expression_symbols(expression.get("operand"))
+        elif kind == "binary":
+            self._validate_expression_symbols(expression.get("left"))
+            self._validate_expression_symbols(expression.get("right"))
+        elif kind != "number":
+            raise RpcError("UNSUPPORTED_EXPRESSION", f"Unsupported typed expression {kind!r}")

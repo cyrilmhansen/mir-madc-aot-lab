@@ -35,6 +35,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 
 class LlmHarnessTests(unittest.TestCase):
+    def test_construction_text_arm_executes_same_numeric_mir_subset(self):
+        runner = llm_runner.ToolRunner("text", source=(
+            "FUNCTION DOUBLE(X)\nDOUBLE = X * 2\nEND FUNCTION\n"))
+        result = runner.call("execute_program", {
+            "function": "DOUBLE", "arguments": [9], "engine": "interp"})
+        self.assertEqual(result["result"], 18.0)
+        self.assertTrue(any(
+            tool["function"]["name"] == "execute_program"
+            for tool in llm_runner.CONSTRUCTION_TEXT_TOOLS))
+
     def test_openai_compatible_request_and_provider_metadata(self):
         server = HTTPServer(("127.0.0.1", 0), FixtureHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

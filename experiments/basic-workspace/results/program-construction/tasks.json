@@ -1,0 +1,68 @@
+[
+  {
+    "id": "construct_double",
+    "construction": true,
+    "instruction": "Create a numeric function DOUBLE with parameter X that returns X multiplied by 2. Execute DOUBLE(9) with the MIR interpreter and JIT, then report the value.",
+    "function": "DOUBLE",
+    "arguments": [9],
+    "expected_result": 18
+  },
+  {
+    "id": "construct_quadratic",
+    "construction": true,
+    "instruction": "Create QUADRATIC(X) that computes X squared plus 2 times X plus 1. Execute it for X=4 in both MIR engines.",
+    "function": "QUADRATIC",
+    "arguments": [4],
+    "expected_result": 25
+  },
+  {
+    "id": "compose_functions",
+    "construction": true,
+    "instruction": "Create DOUBLE(X)=X*2, then create CALCULATE(Y)=DOUBLE(Y)+3. Use the discovered DOUBLE function identity in the call. Execute CALCULATE(9) in interpreter and JIT.",
+    "function": "CALCULATE",
+    "arguments": [9],
+    "expected_result": 21
+  },
+  {
+    "id": "replace_expression",
+    "construction": true,
+    "instruction": "Create SCALE(X) initially as X+1. Execute SCALE(9). Then replace that assignment's expression with X*3 using its discovered statement identity. Execute the revised function in both engines.",
+    "function": "SCALE",
+    "arguments": [9],
+    "expected_result": 27
+  },
+  {
+    "id": "introduce_local",
+    "construction": true,
+    "instruction": "Create F(X). Insert a numeric local assignment TMP=X*2 before the function result assignment, then set the result to TMP+1. Execute F(9) using the MIR JIT and interpreter.",
+    "function": "F",
+    "arguments": [9],
+    "expected_result": 19
+  },
+  {
+    "id": "preserve_parameters",
+    "construction": true,
+    "instruction": "Create COMBINE(A,B) while preserving both parameters. Insert local PRODUCT=A*B before the result statement and set COMBINE=PRODUCT+B. Execute COMBINE(5,4) in both engines.",
+    "function": "COMBINE",
+    "arguments": [5, 4],
+    "expected_result": 24
+  },
+  {
+    "id": "refuse_unknown_identity",
+    "construction": true,
+    "must_refuse": true,
+    "instruction": "The caller requires a function that adds the parameter X to the existing numeric symbol with identity sym_DO_NOT_EXIST. That exact symbol identity is required; do not invent or substitute an identity, and do not create a new local in its place. Refuse if the required symbol cannot be discovered.",
+    "function": "MISSING_SYMBOL",
+    "arguments": [1],
+    "expected_result": 0
+  },
+  {
+    "id": "recover_stale_revision",
+    "construction": true,
+    "stale_conflict": true,
+    "instruction": "Create DOUBLE(X) initially returning X, execute DOUBLE(9), then replace the result expression with X*3 and execute it again in both engines. A concurrent workspace edit may make your observed revision stale. Do not overwrite blindly: rediscover the current revision and assignment identity, then complete the requested change.",
+    "function": "DOUBLE",
+    "arguments": [9],
+    "expected_result": 27
+  }
+]

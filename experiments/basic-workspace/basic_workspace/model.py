@@ -64,8 +64,10 @@ class Document:
     line_refs: dict[str, int] = field(default_factory=dict)
     lines: list[dict[str, Any]] = field(default_factory=list)
     functions: list[dict[str, Any]] = field(default_factory=list)
+    statements: dict[str, dict[str, Any]] = field(default_factory=dict)
     _symbol_ids: dict[str, str] = field(default_factory=dict, repr=False)
     _scope_ids: dict[str, str] = field(default_factory=dict, repr=False)
+    _statement_ids: dict[str, str] = field(default_factory=dict, repr=False)
 
     def render(self) -> str:
         return "".join(t.text for t in self.tokens)
@@ -171,6 +173,7 @@ class Workspace:
     def __init__(self) -> None:
         self.documents: dict[str, Document] = {}
         self._discovered_symbols: dict[str, set[str]] = {}
+        self._discovered_statements: dict[str, set[str]] = {}
 
     def create_workspace(self) -> dict[str, Any]:
         return {"workspace_id": "workspace-1", "documents": 0}
@@ -180,9 +183,21 @@ class Workspace:
         doc = Document(did, uri or f"memory://{did}/program.bas", 1, lex(text))
         self.documents[did] = doc
         self._discovered_symbols[did] = set()
+        self._discovered_statements[did] = set()
         self._index(doc)
         return {"document_id": did, "uri": doc.uri, "revision": doc.revision,
                 "diagnostics": [self._diag_json(d) for d in doc.diagnostics]}
+
+    def create_empty_document(self, uri: str | None = None) -> dict[str, Any]:
+        """Create an empty canonical token model without accepting BASIC text."""
+        did = opaque("doc")
+        doc = Document(did, uri or f"memory://{did}/program.bas", 1, [])
+        self.documents[did] = doc
+        self._discovered_symbols[did] = set()
+        self._discovered_statements[did] = set()
+        self._index(doc)
+        return {"document_id": did, "uri": doc.uri, "revision": doc.revision,
+                "diagnostics": []}
 
     def replace_document_from_string(self, document_id: str, text: str,
                                      expected_revision: int) -> dict[str, Any]:
@@ -199,6 +214,7 @@ class Workspace:
         self._index(new)
         self.documents[document_id] = new
         self._discovered_symbols[document_id] = set()
+        self._discovered_statements[document_id] = set()
         return {"document_id": new.id, "revision": new.revision,
                 "diagnostics": [self._diag_json(d) for d in new.diagnostics]}
 
@@ -219,6 +235,7 @@ class Workspace:
     def _index(self, doc: Document) -> None:
         previous_ids = doc._symbol_ids
         previous_scopes = doc._scope_ids
+        previous_statement_ids = doc._statement_ids
         doc.symbols = {}
         doc.token_symbol = {}
         doc.labels = {}
@@ -479,6 +496,47 @@ class Workspace:
                 sym.references.append(t.uid)
                 doc.token_symbol[t.uid] = sym.id
 
+        # Stable IDs for supported assignment statements are anchored to the
+        # canonical target token, not to line/column positions.
+        doc.statements = {}
+        doc._statement_ids = {}
+        for statement_index, st in enumerate(statements):
+            sig = st["tokens"]
+            offset = 1 if sig and sig[0].text.upper() == "LET" else 0
+            if len(sig) < offset + 3 or sig[offset].kind != "IDENT" or sig[offset + 1].text != "=":
+                continue
+            owner = next((f for f in function_ranges
+                          if f["start_statement"] < statement_index
+                          and f["end_statement"] is not None
+                          and statement_index < f["end_statement"]), None)
+            if owner is None or owner["kind"] != "function":
+                continue
+            target = sig[offset]
+            target_id = doc.token_symbol.get(target.uid)
+            target_symbol = doc.symbols.get(target_id) if target_id else None
+            if target_symbol is None:
+                continue
+            statement_id = previous_statement_ids.get(target.uid) or opaque("stmt")
+            referenced: list[str] = []
+            for token in sig[offset + 2:]:
+                sid = doc.token_symbol.get(token.uid)
+                if sid and token.uid != target.uid and sid not in referenced:
+                    referenced.append(sid)
+            expression_summary = "".join(token.text for token in sig[offset + 2:])[:120]
+            doc.statements[statement_id] = {
+                "statement_id": statement_id,
+                "anchor_token_id": target.uid,
+                "kind": "assignment",
+                "containing_function_id": owner["symbol_id"],
+                "target_symbol_id": target_id,
+                "target_name": target_symbol.name,
+                "referenced_symbol_ids": referenced,
+                "expression_summary": expression_summary,
+                "line": st["line"],
+                "physical_statement_index": statement_index,
+            }
+            doc._statement_ids[target.uid] = statement_id
+
         # Preserve IDs through the next reindex, keyed by declaration token.
         doc._symbol_ids = {}
         doc._scope_ids = {}
@@ -569,6 +627,32 @@ class Workspace:
     def symbol_was_discovered(self, document_id: str, symbol_id: str) -> bool:
         return symbol_id in self._discovered_symbols.get(document_id, set())
 
+    def list_function_statements(self, document_id: str, function_id: str,
+                                 offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        doc = self._doc(document_id)
+        if offset < 0 or limit < 1 or limit > 200:
+            raise WorkspaceError("INVALID_PAGE", "Use offset >= 0 and limit from 1 to 200")
+        function = doc.symbols.get(function_id)
+        if function is None or function.kind != "function":
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Unknown numeric FUNCTION identity")
+        rows = [row for row in doc.statements.values()
+                if row["containing_function_id"] == function_id]
+        rows.sort(key=lambda row: (row["line"], row["physical_statement_index"]))
+        page = [self._statement_json(row) for row in rows[offset:offset + limit]]
+        self._discovered_statements.setdefault(document_id, set()).update(x["statement_id"] for x in page)
+        self._discovered_symbols.setdefault(document_id, set()).update(
+            sid for row in page for sid in ([row["target_symbol_id"]] + row["referenced_symbol_ids"]))
+        return {"document_id": document_id, "revision": doc.revision,
+                "function_id": function_id, "items": page, "total": len(rows),
+                "offset": offset, "limit": limit, "truncated": offset + limit < len(rows)}
+
+    def statement_was_discovered(self, document_id: str, statement_id: str) -> bool:
+        return statement_id in self._discovered_statements.get(document_id, set())
+
+    @staticmethod
+    def _statement_json(row: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in row.items() if key != "physical_statement_index"}
+
     @staticmethod
     def _symbol_json(s: Symbol) -> dict[str, Any]:
         return {"symbol_id": s.id, "kind": s.kind, "name": s.name,
@@ -616,6 +700,164 @@ class Workspace:
                      operation: dict[str, Any]) -> dict[str, Any]:
         return self.apply_transaction(document_id, expected_revision, [operation])
 
+    @staticmethod
+    def _numeric_identifier(name: Any, role: str) -> str:
+        if (not isinstance(name, str) or not IDENT_RE.fullmatch(name)
+                or name.upper() in KEYWORDS
+                or name[-1:] in ("$", "%", "!", "#")):
+            raise WorkspaceError("INVALID_NAME", f"{role} must be an unsuffixed numeric BASIC identifier")
+        return name
+
+    @staticmethod
+    def _new_tokens(parts: list[tuple[str, str]]) -> list[Token]:
+        return [Token(opaque("t"), kind, text, 1, 0) for kind, text in parts]
+
+    def _create_function_tokens(self, doc: Document, name: str, parameters: list[str]) -> None:
+        name = self._numeric_identifier(name, "Function name")
+        if name.upper() in BUILTINS:
+            raise WorkspaceError("NAME_COLLISION", f"{name} is a BASIC built-in name")
+        if not isinstance(parameters, list) or len(parameters) > 6:
+            raise WorkspaceError("UNSUPPORTED_ARITY", "Numeric functions support zero through six parameters")
+        params = [self._numeric_identifier(p, "Parameter name") for p in parameters]
+        folded = [p.casefold() for p in params]
+        if len(set(folded)) != len(folded):
+            raise WorkspaceError("NAME_COLLISION", "Function parameter names must be unique")
+        if name.casefold() in folded:
+            raise WorkspaceError("NAME_COLLISION", "A parameter cannot have the function's name")
+        if any(s.normalized == name.casefold() and s.scope_id == "module" for s in doc.symbols.values()):
+            raise WorkspaceError("NAME_COLLISION", f"{name} collides with an existing module symbol")
+        parts: list[tuple[str, str]] = [("IDENT", "FUNCTION"), ("WS", " "),
+                                        ("IDENT", name), ("PUNCT", "(")]
+        for index, param in enumerate(params):
+            if index:
+                parts.append(("PUNCT", ","))
+            parts.append(("IDENT", param))
+        parts.extend([("PUNCT", ")"), ("NEWLINE", "\n"),
+                      ("WS", "  "), ("IDENT", name), ("WS", " "),
+                      ("OP", "="), ("WS", " "), ("NUMBER", "0"), ("NEWLINE", "\n"),
+                      ("IDENT", "END"), ("WS", " "), ("IDENT", "FUNCTION"),
+                      ("NEWLINE", "\n")])
+        if doc.tokens and doc.tokens[-1].kind != "NEWLINE":
+            doc.tokens.append(Token(opaque("t"), "NEWLINE", "\n", 1, 0))
+        doc.tokens.extend(self._new_tokens(parts))
+        self._recolumn(doc)
+
+    @staticmethod
+    def _function_row(doc: Document, function_id: str) -> dict[str, Any]:
+        row = next((f for f in doc.functions if f["symbol_id"] == function_id), None)
+        if row is None or row["kind"] != "function" or row["end_statement"] is None:
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Expected a complete numeric FUNCTION identity")
+        symbol = doc.symbols.get(function_id)
+        if symbol is None or symbol.name.endswith("$"):
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Only numeric functions can be constructed")
+        return row
+
+    @staticmethod
+    def _expression_context(doc: Document) -> tuple[dict[str, int], dict[str, Any]]:
+        params = {row["symbol_id"]: len(row["parameters"])
+                  for row in doc.functions if row["kind"] == "function"}
+        return params, doc.symbols
+
+    @staticmethod
+    def _verify_expression_bindings(doc: Document, generated: list[Token], expected: tuple[str, ...]) -> None:
+        identifier_tokens = [token for token in generated if token.kind == "IDENT"]
+        actual = tuple(doc.token_symbol.get(token.uid) for token in identifier_tokens)
+        if actual != expected:
+            raise WorkspaceError("BINDING_MISMATCH", "Generated expression did not resolve to its requested symbol identities",
+                                 {"expected": list(expected), "actual": list(actual)})
+
+    def _insert_assignment_tokens(self, doc: Document, function_id: str, target: dict[str, Any],
+                                  expression: Any, before_statement_id: str | None) -> tuple[list[Token], tuple[str, ...], Token]:
+        from .typed_expr import expression_tokens, parse_request
+
+        function = self._function_row(doc, function_id)
+        if not isinstance(target, dict) or target.get("kind") not in ("result", "local"):
+            raise WorkspaceError("INVALID_ASSIGNMENT_TARGET", "target must be {kind: result} or {kind: local, name}")
+        owner = doc.symbols[function_id]
+        if target["kind"] == "result":
+            if set(target) != {"kind"}:
+                raise WorkspaceError("INVALID_ASSIGNMENT_TARGET", "result target accepts only kind")
+            target_name = owner.name
+        else:
+            if set(target) != {"kind", "name"}:
+                raise WorkspaceError("INVALID_ASSIGNMENT_TARGET", "local target requires kind and name")
+            target_name = self._numeric_identifier(target["name"], "Local name")
+            if target_name.casefold() == owner.name.casefold():
+                raise WorkspaceError("NAME_COLLISION", "A local cannot have the containing function's name")
+            if any(s.scope_id == function["scope_id"] and s.normalized == target_name.casefold()
+                   for s in doc.symbols.values()):
+                raise WorkspaceError("NAME_COLLISION", f"{target_name} already exists in this function")
+        function_parameters, symbols = self._expression_context(doc)
+        parsed, expected_refs = parse_request(expression, symbols, function["scope_id"],
+                                               function_id, function_parameters)
+        expression_parts, token_refs = expression_tokens(parsed, symbols)
+        if token_refs != expected_refs:
+            raise WorkspaceError("INTERNAL_BINDING_ERROR", "Typed expression serializer changed its binding list")
+        generated = self._new_tokens([("WS", "  "), ("IDENT", target_name), ("WS", " "),
+                                      ("OP", "="), ("WS", " ")] + expression_parts + [("NEWLINE", "\n")])
+        if before_statement_id is not None:
+            before = doc.statements.get(before_statement_id)
+            if before is None:
+                raise WorkspaceError("STATEMENT_NOT_FOUND", "Insertion position statement is unknown")
+            if before["containing_function_id"] != function_id:
+                raise WorkspaceError("CROSS_SCOPE_STATEMENT", "Insertion position must be inside the selected function")
+            destination_line = before["line"]
+        else:
+            destination_line = function["end_line"]
+        insertion_index = next((i for i, token in enumerate(doc.tokens) if token.line == destination_line), None)
+        if insertion_index is None:
+            raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not resolve the semantic insertion point")
+        doc.tokens[insertion_index:insertion_index] = generated
+        self._recolumn(doc)
+        return [token for token in generated[5:-1] if token.kind == "IDENT"], expected_refs, generated[1]
+
+    @staticmethod
+    def _assignment_rhs_bounds(doc: Document, anchor_token_id: str) -> tuple[int, int, int]:
+        anchor = next((i for i, token in enumerate(doc.tokens) if token.uid == anchor_token_id), None)
+        if anchor is None:
+            raise WorkspaceError("STATEMENT_NOT_FOUND", "Assignment anchor token no longer exists")
+        start = anchor
+        while start > 0 and doc.tokens[start - 1].line == doc.tokens[anchor].line \
+                and not (doc.tokens[start - 1].kind == "PUNCT" and doc.tokens[start - 1].text == ":"):
+            start -= 1
+        end = anchor
+        while end < len(doc.tokens) and doc.tokens[end].line == doc.tokens[anchor].line \
+                and doc.tokens[end].kind not in ("COMMENT", "NEWLINE") \
+                and not (doc.tokens[end].kind == "PUNCT" and doc.tokens[end].text == ":"):
+            end += 1
+        equals = next((i for i in range(anchor + 1, end)
+                       if doc.tokens[i].kind == "OP" and doc.tokens[i].text == "="), None)
+        if equals is None:
+            raise WorkspaceError("UNSUPPORTED_STATEMENT", "Selected statement is no longer a simple assignment")
+        rhs_start = equals + 1
+        while rhs_start < end and doc.tokens[rhs_start].kind == "WS":
+            rhs_start += 1
+        rhs_end = end
+        while rhs_end > rhs_start and doc.tokens[rhs_end - 1].kind == "WS":
+            rhs_end -= 1
+        if rhs_start == rhs_end:
+            raise WorkspaceError("INVALID_EXPRESSION", "Selected assignment has no right-hand expression")
+        return rhs_start, rhs_end, end
+
+    def _edit_expression_tokens(self, doc: Document, statement_id: str, expression: Any) -> tuple[list[Token], tuple[str, ...]]:
+        from .typed_expr import expression_tokens, parse_request
+
+        statement = doc.statements.get(statement_id)
+        if statement is None:
+            raise WorkspaceError("STATEMENT_NOT_FOUND", "Unknown assignment statement identity")
+        function = self._function_row(doc, statement["containing_function_id"])
+        params, symbols = self._expression_context(doc)
+        parsed, expected_refs = parse_request(expression, symbols, function["scope_id"],
+                                               function["symbol_id"], params)
+        parts, token_refs = expression_tokens(parsed, symbols)
+        if token_refs != expected_refs:
+            raise WorkspaceError("INTERNAL_BINDING_ERROR", "Typed expression serializer changed its binding list")
+        generated = self._new_tokens(parts)
+        rhs_start, rhs_end, _ = self._assignment_rhs_bounds(doc, statement["anchor_token_id"])
+        doc.tokens[rhs_start:rhs_end] = generated
+        self._recolumn(doc)
+        return generated, expected_refs
+
     def _prepare_transaction(self, document_id: str, expected_revision: int,
                              operations: list[dict[str, Any]], include_diff: bool = False) -> tuple[Document, dict[str, Any]]:
         current = self._doc(document_id)
@@ -625,6 +867,7 @@ class Workspace:
             raise WorkspaceError("EMPTY_TRANSACTION", "A semantic transaction needs at least one operation")
         candidate = copy.deepcopy(current)
         touched: dict[str, str] = {}
+        touched_statements: set[str] = set()
         for operation in operations:
             kind = operation.get("operation")
             if kind == "rename_symbol":
@@ -647,6 +890,37 @@ class Workspace:
                     raise WorkspaceError("SYMBOL_NOT_FOUND", "Unknown symbol identity")
                 touched.setdefault(sid, candidate.symbols[sid].name)
                 self._move_function(candidate, sid, operation.get("before_symbol_id"))
+            elif kind == "create_numeric_function":
+                self._create_function_tokens(candidate, operation.get("name"), operation.get("parameters", []))
+            elif kind == "edit_assignment_expression":
+                statement_id = operation.get("statement_id")
+                if statement_id not in candidate.statements:
+                    raise WorkspaceError("STATEMENT_NOT_FOUND", "Unknown assignment statement identity")
+                generated, expected_refs = self._edit_expression_tokens(
+                    candidate, statement_id, operation.get("expression"))
+                touched_statements.add(statement_id)
+                self._index(candidate)
+                self._verify_expression_bindings(candidate, generated, expected_refs)
+                continue
+            elif kind == "insert_numeric_assignment":
+                expression_tokens, expected_refs, target_token = self._insert_assignment_tokens(
+                    candidate, operation.get("function_id"), operation.get("target"),
+                    operation.get("expression"), operation.get("before_statement_id"))
+                self._index(candidate)
+                self._verify_expression_bindings(candidate, expression_tokens, expected_refs)
+                function_id = operation["function_id"]
+                target_id = candidate.token_symbol.get(target_token.uid)
+                target_symbol = candidate.symbols.get(target_id) if target_id else None
+                target_spec = operation["target"]
+                if target_spec["kind"] == "result":
+                    if target_id != function_id:
+                        raise WorkspaceError("BINDING_MISMATCH", "Function-result target resolved to a different symbol")
+                elif (target_symbol is None or target_symbol.kind != "variable"
+                      or target_symbol.scope_id != self._function_row(candidate, function_id)["scope_id"]):
+                    raise WorkspaceError("BINDING_MISMATCH", "Local assignment target did not resolve in the requested function scope")
+                if not any(row["anchor_token_id"] == target_token.uid for row in candidate.statements.values()):
+                    raise WorkspaceError("STATEMENT_CREATION_FAILED", "Inserted assignment did not receive a statement identity")
+                continue
             else:
                 raise WorkspaceError("UNSUPPORTED_OPERATION", f"Unsupported semantic operation: {kind}")
             self._index(candidate)
@@ -654,6 +928,16 @@ class Workspace:
         if errors:
             raise WorkspaceError("VALIDATION_FAILED", "Transaction would introduce invalid semantics", [self._diag_json(x) for x in errors])
         candidate.revision = current.revision + 1
+        if any(operation.get("operation") in ("create_numeric_function",
+                                                "edit_assignment_expression",
+                                                "insert_numeric_assignment")
+               for operation in operations):
+            from .projection import build_projection_from_document
+            build_projection_from_document(self, candidate, candidate.revision)
+        created_entities = [self._symbol_json(symbol) for sid, symbol in candidate.symbols.items()
+                            if sid not in current.symbols]
+        created_statements = [self._statement_json(row) for sid, row in candidate.statements.items()
+                              if sid not in current.statements]
         affected = []
         for sid, before in touched.items():
             after = candidate.symbols.get(sid)
@@ -669,7 +953,12 @@ class Workspace:
                    "affected_entities": affected,
                    "diagnostics": {"error_count": 0,
                                    "warning_count": sum(x.severity == "warning" for x in candidate.diagnostics),
-                                   "new": new_diags}}
+                                   "new": new_diags},
+                   "created_entity_summary": {"symbols": len(created_entities),
+                                              "statements": len(created_statements)},
+                   "affected_statement_ids": sorted(touched_statements),
+                   "_created_entities": created_entities,
+                   "_created_statements": created_statements}
         if include_diff:
             diff = "".join(difflib.unified_diff(
                 current.render().splitlines(keepends=True), candidate.render().splitlines(keepends=True),
@@ -681,15 +970,26 @@ class Workspace:
     def preview_transaction(self, document_id: str, expected_revision: int,
                             operations: list[dict[str, Any]], include_diff: bool = False) -> dict[str, Any]:
         _, preview = self._prepare_transaction(document_id, expected_revision, operations, include_diff)
+        preview.pop("_created_entities", None)
+        preview.pop("_created_statements", None)
         return preview
 
     def apply_transaction(self, document_id: str, expected_revision: int,
                           operations: list[dict[str, Any]]) -> dict[str, Any]:
         candidate, preview = self._prepare_transaction(document_id, expected_revision, operations)
         self.documents[document_id] = candidate
+        created_entities = preview.pop("_created_entities", [])
+        created_statements = preview.pop("_created_statements", [])
+        self._discovered_symbols.setdefault(document_id, set()).update(
+            entity["symbol_id"] for entity in created_entities)
+        self._discovered_statements.setdefault(document_id, set()).update(
+            row["statement_id"] for row in created_statements)
         return {"committed": True, "revision": candidate.revision,
                 "affected_entities": preview["affected_entities"],
-                "diagnostics": preview["diagnostics"]}
+                "diagnostics": preview["diagnostics"],
+                "created_entities": created_entities,
+                "created_statements": created_statements,
+                "affected_statement_ids": preview["affected_statement_ids"]}
 
     def rename_symbol(self, document_id: str, symbol_id: str, new_name: str,
                       expected_revision: int) -> dict[str, Any]:
@@ -708,6 +1008,28 @@ class Workspace:
         return self._transaction(document_id, expected_revision,
                                  {"operation": "move_function", "symbol_id": symbol_id,
                                   "before_symbol_id": before_symbol_id})
+
+    def create_numeric_function(self, document_id: str, name: str, parameters: list[str],
+                                expected_revision: int) -> dict[str, Any]:
+        return self._transaction(document_id, expected_revision,
+                                 {"operation": "create_numeric_function", "name": name,
+                                  "parameters": parameters})
+
+    def edit_assignment_expression(self, document_id: str, statement_id: str,
+                                   expression: Any, expected_revision: int) -> dict[str, Any]:
+        return self._transaction(document_id, expected_revision,
+                                 {"operation": "edit_assignment_expression",
+                                  "statement_id": statement_id, "expression": expression})
+
+    def insert_numeric_assignment(self, document_id: str, function_id: str,
+                                   target: dict[str, Any], expression: Any,
+                                   expected_revision: int,
+                                   before_statement_id: str | None = None) -> dict[str, Any]:
+        operation = {"operation": "insert_numeric_assignment", "function_id": function_id,
+                     "target": target, "expression": expression}
+        if before_statement_id is not None:
+            operation["before_statement_id"] = before_statement_id
+        return self._transaction(document_id, expected_revision, operation)
 
     def _rename(self, d: Document, symbol_id: str, new_name: str) -> None:
         s = d.symbols.get(symbol_id)
@@ -816,11 +1138,13 @@ class Workspace:
     def protocol_call(self, method: str, params: dict[str, Any]) -> Any:
         methods = {
             "create_workspace": lambda: self.create_workspace(),
+            "create_empty_document": lambda: self.create_empty_document(params.get("uri")),
             "open_document_from_string": lambda: self.open_document_from_string(params["text"], params.get("uri")),
             "replace_document_from_string": lambda: self.replace_document_from_string(params["document_id"], params["text"], params["expected_revision"]),
             "list_documents": self.list_documents,
             "get_document_structure": lambda: self.get_document_structure(params["document_id"]),
             "get_document_structure_page": lambda: self.get_document_structure_page(params["document_id"], params.get("offset", 0), params.get("limit", 50)),
+            "list_function_statements": lambda: self.list_function_statements(params["document_id"], params["function_id"], params.get("offset", 0), params.get("limit", 50)),
             "list_symbols": lambda: self.list_symbols(params["document_id"]),
             "list_symbols_page": lambda: self.list_symbols_page(params["document_id"], params.get("offset", 0), params.get("limit", 50), params.get("kind"), params.get("name_query"), params.get("scope_id"), params.get("exact_name"), params.get("unique", False)),
             "find_definition": lambda: self.find_definition(params["document_id"], params["symbol_id"]),
@@ -831,6 +1155,9 @@ class Workspace:
             "preview_transaction": lambda: self.preview_transaction(params["document_id"], params["expected_revision"], params["operations"], params.get("include_diff", False)),
             "renumber_line": lambda: self.renumber_line(params["document_id"], params["old_line"], params["new_line"], params["expected_revision"]),
             "move_function": lambda: self.move_function(params["document_id"], params["symbol_id"], params.get("before_symbol_id"), params["expected_revision"]),
+            "create_numeric_function": lambda: self.create_numeric_function(params["document_id"], params["name"], params.get("parameters", []), params["expected_revision"]),
+            "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
+            "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "render_document": lambda: self.render_document(params["document_id"]),
             "get_diagnostics": lambda: self.get_diagnostics(params["document_id"]),
             "get_revision": lambda: self.get_revision(params["document_id"]),
