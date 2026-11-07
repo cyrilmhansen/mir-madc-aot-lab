@@ -615,7 +615,7 @@ def agent_tools() -> list[dict[str, Any]]:
         tool_schema("inspect_references", "Inspect references to a symbol discovered from discover_symbols.", {"symbol_id": string}, ["symbol_id"]),
         tool_schema("preview_age_edit", "Ask the mission gateway to preview changing one discovered assignment to a finite age in [0,130]. Preview does not commit.", {"statement_id": string, "new_age": number, "expected_revision": integer}, ["statement_id", "new_age", "expected_revision"]),
         tool_schema("commit_age_edit", "Commit a transaction returned by a successful preview; gateway rechecks revision, scope and full semantic delta.", {"transaction_id": string}, ["transaction_id"]),
-        tool_schema("run_lookup_checks", "Run the host's fixed AGE_BY_ID oracle under both MIR engines; this does not mutate the program.", {}, []),
+        tool_schema("run_lookup_checks", "Execute the committed revision under both MIR engines and report observed revision, current phase oracle, per-engine matches and engine agreement. A stale requested revision is unreliable and is not executed.", {"expected_revision": integer}, ["expected_revision"]),
     ]
 
 
@@ -692,13 +692,36 @@ class AgentGatewayTools:
         if name == "commit_age_edit":
             return self.gateway.commit(args["transaction_id"])
         if name == "run_lookup_checks":
+            requested_revision = args.get("expected_revision")
+            if isinstance(requested_revision, bool) or not isinstance(requested_revision, int):
+                return {"reliable": False, "code": "INVALID_EXPECTED_REVISION",
+                        "message": "Validation requires the integer revision observed by discovery."}
+            if requested_revision != revision:
+                return {"reliable": False, "code": "STALE_VALIDATION_REVISION",
+                        "phase": "post-edit" if self.gateway.committed else "pre-edit",
+                        "requested_revision": requested_revision, "workspace_revision": revision,
+                        "executed_revision": None, "mission_complete": False}
             expected = dict(EXPECTED)
             if self.gateway.committed:
                 expected[205] = self.gateway.mission["functional_goal"]["new_age"]
-            results = execute_values(self.workspace, self.document_id, self.aliases, revision)
+            try:
+                results = execute_values(self.workspace, self.document_id, self.aliases, revision)
+            except WorkspaceError as exc:
+                return {"reliable": False, "code": exc.code, "message": exc.message,
+                        "phase": "post-edit" if self.gateway.committed else "pre-edit",
+                        "workspace_revision": revision, "executed_revision": revision,
+                        "mission_complete": False}
             expected = {str(k): float(v) for k, v in expected.items()}
-            return {"revision": revision, "results": results, "expected": expected,
-                    "passed": all(values == expected for values in results.values())}
+            engines_agree = results.get("interp") == results.get("jit")
+            per_engine_matches = {engine: values == expected for engine, values in results.items()}
+            values_match = bool(per_engine_matches) and all(per_engine_matches.values())
+            return {"reliable": True, "phase": "post-edit" if self.gateway.committed else "pre-edit",
+                    "requested_revision": requested_revision, "workspace_revision": revision,
+                    "executed_revision": revision, "observed_results": results,
+                    "expected_results": expected, "expectation_source": "independent host-owned mission oracle",
+                    "per_engine_matches": per_engine_matches, "engines_agree": engines_agree,
+                    "mission_complete": bool(self.gateway.committed and values_match and engines_agree),
+                    "diagnostics": [] if values_match and engines_agree else ["Observed results do not satisfy the current phase oracle"]}
         return {"ok": False, "code": "UNKNOWN_TOOL", "message": "Tool is not available in this mission."}
 
 

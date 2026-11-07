@@ -25,10 +25,18 @@ ENABLE_SHADERS = False
 def state_at(events: list[dict[str, Any]], index: int) -> tuple[str, Any]:
     source, revision = "", "—"
     for event in events[:index + 1]:
-        if "program_snapshot" in event:
+        if "program_snapshot" in event and event.get("phase") in ("initial-construction", "agent", "scripted-demo"):
             source = event["program_snapshot"]
             revision = event.get("resulting_revision", event.get("revision", revision))
     return source, revision
+
+
+def committed_structure_at(events: list[dict[str, Any]], index: int) -> dict[str, Any]:
+    structure: dict[str, Any] = {}
+    for event in events[:index + 1]:
+        if event.get("event") == "transaction_committed" and event.get("phase") in ("initial-construction", "agent", "scripted-demo"):
+            structure = event.get("semantic_snapshot", structure)
+    return structure
 
 
 def shader_event(name: str) -> None:
@@ -57,10 +65,12 @@ def frame(events: list[dict[str, Any]], index: int, clear: bool) -> None:
     print(f"{COLORS[color]}{status}{COLORS['reset']}  {LABELS.get(kind, kind)}")
     print(f"{COLORS['muted']}phase={event.get('phase', '—')}  seq={event.get('sequence')}  "
           f"base={event.get('base_revision', '—')}  result={event.get('resulting_revision', event.get('revision', '—'))}{COLORS['reset']}")
+    print(f"{COLORS['muted']}provenance={event.get('actor', 'unspecified')}  mission={event.get('mission_id', '—')}{COLORS['reset']}")
     for key in ("operation", "tool", "target_handle", "target_statement_id", "statement_handle",
                 "handle", "name", "new_age", "code", "message", "passed", "outputs",
                 "expected", "engine_results", "structural_equivalence", "binding_equivalence",
-                "behavioral_equivalence"):
+                "behavioral_equivalence", "bound_call", "callee_handle", "function_call_edges",
+                "identity_remappings", "mission_complete"):
         if key in event:
             print(f"{key}: {json.dumps(event[key], ensure_ascii=False) if isinstance(event[key], (dict, list)) else event[key]}")
     if event.get("statement"):
@@ -78,6 +88,17 @@ def frame(events: list[dict[str, Any]], index: int, clear: bool) -> None:
         print(f"\n{COLORS['amber']}PROPOSED PREVIEW DIFF (not current state){COLORS['reset']}")
         print(event["preview_diff"])
     source, revision = state_at(events, index)
+    structure = committed_structure_at(events, index)
+    for function in structure.get("functions", []):
+        arrays = ", ".join(f"{a.get('name')}[]" for a in function.get("arrays", [])) or "no arrays"
+        print(f"{COLORS['blue']}semantic function: {function.get('name')}({', '.join(function.get('parameters', []))}) · {arrays}{COLORS['reset']}")
+        for statement in function.get("statements", []):
+            if statement.get("kind") == "if":
+                print(f"  IF block · {statement.get('condition')}")
+            elif statement.get("kind") == "for":
+                print(f"  FOR block · {statement.get('variable_handle')} {statement.get('start')}..{statement.get('end')}")
+        if function.get("handle") == "is_senior.function":
+            print(f"  dependency: IS_SENIOR → AGE_BY_ID (call binding is shown on commit event)")
     print(f"\n{COLORS['blue']}CURRENT COMMITTED PROGRAM — revision {revision}{COLORS['reset']}")
     print(source if source else "(empty virtual document)")
     sys.stdout.flush()

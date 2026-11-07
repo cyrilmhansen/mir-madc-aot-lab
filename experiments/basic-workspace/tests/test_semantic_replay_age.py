@@ -68,6 +68,39 @@ class AgeByIdSemanticReplayTests(unittest.TestCase):
             campaign.replay_stream(stream, self.mission, campaign.Trace())
         self.assertEqual("REPLAY_HANDLE_MISSING", error.exception.code)
 
+    def test_validation_response_is_revision_and_phase_bound(self):
+        executor = campaign.MirExecutionService(timeout=10)
+        gateway = campaign.MissionGateway(self.workspace, self.document_id, self.aliases,
+            self.seed["projection"], self.mission, self.trace, "test")
+        bridge = campaign.AgentGatewayTools(self.workspace, self.document_id, self.aliases,
+            gateway, executor, self.trace)
+        before = bridge.dispatch("run_lookup_checks", {"expected_revision": 2})
+        self.assertTrue(before["reliable"])
+        self.assertEqual(2, before["executed_revision"])
+        self.assertEqual("pre-edit", before["phase"])
+        self.assertEqual({"205": 42.0}, {"205": before["expected_results"]["205"]})
+        self.assertEqual(before["observed_results"]["interp"], before["expected_results"])
+        self.assertTrue(before["engines_agree"])
+        self.assertFalse(before["mission_complete"])
+
+        preview = gateway.preview(self.aliases["people.age.205"], 47, 2)
+        self.assertTrue(preview["ok"])
+        self.assertTrue(gateway.commit(preview["transaction_id"])["committed"])
+        after = bridge.dispatch("run_lookup_checks", {"expected_revision": 3})
+        self.assertTrue(after["reliable"])
+        self.assertEqual(3, after["executed_revision"])
+        self.assertEqual("post-edit", after["phase"])
+        self.assertEqual(47.0, after["expected_results"]["205"])
+        self.assertTrue(after["per_engine_matches"]["interp"])
+        self.assertTrue(after["per_engine_matches"]["jit"])
+        self.assertTrue(after["mission_complete"])
+
+        stale = bridge.dispatch("run_lookup_checks", {"expected_revision": 2})
+        self.assertFalse(stale["reliable"])
+        self.assertEqual("STALE_VALIDATION_REVISION", stale["code"])
+        self.assertIsNone(stale["executed_revision"])
+        self.assertFalse(stale["mission_complete"])
+
     def test_recorded_real_agent_calls_match_dispatched_tool_events(self):
         import json
         root = ROOT / "results" / "semantic-replay" / "age-by-id"
