@@ -8,6 +8,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from basic_workspace import Workspace, WorkspaceError
 from basic_workspace.lsp import Facade
+from basic_workspace.client import AgentToolAdapter, RpcError, WorkspaceClient
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -156,6 +157,23 @@ END FUNCTION
         self.assertEqual(2, result["revision"])
         self.assertIn("GOTO 35", self.ws.render_document(did))
 
+    def test_preview_is_non_mutating_and_commit_revalidates_revision(self):
+        did = self.open("FUNCTION F(SCORE)\nF=SCORE+1\nEND FUNCTION\n")
+        param = self.symbol(did, "parameter", "SCORE")
+        original = self.ws.render_document(did)
+        operations = [{"operation": "rename_symbol", "symbol_id": param["symbol_id"], "new_name": "POINTS"}]
+        preview = self.ws.preview_transaction(did, 1, operations, include_diff=True)
+        self.assertEqual(2, preview["expected_result_revision"])
+        self.assertEqual(1, len(preview["affected_entities"]))
+        self.assertIn("POINTS", preview["diff"])
+        self.assertEqual(1, self.ws.get_revision(did))
+        self.assertEqual(original, self.ws.render_document(did))
+        self.ws.rename_symbol(did, param["symbol_id"], "OTHER", 1)
+        with self.assertRaises(WorkspaceError) as stale:
+            self.ws.apply_transaction(did, preview["base_revision"], operations)
+        self.assertEqual("STALE_REVISION", stale.exception.code)
+        self.assertIn("OTHER", self.ws.render_document(did))
+
     def test_implicit_declarations_are_explicitly_marked(self):
         did = self.open("PRINT TOTAL\nEND\n")
         total = self.symbol(did, "variable", "total")
@@ -176,9 +194,10 @@ END FUNCTION
     def test_function_rename_updates_bound_calls(self):
         did = self.open("FUNCTION TOTAL(X)\nTOTAL=X+1\nEND FUNCTION\nPRINT total(2)\n")
         fn = self.symbol(did, "function", "TOTAL")
-        self.assertEqual(1, fn["reference_count"])
+        self.assertEqual(2, fn["reference_count"])  # result assignment and call site
         self.ws.rename_symbol(did, fn["symbol_id"], "SUM_VALUE", 1)
         self.assertIn("FUNCTION SUM_VALUE(X)", self.ws.render_document(did))
+        self.assertIn("SUM_VALUE=X+1", self.ws.render_document(did))
         self.assertIn("PRINT SUM_VALUE(2)", self.ws.render_document(did))
 
     def test_dim_array_use_is_not_guessed_as_a_function(self):
@@ -201,6 +220,76 @@ END FUNCTION
         self.assertEqual([1, 2], [row["id"] for row in rows])
         self.assertIn("result", rows[1])
 
+    def test_agent_client_lifecycle_preview_commit_and_known_identity(self):
+        with WorkspaceClient(timeout=3) as client:
+            adapter = AgentToolAdapter(client)
+            opened = adapter.call("workspace_open", {"text": "FUNCTION F(SCORE)\nF=SCORE+1\nEND FUNCTION\n"})
+            symbols = adapter.call("workspace_symbols", {"kind": "parameter", "name_query": "score"})
+            symbol = symbols["items"][0]
+            refs = adapter.call("workspace_references", {"symbol_id": symbol["symbol_id"]})
+            self.assertEqual(2, refs["total"])
+            ops = [{"operation": "rename_symbol", "symbol_id": symbol["symbol_id"], "new_name": "POINTS"}]
+            preview = adapter.call("workspace_preview", {"expected_revision": opened["revision"],
+                                                           "operations": ops})
+            self.assertTrue(preview["valid"])
+            self.assertEqual(1, client.revision)
+            committed = adapter.call("workspace_commit", {"expected_revision": opened["revision"],
+                                                            "operations": ops})
+            self.assertEqual(2, committed["revision"])
+            self.assertIn("POINTS", adapter.call("workspace_render", {})["text"])
+            self.assertEqual([], adapter.call("workspace_diagnostics", {}))
+            with self.assertRaises(RpcError) as fabricated:
+                adapter.call("workspace_preview", {"expected_revision": 2,
+                    "operations": [{"operation": "rename_symbol", "symbol_id": "sym_fake", "new_name": "X"}]})
+            self.assertEqual("UNKNOWN_SYMBOL_ID", fabricated.exception.code)
+            self.assertGreater(client.metrics["request_bytes"], 0)
+        self.assertIsNone(client.proc)
+
+    def test_agent_client_timeout_is_structured_and_closes_subprocess(self):
+        client = WorkspaceClient(timeout=0.000001)
+        with self.assertRaises(RpcError) as timed_out:
+            client.workspace_open("END\n")
+        self.assertEqual("TIMEOUT", timed_out.exception.code)
+        self.assertIsNone(client.proc)
+
+    def test_agent_client_bounds_and_filters_discovery(self):
+        with WorkspaceClient(timeout=3) as client:
+            client.workspace_open("\n".join(f"PRINT V{i}" for i in range(80)))
+            page = client.workspace_symbols(limit=5, name_query="V7")
+            self.assertEqual(11, page["total"])
+            self.assertEqual(5, len(page["items"]))
+            structure = client.workspace_structure(limit=5)
+            self.assertEqual(5, len(structure["physical_lines"]))
+            self.assertTrue(structure["page"]["physical_line_total"] >= 80)
+            self.assertTrue(client.workspace_render(max_chars=12)["truncated"])
+
+    def test_agent_tool_requires_discovered_line_label(self):
+        with WorkspaceClient(timeout=3) as client:
+            agent = AgentToolAdapter(client)
+            opened = agent.call("workspace_open", {"text": "10 GOTO 20\n20 END\n"})
+            op = [{"operation": "renumber_line", "old_line": 20, "new_line": 30}]
+            with self.assertRaises(RpcError) as missing:
+                agent.call("workspace_preview", {"expected_revision": opened["revision"], "operations": op})
+            self.assertEqual("UNKNOWN_LINE_LABEL", missing.exception.code)
+            agent.call("workspace_symbols", {"kind": "line_label", "name_query": "20"})
+            preview = agent.call("workspace_preview", {"expected_revision": opened["revision"], "operations": op})
+            self.assertTrue(preview["valid"])
+
+    def test_two_agent_views_share_authoritative_process_and_reject_stale_commit(self):
+        with WorkspaceClient(timeout=3) as client:
+            agent_a = AgentToolAdapter(client)
+            opened = agent_a.call("workspace_open", {"text": "FUNCTION F(SCORE)\nF=SCORE\nEND FUNCTION\n"})
+            symbol = agent_a.call("workspace_symbols", {"kind": "parameter"})["items"][0]
+            agent_b = agent_a.fork()
+            old_revision = opened["revision"]
+            op_a = [{"operation": "rename_symbol", "symbol_id": symbol["symbol_id"], "new_name": "POINTS"}]
+            agent_a.call("workspace_commit", {"expected_revision": old_revision, "operations": op_a})
+            op_b = [{"operation": "rename_symbol", "symbol_id": symbol["symbol_id"], "new_name": "VALUE"}]
+            with self.assertRaises(RpcError) as stale:
+                agent_b.call("workspace_commit", {"expected_revision": old_revision, "operations": op_b})
+            self.assertEqual("STALE_REVISION", stale.exception.code)
+            self.assertIn("POINTS", agent_a.call("workspace_render", {})["text"])
+
     def test_lsp_facade_uses_workspace_model(self):
         facade = Facade()
         caps = facade.request("initialize", {})
@@ -214,15 +303,67 @@ END FUNCTION
         prepared = facade.request("textDocument/prepareRename", {
             "textDocument": {"uri": uri}, "position": {"line": 0, "character": 17}})
         self.assertEqual("SCORE", prepared["placeholder"])
+        before = facade.workspace.render_document(facade.docid(uri))
         edit = facade.request("textDocument/rename", {
             "textDocument": {"uri": uri}, "position": {"line": 0, "character": 17},
             "newName": "POINTS"})
-        self.assertEqual(2, len(edit["changes"][uri]))
+        self.assertEqual(1, edit["documentChanges"][0]["textDocument"]["version"])
+        self.assertEqual(2, len(edit["documentChanges"][0]["edits"]))
         did = facade.docid(uri)
-        self.assertIn("TOTAL(POINTS)", facade.workspace.render_document(did))
+        self.assertEqual(before, facade.workspace.render_document(did))
+        self.assertEqual(1, facade.workspace.get_revision(did))
+        proposed = before.replace("TOTAL(SCORE)", "TOTAL(POINTS)").replace("TOTAL=SCORE+1", "TOTAL=POINTS+1")
         facade.request("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
-                                                   "contentChanges": [{"text": "END\n"}]})
-        self.assertEqual("END\n", facade.workspace.render_document(did))
+                                                   "contentChanges": [{"text": proposed}]})
+        self.assertEqual(proposed, facade.workspace.render_document(did))
+        self.assertEqual(2, facade.workspace.get_revision(did))
+        with self.assertRaises(WorkspaceError) as stale:
+            facade.request("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                                                       "contentChanges": [{"text": "END\n"}]})
+        self.assertEqual("STALE_DOCUMENT_VERSION", stale.exception.code)
+
+    def test_lsp_uses_utf16_positions_with_astral_characters(self):
+        facade = Facade()
+        caps = facade.request("initialize", {})
+        self.assertEqual("utf-16", caps["capabilities"]["positionEncoding"])
+        uri = "memory://utf16/test.bas"
+        source = 'FUNCTION F(SCORE)\nF=SCORE\nPRINT "😀"; SCORE\nEND FUNCTION\n'
+        facade.request("textDocument/didOpen", {"textDocument": {"uri": uri, "version": 1, "text": source}})
+        cp_start = len('PRINT "😀"; ')
+        utf16_start = len('PRINT "😀"; '.encode("utf-16-le")) // 2
+        prep = facade.request("textDocument/prepareRename", {
+            "textDocument": {"uri": uri}, "position": {"line": 2, "character": utf16_start + 1}})
+        self.assertEqual("SCORE", prep["placeholder"])
+        self.assertEqual(utf16_start, prep["range"]["start"]["character"])
+        self.assertEqual(cp_start + 1, utf16_start)
+        before = facade.workspace.render_document(facade.docid(uri))
+        proposed_edit = facade.request("textDocument/rename", {
+            "textDocument": {"uri": uri}, "position": {"line": 2, "character": utf16_start},
+            "newName": "POINTS"})
+        self.assertEqual(1, proposed_edit["documentChanges"][0]["textDocument"]["version"])
+        edits = proposed_edit["documentChanges"][0]["edits"]
+        edit = next(e for e in edits if e["range"]["start"]["line"] == 2)
+        self.assertEqual(utf16_start, edit["range"]["start"]["character"])
+        self.assertEqual(before, facade.workspace.render_document(facade.docid(uri)))
+        after = before.replace("F(SCORE)", "F(POINTS)").replace("F=SCORE", "F=POINTS").replace("; SCORE", "; POINTS")
+        facade.request("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                                                   "contentChanges": [{"text": after}]})
+        self.assertEqual(after, facade.workspace.render_document(facade.docid(uri)))
+
+    def test_lsp_rejects_sync_after_workspace_changes_since_rename_preview(self):
+        facade = Facade()
+        uri = "memory://stale/test.bas"
+        facade.request("textDocument/didOpen", {"textDocument": {"uri": uri, "version": 1,
+            "text": "FUNCTION F(X)\nF=X\nEND FUNCTION\n"}})
+        facade.request("textDocument/rename", {"textDocument": {"uri": uri},
+            "position": {"line": 0, "character": 11}, "newName": "VALUE"})
+        did = facade.docid(uri)
+        symbol = next(x for x in facade.workspace.list_symbols(did) if x["kind"] == "parameter")
+        facade.workspace.rename_symbol(did, symbol["symbol_id"], "OTHER", 1)
+        with self.assertRaises(WorkspaceError) as stale:
+            facade.request("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "FUNCTION F(VALUE)\nF=VALUE\nEND FUNCTION\n"}]})
+        self.assertEqual("STALE_PREVIEW", stale.exception.code)
 
     def test_lsp_stdio_framing(self):
         root = pathlib.Path(__file__).resolve().parents[1]

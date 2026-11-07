@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import copy
+import difflib
 import re
 import uuid
 from typing import Any
@@ -437,12 +438,18 @@ class Workspace:
                     continue
                 if t.uid in doc.line_refs:
                     continue
-                # Declared BASIC functions/procedures are references only on calls.
+                # Calls bind normally; a function's own bare name inside its body
+                # is the return-value assignment/reference in this BASIC dialect.
                 if t.text.casefold() in func_by_name:
                     if i + 1 < len(sig) and sig[i + 1].text == "(":
                         fs = func_by_name[t.text.casefold()]
                         fs.references.append(t.uid)
                         doc.token_symbol[t.uid] = fs.id
+                    elif active_name and t.text.casefold() == active_name and enclosing:
+                        result_func = func_by_name.get(active_name)
+                        if result_func and result_func.id == enclosing["symbol_id"] and enclosing["kind"] == "function":
+                            result_func.references.append(t.uid)
+                            doc.token_symbol[t.uid] = result_func.id
                     continue
                 # DEF FN names and builtins are callable entities, not variables.
                 if word in BUILTINS or word.startswith("FN"):
@@ -458,8 +465,6 @@ class Workspace:
                     else:
                         doc.diagnostics.append(Diagnostic("AMBIGUOUS_CALL_OR_ARRAY", f"Cannot tell whether {t.text} is an implicit array or function call", "information", t.line, t.column))
                         continue
-                if active_name and t.text.casefold() == active_name:
-                    continue  # function result variable
                 key = (scope_id, t.text.casefold())
                 sym = var_symbols.get(key)
                 if sym is None:
@@ -500,9 +505,37 @@ class Workspace:
                                  "symbol_id": d.token_symbol.get(uid)} for n, uid in d.labels.items()],
                 "diagnostics": [self._diag_json(x) for x in d.diagnostics]}
 
+    def get_document_structure_page(self, document_id: str, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+        d = self._doc(document_id)
+        if offset < 0 or limit < 1 or limit > 200:
+            raise WorkspaceError("INVALID_PAGE", "Use offset >= 0 and limit from 1 to 200")
+        rows = self.get_document_structure(document_id)
+        rows["physical_lines"] = [{k: line[k] for k in ("physical_line", "line_label", "statement_count")}
+                                   for line in rows["physical_lines"][offset:offset + limit]]
+        rows["functions"] = rows["functions"][offset:offset + limit]
+        rows["line_labels"] = rows["line_labels"][offset:offset + limit]
+        rows["diagnostics_total"] = len(rows["diagnostics"])
+        rows["diagnostics"] = rows["diagnostics"][:50]
+        rows["page"] = {"offset": offset, "limit": limit,
+                         "physical_line_total": len(d.lines), "function_total": len(d.functions),
+                         "line_label_total": len(d.labels)}
+        return rows
+
     def list_symbols(self, document_id: str) -> list[dict[str, Any]]:
         d = self._doc(document_id)
         return [self._symbol_json(s) for s in d.symbols.values()]
+
+    def list_symbols_page(self, document_id: str, offset: int = 0, limit: int = 50,
+                          kind: str | None = None, name_query: str | None = None,
+                          scope_id: str | None = None) -> dict[str, Any]:
+        if offset < 0 or limit < 1 or limit > 200:
+            raise WorkspaceError("INVALID_PAGE", "Use offset >= 0 and limit from 1 to 200")
+        rows = [self._symbol_json(s) for s in self._doc(document_id).symbols.values()
+                if (kind is None or s.kind == kind)
+                and (name_query is None or name_query.casefold() in s.name.casefold())
+                and (scope_id is None or s.scope_id == scope_id)]
+        return {"items": rows[offset:offset + limit], "total": len(rows),
+                "offset": offset, "limit": limit, "truncated": offset + limit < len(rows)}
 
     @staticmethod
     def _symbol_json(s: Symbol) -> dict[str, Any]:
@@ -530,6 +563,14 @@ class Workspace:
                  "is_definition": t.uid == s.declaration_token}
                 for t in d.tokens if t.uid in target_ids]
 
+    def find_references_page(self, document_id: str, symbol_id: str,
+                             offset: int = 0, limit: int = 100) -> dict[str, Any]:
+        if offset < 0 or limit < 1 or limit > 500:
+            raise WorkspaceError("INVALID_PAGE", "Use offset >= 0 and limit from 1 to 500")
+        rows = self.find_references(document_id, symbol_id)
+        return {"items": rows[offset:offset + limit], "total": len(rows),
+                "offset": offset, "limit": limit, "truncated": offset + limit < len(rows)}
+
     def get_revision(self, document_id: str) -> int:
         return self._doc(document_id).revision
 
@@ -543,22 +584,37 @@ class Workspace:
                      operation: dict[str, Any]) -> dict[str, Any]:
         return self.apply_transaction(document_id, expected_revision, [operation])
 
-    def apply_transaction(self, document_id: str, expected_revision: int,
-                          operations: list[dict[str, Any]]) -> dict[str, Any]:
+    def _prepare_transaction(self, document_id: str, expected_revision: int,
+                             operations: list[dict[str, Any]], include_diff: bool = False) -> tuple[Document, dict[str, Any]]:
         current = self._doc(document_id)
         if current.revision != expected_revision:
             raise WorkspaceError("STALE_REVISION", f"Expected revision {expected_revision}, current revision is {current.revision}", {"current_revision": current.revision})
         if not operations:
             raise WorkspaceError("EMPTY_TRANSACTION", "A semantic transaction needs at least one operation")
         candidate = copy.deepcopy(current)
+        touched: dict[str, str] = {}
         for operation in operations:
             kind = operation.get("operation")
             if kind == "rename_symbol":
-                self._rename(candidate, operation["symbol_id"], operation["new_name"])
+                sid = operation["symbol_id"]
+                if sid not in candidate.symbols:
+                    raise WorkspaceError("SYMBOL_NOT_FOUND", "Unknown symbol identity")
+                touched.setdefault(sid, candidate.symbols[sid].name)
+                self._rename(candidate, sid, operation["new_name"])
             elif kind == "renumber_line":
-                self._renumber(candidate, int(operation["old_line"]), int(operation["new_line"]))
+                old = int(operation["old_line"])
+                if old in candidate.labels:
+                    label_uid = candidate.labels[old]
+                    label_symbol = next((s for s in candidate.symbols.values() if s.kind == "line_label" and s.declaration_token == label_uid), None)
+                    if label_symbol:
+                        touched.setdefault(label_symbol.id, label_symbol.name)
+                self._renumber(candidate, old, int(operation["new_line"]))
             elif kind == "move_function":
-                self._move_function(candidate, operation["symbol_id"], operation.get("before_symbol_id"))
+                sid = operation["symbol_id"]
+                if sid not in candidate.symbols:
+                    raise WorkspaceError("SYMBOL_NOT_FOUND", "Unknown symbol identity")
+                touched.setdefault(sid, candidate.symbols[sid].name)
+                self._move_function(candidate, sid, operation.get("before_symbol_id"))
             else:
                 raise WorkspaceError("UNSUPPORTED_OPERATION", f"Unsupported semantic operation: {kind}")
             self._index(candidate)
@@ -566,9 +622,42 @@ class Workspace:
         if errors:
             raise WorkspaceError("VALIDATION_FAILED", "Transaction would introduce invalid semantics", [self._diag_json(x) for x in errors])
         candidate.revision = current.revision + 1
+        affected = []
+        for sid, before in touched.items():
+            after = candidate.symbols.get(sid)
+            if after:
+                affected.append({"symbol_id": sid, "kind": after.kind, "before": before,
+                                 "after": after.name, "reference_count": len(after.references)})
+        old_diags = {(x.code, x.message, x.severity) for x in current.diagnostics}
+        new_diags = [self._diag_json(x) for x in candidate.diagnostics
+                     if (x.code, x.message, x.severity) not in old_diags]
+        preview = {"valid": True, "document_id": document_id,
+                   "base_revision": current.revision,
+                   "expected_result_revision": candidate.revision,
+                   "affected_entities": affected,
+                   "diagnostics": {"error_count": 0,
+                                   "warning_count": sum(x.severity == "warning" for x in candidate.diagnostics),
+                                   "new": new_diags}}
+        if include_diff:
+            diff = "".join(difflib.unified_diff(
+                current.render().splitlines(keepends=True), candidate.render().splitlines(keepends=True),
+                fromfile="workspace-before", tofile="workspace-after"))
+            preview["diff"] = diff[:4000]
+            preview["diff_truncated"] = len(diff) > 4000
+        return candidate, preview
+
+    def preview_transaction(self, document_id: str, expected_revision: int,
+                            operations: list[dict[str, Any]], include_diff: bool = False) -> dict[str, Any]:
+        _, preview = self._prepare_transaction(document_id, expected_revision, operations, include_diff)
+        return preview
+
+    def apply_transaction(self, document_id: str, expected_revision: int,
+                          operations: list[dict[str, Any]]) -> dict[str, Any]:
+        candidate, preview = self._prepare_transaction(document_id, expected_revision, operations)
         self.documents[document_id] = candidate
         return {"committed": True, "revision": candidate.revision,
-                "diagnostics": [self._diag_json(x) for x in candidate.diagnostics]}
+                "affected_entities": preview["affected_entities"],
+                "diagnostics": preview["diagnostics"]}
 
     def rename_symbol(self, document_id: str, symbol_id: str, new_name: str,
                       expected_revision: int) -> dict[str, Any]:
@@ -699,11 +788,15 @@ class Workspace:
             "replace_document_from_string": lambda: self.replace_document_from_string(params["document_id"], params["text"], params["expected_revision"]),
             "list_documents": self.list_documents,
             "get_document_structure": lambda: self.get_document_structure(params["document_id"]),
+            "get_document_structure_page": lambda: self.get_document_structure_page(params["document_id"], params.get("offset", 0), params.get("limit", 50)),
             "list_symbols": lambda: self.list_symbols(params["document_id"]),
+            "list_symbols_page": lambda: self.list_symbols_page(params["document_id"], params.get("offset", 0), params.get("limit", 50), params.get("kind"), params.get("name_query"), params.get("scope_id")),
             "find_definition": lambda: self.find_definition(params["document_id"], params["symbol_id"]),
             "find_references": lambda: self.find_references(params["document_id"], params["symbol_id"]),
+            "find_references_page": lambda: self.find_references_page(params["document_id"], params["symbol_id"], params.get("offset", 0), params.get("limit", 100)),
             "rename_symbol": lambda: self.rename_symbol(params["document_id"], params["symbol_id"], params["new_name"], params["expected_revision"]),
             "apply_transaction": lambda: self.apply_transaction(params["document_id"], params["expected_revision"], params["operations"]),
+            "preview_transaction": lambda: self.preview_transaction(params["document_id"], params["expected_revision"], params["operations"], params.get("include_diff", False)),
             "renumber_line": lambda: self.renumber_line(params["document_id"], params["old_line"], params["new_line"], params["expected_revision"]),
             "move_function": lambda: self.move_function(params["document_id"], params["symbol_id"], params.get("before_symbol_id"), params["expected_revision"]),
             "render_document": lambda: self.render_document(params["document_id"]),

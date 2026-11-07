@@ -160,12 +160,82 @@ PYTHONPATH=experiments/basic-workspace python3 -m basic_workspace.lsp
 
 It implements framed LSP `initialize`, `didOpen`, full-text `didChange`,
 `didClose`, `documentSymbol`, `definition`, `references`, `prepareRename` and
-`rename`. It maps requests to the same `Workspace` object. `didChange` imports
-a complete document as an explicit replacement transaction and invalidates
-identities; incremental range changes are rejected. A returned LSP
-`WorkspaceEdit` is derived from the semantic references, while the semantic
-engine commits the token edit itself. The facade is intentionally thin and
-does not store a second editable document.
+`rename`. It maps requests to the same `Workspace` object. Rename proposes a
+versioned `documentChanges` WorkspaceEdit and does not mutate the workspace.
+The subsequent full-document `didChange` is accepted as one explicit
+replacement transaction only when the document version increases and the
+synchronized text matches the pending proposal. Incremental range changes are
+rejected. UTF-16 positions are negotiated and converted, including rejection
+of offsets that split a surrogate pair. A stale proposal is rejected if
+another operation changes the workspace. The facade does not store a second
+editable document.
+
+## Agent client and semantic tools
+
+`basic_workspace.client.WorkspaceClient` launches one long-lived JSON-RPC
+subprocess, correlates request IDs, enforces timeouts and closes the process
+cleanly. `AgentToolAdapter` exposes eight structured operations:
+
+| Tool | Purpose |
+|---|---|
+| `workspace_open` | Load source text into the in-memory model |
+| `workspace_structure` | Page concise line/function/label summaries |
+| `workspace_symbols` | Filter and page semantic entities |
+| `workspace_references` | Page references for a discovered identity |
+| `workspace_preview` | Validate a transaction on a private snapshot |
+| `workspace_commit` | Revalidate and commit at an expected revision |
+| `workspace_diagnostics` | Read diagnostics |
+| `workspace_render` | Explicitly request bounded text export |
+
+The client refuses fabricated symbol IDs and line labels not discovered through
+query tools. Preview and commit share transaction validation. Preview does not
+reserve a revision; the service checks again at commit. Multiple adapters can
+fork views over one client process, sharing the authoritative in-memory model
+while retaining separate observed revisions.
+
+```sh
+PYTHONPATH=experiments/basic-workspace python3 experiments/basic-workspace/agent_demo.py
+python3 experiments/basic-workspace/experiment/run_trials.py
+python3 -m unittest discover -s experiments/basic-workspace/tests -v
+```
+
+The demo performs open → structure → symbol discovery → references → preview
+→ commit → diagnostics/revision verification. It renders only when a text
+export is explicitly requested. Editing requires no source file.
+
+## Atlas boundary and deterministic task results
+
+The Atlas Python checkout inspected is `/home/john/luna/atlas-py-v012` at
+`3aad255b5e049766db06f7541d5da1b212ec3f20`. Its `CodexExecutor` runs a sealed
+Codex profile with fixed tools (`exec_command`, `write_stdin`, `apply_patch`)
+and digest-validated assets. It has no Python structured-tool callback seam.
+Adding one would change Atlas's existing tool selection/profile contract, so
+that repository remains untouched. The standalone adapter exercises the
+subprocess and structured-result boundary, but full Atlas registration and
+genuine Atlas model trials remain unverified. No model actions or token counts
+are claimed.
+
+`experiment/run_trials.py` runs 16 deterministic tasks from clean in-memory
+workspaces: scoped/local and function renames, GOTO/GOSUB/ON GOTO renumbering,
+an atomic multi-operation edit, collision rejection, function movement,
+ambiguity/incomplete-input refusal, colon-separated statements, a two-agent
+stale revision conflict, and historical `fn`, `mastermind` and `poker`
+examples. Historical files are read-only. The text arm is literal
+search/replace, not a model or human estimate. Results under
+`results/agent-editing/` include per-task metrics and machine-readable data.
+The first deterministic run measured 16/16 semantic outcomes and 10/16 text
+outcomes; semantic tools made 108 calls and the text arm 32. The task suite
+counts 35,582 semantic tool-response bytes versus 13,906 source bytes shown to
+the text arm. One harness run took 581.528 ms versus 0.125 ms, dominated
+by 16 fresh server processes; this is not a fair agent-latency comparison.
+That response overhead is higher even though it does not expose the complete
+program text. Small samples do not establish a general context advantage.
+Model token use is unavailable, not estimated.
+
+The trial exposed and fixed an index gap: a BASIC function's result-assignment
+name was not bound to the function symbol. Renaming the function used to leave
+that assignment under the old name. The index now binds that occurrence, and
+the regression test covers declaration, result assignment and calls together.
 
 ## Microbenchmarks
 
