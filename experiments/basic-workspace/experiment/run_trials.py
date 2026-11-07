@@ -61,9 +61,9 @@ def cases():
            "expected": "FUNCTION F(POINTS)\nF=POINTS\nEND FUNCTION\n"}
 
 
-def selector(client, selector):
+def selector(adapter, selector):
     kind, name = selector
-    result = client.workspace_symbols(kind=kind, name_query=name, limit=20)
+    result = adapter.call("workspace_symbols", {"kind": kind, "name_query": name, "limit": 20})
     matches = [x for x in result["items"] if x["name"].casefold() == name.casefold()]
     if len(matches) != 1:
         raise RpcError("ENTITY_NOT_UNIQUE", f"Expected one {kind} named {name}; got {len(matches)}")
@@ -81,16 +81,16 @@ def semantic_arm(task):
         ops = []
         symbol = None
         if "target" in task:
-            symbol = selector(client, task["target"])
+            symbol = selector(adapter, task["target"])
             adapter.call("workspace_references", {"symbol_id": symbol["symbol_id"], "limit": 50})
         if "line" in task:
-            line_symbol = selector(client, ["line_label", str(task["line"][0])])
+            line_symbol = selector(adapter, ["line_label", str(task["line"][0])])
             adapter.call("workspace_references", {"symbol_id": line_symbol["symbol_id"], "limit": 50})
         if task.get("unsupported"):
             status = "refused" if any(d["code"] == task["unsupported"] for d in diagnostics) else "unsupported_not_diagnosed"
         else:
             if symbol and task.get("move"):
-                before_symbol = selector(client, task["before"])
+                before_symbol = selector(adapter, task["before"])
                 ops.append({"operation": "move_function", "symbol_id": symbol["symbol_id"],
                             "before_symbol_id": before_symbol["symbol_id"]})
             elif symbol and "new_name" in task:
@@ -100,7 +100,7 @@ def semantic_arm(task):
             if task.get("conflict"):
                 agent_b = adapter.fork()
                 expected_revision = opened["revision"]
-                point = selector(client, ["parameter", "X"])
+                point = selector(adapter, ["parameter", "X"])
                 first = [{"operation": "rename_symbol", "symbol_id": point["symbol_id"], "new_name": "POINTS"}]
                 adapter.call("workspace_preview", {"expected_revision": expected_revision, "operations": first})
                 adapter.call("workspace_commit", {"expected_revision": expected_revision, "operations": first})

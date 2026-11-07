@@ -527,15 +527,30 @@ class Workspace:
 
     def list_symbols_page(self, document_id: str, offset: int = 0, limit: int = 50,
                           kind: str | None = None, name_query: str | None = None,
-                          scope_id: str | None = None) -> dict[str, Any]:
+                          scope_id: str | None = None, exact_name: str | None = None,
+                          unique: bool = False) -> dict[str, Any]:
         if offset < 0 or limit < 1 or limit > 200:
             raise WorkspaceError("INVALID_PAGE", "Use offset >= 0 and limit from 1 to 200")
         rows = [self._symbol_json(s) for s in self._doc(document_id).symbols.values()
                 if (kind is None or s.kind == kind)
                 and (name_query is None or name_query.casefold() in s.name.casefold())
+                and (exact_name is None or exact_name.casefold() == s.name.casefold())
                 and (scope_id is None or s.scope_id == scope_id)]
-        return {"items": rows[offset:offset + limit], "total": len(rows),
-                "offset": offset, "limit": limit, "truncated": offset + limit < len(rows)}
+        result = {"items": rows[offset:offset + limit], "total": len(rows),
+                  "offset": offset, "limit": limit, "truncated": offset + limit < len(rows)}
+        if unique:
+            d = self._doc(document_id)
+            result.update({"revision": d.revision, "unique": len(rows) == 1,
+                           "ambiguous": len(rows) > 1,
+                           "unique_symbol": rows[0] if len(rows) == 1 else None,
+                           "diagnostic_summary": {"count": len(d.diagnostics),
+                             "errors": sum(x.severity == "error" for x in d.diagnostics),
+                             "warnings": sum(x.severity == "warning" for x in d.diagnostics)}})
+            if len(rows) == 1:
+                result["items"] = []
+            else:
+                result["items"] = rows[:min(limit, 5)]
+        return result
 
     @staticmethod
     def _symbol_json(s: Symbol) -> dict[str, Any]:
@@ -790,7 +805,7 @@ class Workspace:
             "get_document_structure": lambda: self.get_document_structure(params["document_id"]),
             "get_document_structure_page": lambda: self.get_document_structure_page(params["document_id"], params.get("offset", 0), params.get("limit", 50)),
             "list_symbols": lambda: self.list_symbols(params["document_id"]),
-            "list_symbols_page": lambda: self.list_symbols_page(params["document_id"], params.get("offset", 0), params.get("limit", 50), params.get("kind"), params.get("name_query"), params.get("scope_id")),
+            "list_symbols_page": lambda: self.list_symbols_page(params["document_id"], params.get("offset", 0), params.get("limit", 50), params.get("kind"), params.get("name_query"), params.get("scope_id"), params.get("exact_name"), params.get("unique", False)),
             "find_definition": lambda: self.find_definition(params["document_id"], params["symbol_id"]),
             "find_references": lambda: self.find_references(params["document_id"], params["symbol_id"]),
             "find_references_page": lambda: self.find_references_page(params["document_id"], params["symbol_id"], params.get("offset", 0), params.get("limit", 100)),

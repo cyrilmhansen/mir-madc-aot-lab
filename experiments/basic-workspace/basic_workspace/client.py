@@ -34,7 +34,7 @@ class WorkspaceClient:
         self._known_symbols: set[str] = set()
         self._known_lines: set[int] = set()
         self.metrics = {"requests": 0, "request_bytes": 0, "response_bytes": 0,
-                        "wall_ms": 0.0, "methods": {}}
+                        "response_bytes_by_method": {}, "wall_ms": 0.0, "methods": {}}
 
     def start(self) -> "WorkspaceClient":
         if self.proc is not None:
@@ -122,6 +122,8 @@ class WorkspaceClient:
                 raise RpcError("PROCESS_IO", str(response), {"stderr_tail": list(self._stderr)})
             raw = json.dumps(response, separators=(",", ":"), ensure_ascii=False)
             self.metrics["response_bytes"] += len(raw.encode("utf-8"))
+            by_method = self.metrics["response_bytes_by_method"]
+            by_method[method] = by_method.get(method, 0) + len(raw.encode("utf-8"))
             if response.get("id") != self._next_id:
                 raise RpcError("RESPONSE_ID_MISMATCH", "JSON-RPC response ID did not match request")
             if "error" in response:
@@ -149,9 +151,11 @@ class WorkspaceClient:
 
     def workspace_symbols(self, kind: str | None = None, name_query: str | None = None,
                           scope_id: str | None = None, offset: int = 0,
-                          limit: int = 50) -> dict[str, Any]:
+                          limit: int = 50, exact_name: str | None = None,
+                          unique: bool = False) -> dict[str, Any]:
         params = self._doc_params(offset=offset, limit=limit)
-        for k, v in (("kind", kind), ("name_query", name_query), ("scope_id", scope_id)):
+        for k, v in (("kind", kind), ("name_query", name_query), ("scope_id", scope_id),
+                     ("exact_name", exact_name), ("unique", unique)):
             if v is not None:
                 params[k] = v
         result = self._rpc("list_symbols_page", params)
@@ -159,6 +163,13 @@ class WorkspaceClient:
             self._known_symbols.add(row["symbol_id"])
             if row["kind"] == "line_label" and row["name"].isdigit():
                 self._known_lines.add(int(row["name"]))
+        if result.get("unique_symbol"):
+            row = result["unique_symbol"]
+            self._known_symbols.add(row["symbol_id"])
+            if row["kind"] == "line_label" and row["name"].isdigit():
+                self._known_lines.add(int(row["name"]))
+        if "revision" in result:
+            self.revision = result["revision"]
         return result
 
     def workspace_references(self, symbol_id: str, offset: int = 0, limit: int = 100) -> dict[str, Any]:
@@ -216,7 +227,7 @@ class WorkspaceClient:
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "workspace_open": {"required": ["text"], "optional": ["uri"]},
     "workspace_structure": {"required": [], "optional": ["offset", "limit"]},
-    "workspace_symbols": {"required": [], "optional": ["kind", "name_query", "scope_id", "offset", "limit"]},
+    "workspace_symbols": {"required": [], "optional": ["kind", "name_query", "exact_name", "unique", "scope_id", "offset", "limit"]},
     "workspace_references": {"required": ["symbol_id"], "optional": ["offset", "limit"]},
     "workspace_preview": {"required": ["expected_revision", "operations"], "optional": ["include_diff"]},
     "workspace_commit": {"required": ["expected_revision", "operations"], "optional": []},
@@ -230,6 +241,8 @@ class AgentToolAdapter:
     def __init__(self, client: WorkspaceClient):
         self.client = client
         self.observed_revision = client.revision
+        self.known_symbols: set[str] = set()
+        self.known_lines: set[int] = set()
 
     def fork(self) -> "AgentToolAdapter":
         """Create another agent view over the same persistent workspace process."""
@@ -248,6 +261,7 @@ class AgentToolAdapter:
             expected = args["expected_revision"]
             if self.observed_revision is None or expected != self.observed_revision:
                 raise RpcError("STALE_LOCAL_REVISION", "Transaction does not match this agent's observed revision")
+            self._validate_discovered_operations(args["operations"])
             self.client._validate_operation_symbols(args["operations"])
             result = self.client._rpc("apply_transaction", self.client._doc_params(
                 expected_revision=expected, operations=args["operations"]))
@@ -258,11 +272,41 @@ class AgentToolAdapter:
             expected = args["expected_revision"]
             if self.observed_revision is None or expected != self.observed_revision:
                 raise RpcError("STALE_LOCAL_REVISION", "Transaction does not match this agent's observed revision")
+            self._validate_discovered_operations(args["operations"])
             self.client._validate_operation_symbols(args["operations"])
             return self.client._rpc("preview_transaction", self.client._doc_params(**args))
+        if name == "workspace_references":
+            if args.get("symbol_id") not in self.known_symbols:
+                raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover the symbol before requesting its references")
         result = getattr(self.client, name)(**args)
         if name == "workspace_open":
             self.observed_revision = result["revision"]
+            self.known_symbols.clear()
+            self.known_lines.clear()
         elif name == "workspace_structure":
             self.observed_revision = result["revision"]
+            self.known_symbols.update(x.get("symbol_id") for x in result["functions"] + result["line_labels"] if x.get("symbol_id"))
+            self.known_lines.update(int(x["line"]) for x in result["line_labels"])
+        elif name == "workspace_symbols" and "revision" in result:
+            self.observed_revision = result["revision"]
+        if name == "workspace_symbols":
+            self.known_symbols.update(x["symbol_id"] for x in result.get("items", []))
+            symbol = result.get("unique_symbol")
+            if symbol:
+                self.known_symbols.add(symbol["symbol_id"])
+                if symbol["kind"] == "line_label" and symbol["name"].isdigit():
+                    self.known_lines.add(int(symbol["name"]))
+            for row in result.get("items", []):
+                if row["kind"] == "line_label" and row["name"].isdigit():
+                    self.known_lines.add(int(row["name"]))
         return result
+
+    def _validate_discovered_operations(self, operations: list[dict[str, Any]]) -> None:
+        for operation in operations:
+            for key in ("symbol_id", "before_symbol_id"):
+                symbol_id = operation.get(key)
+                if symbol_id is not None and symbol_id not in self.known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "This agent must discover each symbol before editing")
+            if (operation.get("operation") == "renumber_line" and
+                    int(operation["old_line"]) not in self.known_lines):
+                raise RpcError("UNKNOWN_LINE_LABEL", "This agent must discover the line label before renumbering")

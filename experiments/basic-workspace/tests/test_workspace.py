@@ -275,6 +275,19 @@ END FUNCTION
             preview = agent.call("workspace_preview", {"expected_revision": opened["revision"], "operations": op})
             self.assertTrue(preview["valid"])
 
+    def test_compact_unique_symbol_discovery_is_exact_and_ambiguity_safe(self):
+        with WorkspaceClient(timeout=3) as client:
+            client.workspace_open("FUNCTION A(X)\nA=X\nEND FUNCTION\nFUNCTION B(X)\nB=X\nEND FUNCTION\n")
+            unique = client.workspace_symbols(kind="function", exact_name="A", unique=True)
+            self.assertTrue(unique["unique"])
+            self.assertEqual("A", unique["unique_symbol"]["name"])
+            self.assertEqual([], unique["items"])
+            self.assertIn("revision", unique)
+            self.assertIn("diagnostic_summary", unique)
+            ambiguous = client.workspace_symbols(kind="parameter", exact_name="X", unique=True)
+            self.assertTrue(ambiguous["ambiguous"])
+            self.assertIsNone(ambiguous["unique_symbol"])
+
     def test_two_agent_views_share_authoritative_process_and_reject_stale_commit(self):
         with WorkspaceClient(timeout=3) as client:
             agent_a = AgentToolAdapter(client)
@@ -283,6 +296,11 @@ END FUNCTION
             agent_b = agent_a.fork()
             old_revision = opened["revision"]
             op_a = [{"operation": "rename_symbol", "symbol_id": symbol["symbol_id"], "new_name": "POINTS"}]
+            with self.assertRaises(RpcError) as undiscovered:
+                agent_b.call("workspace_preview", {"expected_revision": old_revision, "operations": op_a})
+            self.assertEqual("UNKNOWN_SYMBOL_ID", undiscovered.exception.code)
+            symbol_b = agent_b.call("workspace_symbols", {"kind": "parameter", "name_query": "SCORE"})["items"][0]
+            self.assertEqual(symbol["symbol_id"], symbol_b["symbol_id"])
             agent_a.call("workspace_commit", {"expected_revision": old_revision, "operations": op_a})
             op_b = [{"operation": "rename_symbol", "symbol_id": symbol["symbol_id"], "new_name": "VALUE"}]
             with self.assertRaises(RpcError) as stale:

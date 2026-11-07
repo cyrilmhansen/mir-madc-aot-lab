@@ -1,0 +1,453 @@
+{
+  "semantic": [
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_open",
+        "description": "Open source text in the in-memory BASIC workspace.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_symbols",
+        "description": "Filter and page discovered BASIC symbols. IDs returned here can be used in edits.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "name_query": {
+              "type": "string"
+            },
+            "exact_name": {
+              "type": "string"
+            },
+            "unique": {
+              "type": "boolean"
+            },
+            "scope_id": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_structure",
+        "description": "Get a bounded summary of lines, functions, labels, revision and diagnostics.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_references",
+        "description": "Get references to a symbol ID discovered in this document.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "symbol_id": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "symbol_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_preview",
+        "description": "Validate a semantic transaction on a private snapshot; preview does not reserve a revision. Before renumber_line, discover the exact line with workspace_symbols(kind=line_label, exact_name=old_line, unique=true) or workspace_structure.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operation": {
+                        "const": "rename_symbol"
+                      },
+                      "symbol_id": {
+                        "type": "string"
+                      },
+                      "new_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "operation",
+                      "symbol_id",
+                      "new_name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operation": {
+                        "const": "renumber_line"
+                      },
+                      "old_line": {
+                        "type": "integer"
+                      },
+                      "new_line": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "operation",
+                      "old_line",
+                      "new_line"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operation": {
+                        "const": "move_function"
+                      },
+                      "symbol_id": {
+                        "type": "string"
+                      },
+                      "before_symbol_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "operation",
+                      "symbol_id"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "include_diff": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "expected_revision",
+            "operations"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_commit",
+        "description": "Revalidate and atomically commit semantic operations at the expected revision.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operation": {
+                        "const": "rename_symbol"
+                      },
+                      "symbol_id": {
+                        "type": "string"
+                      },
+                      "new_name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "operation",
+                      "symbol_id",
+                      "new_name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operation": {
+                        "const": "renumber_line"
+                      },
+                      "old_line": {
+                        "type": "integer"
+                      },
+                      "new_line": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "operation",
+                      "old_line",
+                      "new_line"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "operation": {
+                        "const": "move_function"
+                      },
+                      "symbol_id": {
+                        "type": "string"
+                      },
+                      "before_symbol_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "operation",
+                      "symbol_id"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "expected_revision",
+            "operations"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_diagnostics",
+        "description": "Return current parser and semantic diagnostics.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "workspace_render",
+        "description": "Explicitly export a bounded rendering of the current in-memory source.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20000
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "text": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_source",
+        "description": "Read the in-memory BASIC buffer, optionally one-based line range.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "start_line": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "end_line": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20000
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_text",
+        "description": "Search source text and return bounded matching lines with context.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "context_lines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "apply_patch",
+        "description": "Replace one unique exact source context. Supply the observed buffer version; stale or ambiguous patches fail without mutation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "old_text": {
+              "type": "string"
+            },
+            "new_text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_version",
+            "old_text",
+            "new_text"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_diff",
+        "description": "Show the unified diff from the original buffer.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "text_diagnostics",
+        "description": "Run the BASIC subset diagnostics on the current buffer without changing it.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "validate_program",
+        "description": "Validate current buffer with the available BASIC subset parser; no compilation side effects.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

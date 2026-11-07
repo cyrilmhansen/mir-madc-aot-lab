@@ -211,9 +211,8 @@ Codex profile with fixed tools (`exec_command`, `write_stdin`, `apply_patch`)
 and digest-validated assets. It has no Python structured-tool callback seam.
 Adding one would change Atlas's existing tool selection/profile contract, so
 that repository remains untouched. The standalone adapter exercises the
-subprocess and structured-result boundary, but full Atlas registration and
-genuine Atlas model trials remain unverified. No model actions or token counts
-are claimed.
+subprocess and structured-result boundary. Atlas registration and
+Atlas-mediated model trials remain unverified; no Atlas changes were made.
 
 `experiment/run_trials.py` runs 16 deterministic tasks from clean in-memory
 workspaces: scoped/local and function renames, GOTO/GOSUB/ON GOTO renumbering,
@@ -230,12 +229,45 @@ the text arm. One harness run took 581.528 ms versus 0.125 ms, dominated
 by 16 fresh server processes; this is not a fair agent-latency comparison.
 That response overhead is higher even though it does not expose the complete
 program text. Small samples do not establish a general context advantage.
-Model token use is unavailable, not estimated.
+Model token use in the deterministic task suite is unavailable, not estimated.
 
 The trial exposed and fixed an index gap: a BASIC function's result-assignment
 name was not bound to the function symbol. Renaming the function used to leave
 that assignment under the old name. The index now binds that occurrence, and
 the regression test covers declaration, result assignment and calls together.
+
+## Real LLM editing comparison
+
+`experiment/llm_runner.py` is an independent OpenAI-compatible tool-calling
+harness. It supports explicit endpoint/model/settings and keeps both arms
+in-memory: the semantic arm uses the long-lived Workspace JSON-RPC service;
+the text arm uses read/search/context-checked patch/diff/subset-diagnostic
+tools over a separate buffer. The model receives no oracle or source in its
+initial prompt. Raw trials and provider usage are stored under
+`results/llm-editing/`.
+
+On 2026-11-07, local Ollama 0.20.0 served `gemma4:latest` (8B, Q4_K_M) with
+temperature 0, seed 17, thinking off, 1,024 response tokens, 8 iterations, 14
+tool calls, 120-second request timeout and a 64,000-byte context cap. Across 15
+paired non-conflict tasks, semantic editing was correct on 15/15, including
+three safe refusals; text tools were correct on 12/15, including the same three
+safe refusals. Semantic used 43 calls and 140,171 provider tokens; text used 70
+calls and 156,090 tokens. Semantic produced more tool-response bytes (38,798
+vs. 32,748), despite fewer calls and lower total inference time. This is one
+small single-seed trial, not evidence of general model accuracy. See
+`results/llm-editing/SUMMARY.md` and per-turn `run.json` for failures, latency
+and raw traces.
+
+The deterministic compact-discovery comparison reduces response bytes from
+64,680 to 19,279 and calls from 90 to 59. A genuine two-agent run also shows a
+revision-1 proposal rejected after the first agent commits revision 2; the
+second agent then inspected current state and refused to rebase. The earlier
+pilot that rebased without a stale rejection is preserved separately and not
+counted as a successful conflict trial.
+
+The standalone model runner is not Atlas integration. Atlas's inspected Python
+executor still has a sealed fixed tool set and no supported structured Python
+callback seam; that contract was not changed or bypassed.
 
 ## Microbenchmarks
 
