@@ -80,6 +80,7 @@ class LlmHarnessTests(unittest.TestCase):
             self.assertEqual(10, response["usage"]["prompt_tokens"])
             self.assertGreaterEqual(elapsed, 0)
             self.assertEqual(19, FixtureHandler.request_json["seed"])
+            self.assertEqual(1.0, FixtureHandler.request_json["top_p"])
             self.assertFalse(FixtureHandler.request_json["think"])
             self.assertEqual(64, FixtureHandler.request_json["max_tokens"])
             self.assertEqual("Bearer test-secret-never-logged", FixtureHandler.auth_header)

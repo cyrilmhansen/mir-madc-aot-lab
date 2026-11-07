@@ -167,10 +167,10 @@ CONSTRUCTION_TEXT_TOOLS = TEXT_TOOLS + [
 class ChatEndpoint:
     def __init__(self, endpoint: str, model: str, api_key: str | None,
                  temperature: float, max_output_tokens: int, timeout: float,
-                 seed: int | None, think: bool | None = None):
+                 seed: int | None, think: bool | None = None, top_p: float = 1.0):
         self.endpoint, self.model, self.api_key = endpoint, model, api_key
         self.temperature, self.max_output_tokens = temperature, max_output_tokens
-        self.timeout, self.seed, self.think = timeout, seed, think
+        self.timeout, self.seed, self.think, self.top_p = timeout, seed, think, top_p
         self.last_request_bytes = 0
         self.last_response_bytes = 0
         self.last_elapsed_ms = 0.0
@@ -178,7 +178,7 @@ class ChatEndpoint:
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> tuple[dict[str, Any], float]:
         payload: dict[str, Any] = {"model": self.model, "messages": messages,
             "tools": tools, "tool_choice": "auto", "temperature": self.temperature,
-            "max_tokens": self.max_output_tokens}
+            "top_p": self.top_p, "max_tokens": self.max_output_tokens}
         if self.seed is not None:
             payload["seed"] = self.seed
         if self.think is not None:

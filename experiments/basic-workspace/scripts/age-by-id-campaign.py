@@ -23,6 +23,7 @@ from basic_workspace.model import Workspace, WorkspaceError
 from basic_workspace.projection import build_projection, projection_semantics
 from basic_workspace.projection import Assignment, ForLoop, IfBlock
 from experiment.llm_runner import ChatEndpoint, endpoint_metadata
+from experiment.provider_config import ProviderConfigError, make_chat_endpoint, resolve_config
 
 OUT = ROOT / "results" / "semantic-replay" / "age-by-id"
 PROFILE_ID = "basic-workspace.numeric-control.v1"
@@ -942,7 +943,12 @@ def run_campaign(args: argparse.Namespace) -> int:
     elif not args.endpoint or not args.model:
         model_result = {"status": "not_run", "reason": "No endpoint/model configured"}
     else:
-        endpoint = ChatEndpoint(args.endpoint, args.model, args.api_key, 0.0, 800, args.timeout, 17, think=False)
+        provider = getattr(args, "_provider_config", None)
+        if provider and args.endpoint == provider["endpoint_url"] and args.model == provider["model"]:
+            endpoint = make_chat_endpoint(provider)
+        else:
+            endpoint = ChatEndpoint(args.endpoint, args.model, args.api_key, 0.0, 800,
+                                    args.timeout, 17, think=False)
         model_result = run_model_session(endpoint, ws, document_id, aliases, gateway, trace)
         model_result["endpoint_metadata"] = safe_endpoint_summary(args.endpoint)
     committed = gateway.committed
@@ -1062,11 +1068,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deterministic-only", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=OUT)
-    parser.add_argument("--endpoint", default=os.environ.get("BASIC_WORKSPACE_LLM_ENDPOINT"))
-    parser.add_argument("--model", default=os.environ.get("BASIC_WORKSPACE_LLM_MODEL"))
-    parser.add_argument("--api-key", default=os.environ.get("BASIC_WORKSPACE_LLM_API_KEY"))
-    parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--endpoint")
+    parser.add_argument("--model")
+    parser.add_argument("--api-key")
+    parser.add_argument("--timeout", type=float)
     args = parser.parse_args()
+    try:
+        provider = resolve_config()
+    except ProviderConfigError:
+        provider = None
+    if provider:
+        args.endpoint = args.endpoint or provider["endpoint_url"]
+        args.model = args.model or provider["model"]
+        args.api_key = args.api_key or provider.get("api_key")
+        args.timeout = args.timeout or provider["request_timeout_seconds"]
+        # Reuse the central sampling and timeout contract for this campaign.
+        args._provider_config = provider
+    else:
+        args.timeout = args.timeout or 60
     OUT = args.output_dir.resolve()
     raise SystemExit(run_campaign(args))
 

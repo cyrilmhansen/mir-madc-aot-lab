@@ -30,6 +30,7 @@ from basic_workspace.mir_execution import MirExecutionService
 from basic_workspace.projection import build_projection, projection_semantics
 from basic_workspace.projection import Assignment, ForLoop, IfBlock
 from experiment.llm_runner import ChatEndpoint, endpoint_metadata
+from experiment.provider_config import ProviderConfigError, make_chat_endpoint, resolve_config
 
 _spec = importlib.util.spec_from_file_location("age_by_id_campaign", ROOT / "scripts" / "age-by-id-campaign.py")
 _cycle12 = importlib.util.module_from_spec(_spec)
@@ -875,8 +876,13 @@ def campaign(output_dir: Path, model_enabled: bool = True) -> dict[str, Any]:
     workspace = Workspace()
     mission = make_mission()
     profile = make_profile()
-    endpoint_url, model_name = os.environ.get("BASIC_WS_CHAT_COMPLETIONS_URL"), os.environ.get("BASIC_WS_MODEL")
-    model_configuration_available = bool(endpoint_url and model_name)
+    try:
+        provider_config = resolve_config()
+        provider_error = None
+    except ProviderConfigError as exc:
+        provider_config = None
+        provider_error = str(exc)
+    model_configuration_available = provider_config is not None
     (OUT / "MISSION.json").write_text(json.dumps(mission, indent=2) + "\n", encoding="utf-8")
     (OUT / "execution-profile.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
     trace.emit("session_started", campaign="IS_SENIOR function composition",
@@ -899,16 +905,8 @@ def campaign(output_dir: Path, model_enabled: bool = True) -> dict[str, Any]:
     gateway = SeniorMissionGateway(workspace, document_id, aliases, base_snapshot, mission, trace)
     gateway.base_projection = copy.deepcopy(base_snapshot)
     model_metadata = {"status": "not_run", "reason": "model disabled"}
-    if model_enabled and endpoint_url and model_name:
-        endpoint_url = endpoint_url.rstrip("/")
-        if not endpoint_url.endswith("/chat/completions"):
-            endpoint_url += "/chat/completions"
-        key_env = os.environ.get("BASIC_WS_API_KEY_ENV", "OPENAI_API_KEY")
-        endpoint = ChatEndpoint(endpoint_url, model_name, os.environ.get(key_env),
-            float(os.environ.get("BASIC_WS_TEMPERATURE", "0")),
-            int(os.environ.get("BASIC_WS_MAX_OUTPUT_TOKENS", "1400")),
-            float(os.environ.get("BASIC_WS_TIMEOUT_SECONDS", "60")),
-            int(os.environ["BASIC_WS_SEED"]) if os.environ.get("BASIC_WS_SEED") else None)
+    if model_enabled and provider_config:
+        endpoint = make_chat_endpoint(provider_config)
         trace.emit("agent_observation", phase="agent", actor="harness", revision=base_revision,
                    note="Model receives mission objective and tools; AGE_BY_ID opaque identity is not in initial prompt")
         model_metadata = run_model_session(endpoint, workspace, document_id, gateway, trace, 7, 12)
@@ -925,7 +923,7 @@ def campaign(output_dir: Path, model_enabled: bool = True) -> dict[str, Any]:
         (OUT / "agent-session.json").write_text(json.dumps({"metadata": model_metadata,
             "transcript": [], "tool_schemas": agent_tools()}, indent=2) + "\n", encoding="utf-8")
     elif model_enabled:
-        model_metadata = {"status": "not_run", "reason": "BASIC_WS_CHAT_COMPLETIONS_URL or BASIC_WS_MODEL is not configured"}
+        model_metadata = {"status": "not_run", "reason": provider_error or "provider configuration unavailable"}
         (OUT / "agent-session.json").write_text(json.dumps({"metadata": model_metadata,
             "transcript": [], "tool_schemas": agent_tools()}, indent=2) + "\n", encoding="utf-8")
     if gateway.committed:
@@ -1077,7 +1075,7 @@ python3 experiments/basic-workspace/scripts/render-semantic-replay.py --trace ex
 python3 experiments/basic-workspace/scripts/kitty-replay.py experiments/basic-workspace/results/semantic-replay/is-senior/scripted-mechanics/history.jsonl --auto 0.4
 ```
 
-For one real bounded pilot, configure `BASIC_WS_CHAT_COMPLETIONS_URL` and `BASIC_WS_MODEL` in the environment, then run the campaign without `--no-model`. The report excludes endpoint URLs and credentials.
+For one real bounded pilot, create/configure the ignored `.agent-provider.json`, then run `python3 scripts/provider-preflight.py` before the campaign. The older endpoint/model environment names remain supported as explicit overrides. Reports exclude endpoint URLs and credentials.
 '''
     (OUT / "REPORT.md").write_text(report, encoding="utf-8")
     (OUT / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

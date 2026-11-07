@@ -63,6 +63,28 @@ PYTHONPATH=experiments/basic-workspace python3 experiments/basic-workspace/demo_
 python3 -m unittest discover -s experiments/basic-workspace/tests -v
 ```
 
+## Local model provider configuration
+
+Model experiments use one ignored local file,
+`experiments/basic-workspace/.agent-provider.json`. It stores an
+OpenAI-compatible `endpoint_url`, `model`, optional `api_key_env`,
+`request_timeout_seconds`, `max_output_tokens`, and sampling parameters
+(`temperature`, `top_p`, optional `seed` and `think`). Do not commit provider
+credentials. Explicit environment variables override file values. The current
+and legacy endpoint/model variable names are accepted; conflicting aliases
+are rejected. Configuration and endpoint metadata output omit URL and key.
+
+Run the bounded model-listing and tool-call check before a campaign:
+
+```sh
+python3 experiments/basic-workspace/scripts/provider-preflight.py
+```
+
+It makes one model-list request and one required-tool chat request, with a
+128-token cap and no automatic retries. A failed or timed-out preflight is not
+a model campaign. `BASIC_WS_PROVIDER_CONFIG` can point at another local JSON
+file. The age-edit and function-composition campaigns share this resolver.
+
 The service uses JSON-RPC 2.0 with one JSON object per stdin/stdout line. This
 simple framing is suitable for agent subprocess pipes and permits streaming
 responses without Content-Length parsing. It has no filesystem methods. For
