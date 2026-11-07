@@ -1,0 +1,30 @@
+{
+  "schema": "basic-workspace.mission-contract",
+  "version": 1,
+  "mission_id": "mission.double-times-three.v1",
+  "objective": "Construct DOUBLE(X)=X*2, then change its result expression to X*3 while preserving its interface and all unrelated semantic entities.",
+  "base_document_revision": 1,
+  "execution_profile": "basic-workspace.numeric-control.v1",
+  "enforcement": {
+    "allowed_operations": ["create_numeric_function", "edit_assignment_expression"],
+    "allowed_target_handles": ["double.result"],
+    "create_constraint": {"name": "DOUBLE", "parameters": ["X"], "expression": "X * 2"},
+    "edit_constraint": {"target_handle": "double.result", "expression": "X * 3"},
+    "forbidden_operations": ["rename_symbol", "move_function", "renumber_line", "delete", "arbitrary source replacement"],
+    "commit_checks": ["mission id", "schema version", "execution profile", "current base revision", "operation allowlist", "target handle binding", "exact typed expression constraint"]
+  },
+  "required_invariants": [
+    "function remains named DOUBLE",
+    "parameter remains X and retains its identity within each workspace",
+    "only the result assignment expression changes in the edit transaction",
+    "the edit increments the revision once",
+    "a forbidden rename leaves revision and canonical rendering unchanged"
+  ],
+  "required_post_edit_validations": [
+    {"engine": "interp", "function": "DOUBLE", "arguments": [9], "expected": 27.0},
+    {"engine": "jit", "function": "DOUBLE", "arguments": [9], "expected": 27.0}
+  ],
+  "advisory_preferences": ["Keep the example minimal and easy for an operator to inspect."],
+  "human_approval": {"required_for": [], "approval_token_supported": false},
+  "trust_boundary": "The mission restriction is enforced only when every campaign edit passes through the controlled MissionGateway. Code with direct Workspace, filesystem, or process access can bypass it."
+}
