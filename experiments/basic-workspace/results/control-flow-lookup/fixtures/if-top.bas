@@ -1,0 +1,6 @@
+X = 1
+IF X = 1 THEN
+  PRINT "YES"
+ELSE
+  PRINT "NO"
+END IF

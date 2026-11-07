@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from .model import Document, Token, Workspace, WorkspaceError
@@ -16,6 +17,28 @@ class Assignment:
     line: int
     target_index: Expr | None = None
     target_is_array: bool = False
+
+
+@dataclass(frozen=True)
+class IfBlock:
+    condition: Expr
+    then_body: tuple["ProjectedStatement", ...]
+    else_body: tuple["ProjectedStatement", ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class ForLoop:
+    variable_id: str
+    start: float
+    end: float
+    step: float
+    iteration_limit: int
+    body: tuple["ProjectedStatement", ...]
+    line: int
+
+
+ProjectedStatement = Assignment | IfBlock | ForLoop
 
 
 @dataclass(frozen=True)
@@ -34,7 +57,7 @@ class FunctionProjection:
     parameter_ids: tuple[str, ...]
     local_ids: tuple[str, ...]
     arrays: tuple[ArrayProjection, ...]
-    statements: tuple[Assignment, ...]
+    statements: tuple[ProjectedStatement, ...]
 
 
 @dataclass(frozen=True)
@@ -102,6 +125,8 @@ class _ExpressionParser:
     def _precedence(token: Token | None) -> int:
         if token is None or token.kind != "OP":
             return -1
+        if token.text in ("=", "<>", "<", "<=", ">", ">="):
+            return 0
         if token.text in ("+", "-"):
             return 1
         if token.text in ("*", "/"):
@@ -163,7 +188,8 @@ class _ExpressionParser:
             op_token = self.take()
             precedence = self._precedence(op_token)
             right = self.parse(precedence + 1)
-            left = Expr("binary", op_token.text, (left, right))
+            kind = "compare" if op_token.text in ("=", "<>", "<", "<=", ">", ">=") else "binary"
+            left = Expr(kind, op_token.text, (left, right))
         return left
 
     def parse_all(self) -> Expr:
@@ -257,25 +283,20 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
                            if row.kind == "array" and row.scope_id == scope_id)
         array_ids = {row.symbol_id for row in array_rows}
         shell = FunctionProjection(sid, symbol.name, scope_id, parameter_ids, (), array_rows, ())
-        statements: list[Assignment] = []
         local_ids: set[str] = set()
-        declared_arrays: set[str] = set()
         for row in doc.symbols.values():
             if row.kind == "variable" and row.scope_id == scope_id:
                 local_ids.add(row.id)
-        for tokens in body:
-            if tokens[0].text.upper() == "DIM":
-                if (len(tokens) != 5 or tokens[1].kind != "IDENT" or tokens[2].text != "("
-                        or tokens[3].kind != "NUMBER" or not tokens[3].text.isdigit()
-                        or tokens[4].text != ")"):
-                    raise _fail("UNSUPPORTED_DIM", "Only one-dimensional DIM NAME(nonnegative-integer) is supported", tokens[0])
-                sid_dim = doc.token_symbol.get(tokens[1].uid)
-                if sid_dim not in array_ids:
-                    raise _fail("UNRESOLVED_ARRAY", f"Array {tokens[1].text} is not declared in this function", tokens[1])
-                if sid_dim in declared_arrays:
-                    raise _fail("DUPLICATE_DIM", f"Array {tokens[1].text} is dimensioned more than once", tokens[1])
-                declared_arrays.add(sid_dim)
-                continue
+        declared_arrays: set[str] = set()
+
+        def constant(expr: Expr, token: Token) -> float:
+            if expr.kind == "number":
+                return float(expr.value)
+            if expr.kind == "unary_minus" and expr.children[0].kind == "number":
+                return -float(expr.children[0].value)
+            raise _fail("DYNAMIC_LOOP_BOUND", "FOR start/end/step must be finite numeric constants", token)
+
+        def assignment(tokens: tuple[Token, ...]) -> Assignment:
             for token in tokens:
                 sid_at_token = doc.token_symbol.get(token.uid)
                 if sid_at_token in array_ids and sid_at_token not in declared_arrays:
@@ -315,23 +336,115 @@ def build_projection_from_document(workspace: Workspace, doc: Document,
             if target.name.endswith("$"):
                 raise _fail("UNSUPPORTED_TYPE", f"String assignment {target.name} is outside the numeric subset", target_token)
             expression = _ExpressionParser(doc, tokens[equals_index + 1:], shell).parse_all()
-            statements.append(Assignment(target.id, is_result, expression, target_token.line,
-                                         target_index, target_is_array))
-            if not is_result and target.kind == "variable":
-                local_ids.add(target.id)
+            return Assignment(target.id, is_result, expression, target_token.line,
+                              target_index, target_is_array)
+
+        cursor = 0
+
+        def parse_block(stops: set[str], depth: int = 0) -> tuple[ProjectedStatement, ...]:
+            nonlocal cursor
+            if depth > 16:
+                raise WorkspaceError("CONTROL_DEPTH", "Nested IF/FOR blocks are limited to depth 16")
+            nodes: list[ProjectedStatement] = []
+            while cursor < len(body):
+                tokens = body[cursor]
+                word = tokens[0].text.upper()
+                stop = ("END_IF" if len(tokens) == 2 and word == "END" and tokens[1].text.upper() == "IF"
+                        else "ELSE" if len(tokens) == 1 and word == "ELSE"
+                        else "NEXT" if word == "NEXT" else "")
+                if stop and stop in stops:
+                    return tuple(nodes)
+                if word == "DIM":
+                    if (len(tokens) != 5 or tokens[1].kind != "IDENT" or tokens[2].text != "("
+                            or tokens[3].kind != "NUMBER" or not tokens[3].text.isdigit()
+                            or tokens[4].text != ")"):
+                        raise _fail("UNSUPPORTED_DIM", "Only one-dimensional DIM NAME(nonnegative-integer) is supported", tokens[0])
+                    dim_id = doc.token_symbol.get(tokens[1].uid)
+                    if dim_id not in array_ids:
+                        raise _fail("UNRESOLVED_ARRAY", f"Array {tokens[1].text} is not declared in this function", tokens[1])
+                    if dim_id in declared_arrays:
+                        raise _fail("DUPLICATE_DIM", f"Array {tokens[1].text} is dimensioned more than once", tokens[1])
+                    declared_arrays.add(dim_id)
+                    cursor += 1
+                    continue
+                if word == "IF":
+                    then_pos = next((i for i, t in enumerate(tokens) if t.text.upper() == "THEN"), None)
+                    if then_pos is None or then_pos != len(tokens) - 1 or then_pos < 2:
+                        raise _fail("UNSUPPORTED_IF", "Only multiline IF condition THEN blocks are supported", tokens[0])
+                    condition = _ExpressionParser(doc, tokens[1:then_pos], shell).parse_all()
+                    cursor += 1
+                    then_body = parse_block({"ELSE", "END_IF"}, depth + 1)
+                    else_body: tuple[ProjectedStatement, ...] = ()
+                    if cursor < len(body) and len(body[cursor]) == 1 and body[cursor][0].text.upper() == "ELSE":
+                        cursor += 1
+                        else_body = parse_block({"END_IF"}, depth + 1)
+                    if cursor >= len(body) or not (len(body[cursor]) == 2 and
+                            body[cursor][0].text.upper() == "END" and body[cursor][1].text.upper() == "IF"):
+                        raise _fail("UNMATCHED_IF", "IF is missing END IF", tokens[0])
+                    cursor += 1
+                    nodes.append(IfBlock(condition, then_body, else_body, tokens[0].line))
+                    continue
+                if word == "FOR":
+                    if len(tokens) < 6 or tokens[1].kind != "IDENT" or tokens[2].text != "=":
+                        raise _fail("UNSUPPORTED_FOR", "Expected FOR local = constant TO constant [STEP constant]", tokens[0])
+                    to_pos = next((i for i in range(3, len(tokens)) if tokens[i].text.upper() == "TO"), None)
+                    step_pos = next((i for i in range((to_pos or 0) + 1, len(tokens))
+                                     if tokens[i].text.upper() == "STEP"), None)
+                    if to_pos is None or to_pos == 3 or to_pos + 1 >= len(tokens):
+                        raise _fail("UNSUPPORTED_FOR", "FOR requires constant start and end values", tokens[0])
+                    var_id = doc.token_symbol.get(tokens[1].uid)
+                    variable = doc.symbols.get(var_id) if var_id else None
+                    if variable is None or variable.kind != "variable" or variable.scope_id != scope_id:
+                        raise _fail("INVALID_LOOP_VARIABLE", "FOR requires a function-local numeric loop variable", tokens[1])
+                    start_expr = _ExpressionParser(doc, tokens[3:to_pos], shell).parse_all()
+                    end_expr = _ExpressionParser(doc, tokens[to_pos + 1:step_pos], shell).parse_all() if step_pos else _ExpressionParser(doc, tokens[to_pos + 1:], shell).parse_all()
+                    step_expr = _ExpressionParser(doc, tokens[step_pos + 1:], shell).parse_all() if step_pos else Expr("number", 1.0)
+                    start, end, step = constant(start_expr, tokens[0]), constant(end_expr, tokens[0]), constant(step_expr, tokens[0])
+                    if step == 0:
+                        raise _fail("ZERO_LOOP_STEP", "FOR STEP cannot be zero", tokens[0])
+                    current = start
+                    iterations = 0
+                    inside = (lambda x: x <= end) if step > 0 else (lambda x: x >= end)
+                    while inside(current):
+                        iterations += 1
+                        if iterations > 10000:
+                            raise _fail("LOOP_LIMIT", "Statically bounded FOR exceeds 10000 iterations", tokens[0])
+                        current += step
+                        if not math.isfinite(current):
+                            raise _fail("LOOP_LIMIT", "FOR iteration sequence overflowed", tokens[0])
+                    cursor += 1
+                    loop_body = parse_block({"NEXT"}, depth + 1)
+                    if cursor >= len(body) or body[cursor][0].text.upper() != "NEXT":
+                        raise _fail("UNMATCHED_FOR", "FOR is missing NEXT", tokens[0])
+                    next_tokens = body[cursor]
+                    if len(next_tokens) != 2 or doc.token_symbol.get(next_tokens[1].uid) != var_id:
+                        raise _fail("UNMATCHED_FOR", "NEXT must name the matching loop variable", next_tokens[0])
+                    cursor += 1
+                    nodes.append(ForLoop(var_id, start, end, step, max(iterations, 1), loop_body, tokens[0].line))
+                    continue
+                if stop:
+                    raise _fail("UNMATCHED_CONTROL", f"Unexpected {stop} block terminator", tokens[0])
+                nodes.append(assignment(tokens))
+                cursor += 1
+            return tuple(nodes)
+
+        statements = parse_block(set())
+        if cursor != len(body):
+            raise WorkspaceError("UNMATCHED_CONTROL", "Control-flow block was not fully consumed")
 
         # Keep slot order tied to declaration token order, not dictionary order.
         token_index = {t.uid: i for i, t in enumerate(doc.tokens)}
         locals_ordered = tuple(sorted(local_ids, key=lambda ident: token_index[doc.symbols[ident].declaration_token]))
         compiled.append(FunctionProjection(sid, symbol.name, scope_id, parameter_ids,
-                                           locals_ordered, array_rows, tuple(statements)))
+                                           locals_ordered, array_rows, statements))
 
     function_ids = {f.symbol_id for f in compiled}
     call_graph: dict[str, set[str]] = {f.symbol_id: set() for f in compiled}
     for function in compiled:
         for statement in function.statements:
-            _validate_calls(statement.expression, function_ids, len(compiled), doc)
-            call_graph[function.symbol_id].update(_called_functions(statement.expression))
+            for expr in _statement_expressions(statement):
+                _validate_calls(expr, function_ids, len(compiled), doc)
+                call_graph[function.symbol_id].update(_called_functions(expr))
     visiting: set[str] = set()
     visited: set[str] = set()
 
@@ -368,3 +481,15 @@ def _called_functions(expr: Expr) -> set[str]:
     for child in expr.children:
         result.update(_called_functions(child))
     return result
+
+
+def _statement_expressions(statement: ProjectedStatement) -> tuple[Expr, ...]:
+    if isinstance(statement, Assignment):
+        return ((statement.target_index,) if statement.target_index is not None else ()) + (statement.expression,)
+    if isinstance(statement, IfBlock):
+        nested = tuple(expr for child in statement.then_body + statement.else_body
+                       for expr in _statement_expressions(child))
+        return (statement.condition,) + nested
+    if isinstance(statement, ForLoop):
+        return tuple(expr for child in statement.body for expr in _statement_expressions(child))
+    return ()

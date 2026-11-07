@@ -1,0 +1,10 @@
+FUNCTION TEST()
+  N = 2
+  TEST = 0
+  FOR I = 0 TO N
+    TEST = TEST + I
+    N = 0
+  NEXT I
+  TEST = TEST * 10 + I
+END FUNCTION
+PRINT TEST()

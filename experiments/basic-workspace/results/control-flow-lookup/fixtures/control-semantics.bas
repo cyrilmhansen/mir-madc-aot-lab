@@ -1,0 +1,35 @@
+FUNCTION TEST(X)
+  TEST = 0
+  IF X = 1 THEN
+    TEST = TEST + 10
+  ELSE
+    TEST = TEST + 20
+  END IF
+  IF X <> 2 THEN
+    TEST = TEST + 1
+  END IF
+  IF X < 3 THEN
+    IF X <= 1 THEN
+      TEST = TEST + 100
+    ELSE
+      TEST = TEST + 200
+    END IF
+  END IF
+  IF X > 0 THEN
+    TEST = TEST + 1000
+  END IF
+  IF X >= 2 THEN
+    TEST = TEST + 10000
+  END IF
+END FUNCTION
+PRINT TEST(1)
+PRINT TEST(2)
+PRINT TEST(3)
+PRINT (2 = 2)
+PRINT (2 <> 2)
+PRINT (2 < 3)
+PRINT (2 <= 2)
+PRINT (3 > 2)
+PRINT (3 >= 3)
+PRINT 0.5
+PRINT -0.5

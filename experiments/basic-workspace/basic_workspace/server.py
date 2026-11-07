@@ -24,7 +24,7 @@ def _check_discovered_expression(workspace: Workspace, document_id: str, express
             _check_discovered_expression(workspace, document_id, child)
     elif kind == "unary":
         _check_discovered_expression(workspace, document_id, expression.get("operand"))
-    elif kind == "binary":
+    elif kind == "binary" or kind == "compare":
         _check_discovered_expression(workspace, document_id, expression.get("left"))
         _check_discovered_expression(workspace, document_id, expression.get("right"))
     elif kind == "array_element":
@@ -33,6 +33,30 @@ def _check_discovered_expression(workspace: Workspace, document_id: str, express
             if not workspace.symbol_was_discovered(document_id, array_ref.get("symbol_id")):
                 raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover arrays before using their identities")
         _check_discovered_expression(workspace, document_id, expression.get("index"))
+
+
+def _check_discovered_body(workspace: Workspace, document_id: str, items: list[dict]) -> None:
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind == "assign":
+            _check_discovered_expression(workspace, document_id, item.get("expression"))
+        elif kind == "array_assign":
+            ref = item.get("array_ref", {})
+            if isinstance(ref, dict) and ref.get("kind") == "symbol_ref" and not workspace.symbol_was_discovered(document_id, ref.get("symbol_id")):
+                raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover arrays before using their identities")
+            _check_discovered_expression(workspace, document_id, item.get("index"))
+            _check_discovered_expression(workspace, document_id, item.get("expression"))
+        elif kind == "if":
+            _check_discovered_expression(workspace, document_id, item.get("condition"))
+            _check_discovered_body(workspace, document_id, item.get("then", []))
+            _check_discovered_body(workspace, document_id, item.get("else", []))
+        elif kind == "for":
+            for field in ("start", "end", "step"):
+                if field in item:
+                    _check_discovered_expression(workspace, document_id, item[field])
+            _check_discovered_body(workspace, document_id, item.get("body", []))
 
 
 def _check_discovered_operations(workspace: Workspace, document_id: str,
@@ -64,6 +88,7 @@ def _check_discovered_operations(workspace: Workspace, document_id: str,
                     for field in ("index", "expression"):
                         if field in assignment:
                             _check_discovered_expression(workspace, document_id, assignment[field])
+            _check_discovered_body(workspace, document_id, operation.get("body", []))
 
 
 def serve() -> None:
@@ -107,6 +132,7 @@ def serve() -> None:
                         for field in ("index", "expression"):
                             if field in assignment:
                                 _check_discovered_expression(workspace, document_id, assignment[field])
+                _check_discovered_body(workspace, document_id, params.get("body", []))
                 result = workspace.protocol_call(method, params)
             elif method in ("edit_assignment_expression", "insert_numeric_assignment"):
                 document_id = params["document_id"]

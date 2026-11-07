@@ -64,13 +64,15 @@ def parse_request(value: Any, symbols: Mapping[str, Any], current_scope: str,
         result = child if value["operator"] == "+" else Expr("unary_minus", children=(child,))
         return result, refs
     if kind == "binary":
-        if set(value) != {"kind", "operator", "left", "right"} or value["operator"] not in ("+", "-", "*", "/"):
-            raise WorkspaceError("INVALID_OPERATOR", "binary requires +, -, *, or / and left/right expressions")
+        if set(value) != {"kind", "operator", "left", "right"} or value["operator"] not in (
+                "+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="):
+            raise WorkspaceError("INVALID_OPERATOR", "binary requires an arithmetic or numeric comparison operator and left/right expressions")
         left, left_refs = parse_request(value["left"], symbols, current_scope,
                                         current_function_id, function_parameters, depth + 1, max_depth)
         right, right_refs = parse_request(value["right"], symbols, current_scope,
                                           current_function_id, function_parameters, depth + 1, max_depth)
-        return Expr("binary", value["operator"], (left, right)), left_refs + right_refs
+        result_kind = "compare" if value["operator"] in ("=", "<>", "<", "<=", ">", ">=") else "binary"
+        return Expr(result_kind, value["operator"], (left, right)), left_refs + right_refs
     if kind == "call":
         if set(value) != {"kind", "function_id", "arguments"}:
             raise WorkspaceError("INVALID_EXPRESSION", "call requires only function_id and arguments")
@@ -131,6 +133,11 @@ def expression_tokens(expr: Expr, symbols: Mapping[str, Any]) -> tuple[list[tupl
         child, refs = expression_tokens(expr.children[0], symbols)
         return [("OP", "-"), ("PUNCT", "(")] + child + [("PUNCT", ")")], refs
     if expr.kind == "binary":
+        left, left_refs = expression_tokens(expr.children[0], symbols)
+        right, right_refs = expression_tokens(expr.children[1], symbols)
+        return ([ ("PUNCT", "(") ] + left + [("WS", " "), ("OP", str(expr.value)), ("WS", " ")]
+                + right + [("PUNCT", ")")]), left_refs + right_refs
+    if expr.kind == "compare":
         left, left_refs = expression_tokens(expr.children[0], symbols)
         right, right_refs = expression_tokens(expr.children[1], symbols)
         return ([ ("PUNCT", "(") ] + left + [("WS", " "), ("OP", str(expr.value)), ("WS", " ")]

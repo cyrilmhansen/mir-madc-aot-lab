@@ -88,12 +88,12 @@ TEXT_TOOLS = [
 EXPRESSION_SCHEMA = {"type": "object", "properties": {
     "kind": {"type": "string", "enum": ["number", "symbol_ref", "local_ref", "unary", "binary", "call"]},
     "value": {"type": "number"}, "symbol_id": STR, "function_id": STR, "name": STR,
-    "operator": {"type": "string", "enum": ["+", "-", "*", "/"]},
+    "operator": {"type": "string", "enum": ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="]},
     "left": {"type": "object"}, "right": {"type": "object"},
     "operand": {"type": "object"},
     "arguments": {"type": "array", "items": {"type": "object"}},
 }, "required": ["kind"], "additionalProperties": False,
-    "description": "Typed expression object: number(value), symbol_ref(symbol_id), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). No source strings."}
+    "description": "Typed expression object: number(value), symbol_ref(symbol_id), local_ref(name), unary(operator,operand), binary(operator,left,right), call(function_id,arguments). Comparisons return numeric 1 or 0. No source strings."}
 EXPRESSION_SCHEMA["properties"]["kind"]["enum"].append("array_element")
 EXPRESSION_SCHEMA["properties"]["array_ref"] = {"type": "object", "properties": {
     "kind": {"type": "string", "enum": ["symbol_ref", "local_ref"]},
@@ -111,7 +111,7 @@ CONSTRUCTION_SEMANTIC_TOOLS = [
     schema("workspace_symbols", "Filter and discover semantic symbols and their opaque IDs.",
            {"kind": STR, "exact_name": STR, "unique": BOOL, "scope_id": STR,
             "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, []),
-    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION and body in one revision. Optional fixed numeric arrays use zero-based inclusive upper_bound; array_assignments writes indexed values in order. In expression/local initializer trees use local_ref(name) for parameters, earlier locals, or constructor-local arrays. Returns stable function, parameter, local, array, and statement IDs.",
+    schema("workspace_create_function", "Atomically create a complete numeric FUNCTION and body in one revision. Optional fixed numeric arrays use zero-based inclusive upper_bound. Typed body items may be assign, array_assign, if, or bounded for; loop start/end/step must be finite constants and the static trip count is at most 10000. IF/FOR bodies are ordered typed statement arrays, never BASIC source strings. In expression trees use local_ref(name) for parameters, declared locals, arrays, or an active loop variable. Returns stable function, parameter, local, array, and statement IDs.",
            {"expected_revision": INT, "name": STR,
             "parameters": {"type": "array", "items": STR, "maxItems": 6},
             "expression": EXPRESSION_SCHEMA,
@@ -124,7 +124,18 @@ CONSTRUCTION_SEMANTIC_TOOLS = [
             "array_assignments": {"type": "array", "maxItems": 4096, "items": {"type": "object",
                 "properties": {"array_ref": ARRAY_REFERENCE_SCHEMA,
                     "index": EXPRESSION_SCHEMA, "expression": EXPRESSION_SCHEMA},
-                "required": ["array_ref", "index", "expression"], "additionalProperties": False}}},
+                "required": ["array_ref", "index", "expression"], "additionalProperties": False}},
+            "body": {"type": "array", "maxItems": 4096, "items": {"type": "object",
+                "properties": {"kind": {"type": "string", "enum": ["assign", "array_assign", "if", "for"]},
+                    "target": {"type": "object"}, "array_ref": ARRAY_REFERENCE_SCHEMA,
+                    "index": EXPRESSION_SCHEMA, "expression": EXPRESSION_SCHEMA,
+                    "condition": EXPRESSION_SCHEMA,
+                    "then": {"type": "array", "items": {"type": "object"}},
+                    "else": {"type": "array", "items": {"type": "object"}},
+                    "variable": STR, "start": EXPRESSION_SCHEMA, "end": EXPRESSION_SCHEMA,
+                    "step": EXPRESSION_SCHEMA,
+                    "body": {"type": "array", "items": {"type": "object"}}},
+                "required": ["kind"], "additionalProperties": False}}},
            ["expected_revision", "name", "parameters", "expression"]),
     schema("workspace_statements", "Discover bounded assignment statements in a discovered function, including stable IDs and referenced symbols.",
            {"function_id": STR, "offset": INT, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["function_id"]),

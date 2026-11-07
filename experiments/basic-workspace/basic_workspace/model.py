@@ -864,7 +864,7 @@ class Workspace:
         if kind == "unary":
             return {**expression, "operand": Workspace._resolve_constructor_handles(
                 expression.get("operand"), handles)}
-        if kind == "binary":
+        if kind == "binary" or kind == "compare":
             return {**expression,
                     "left": Workspace._resolve_constructor_handles(expression.get("left"), handles),
                     "right": Workspace._resolve_constructor_handles(expression.get("right"), handles)}
@@ -961,6 +961,8 @@ class Workspace:
 
     def _populate_constructed_function(self, doc: Document, operation: dict[str, Any]) -> None:
         """Build locals and result within the private candidate transaction."""
+        from .typed_expr import expression_tokens, parse_request
+
         name = self._numeric_identifier(operation.get("name"), "Function name")
         function = next((f for f in doc.functions if f["kind"] == "function"
                          and f["name"].casefold() == name.casefold()
@@ -971,6 +973,7 @@ class Workspace:
         function_id = function["symbol_id"]
         row = self._function_row(doc, function_id)
         handles = {doc.symbols[sid].name.casefold(): sid for sid in row["parameters"]}
+        handles[name.casefold()] = function_id
         result_statement = next((s for s in doc.statements.values()
                                  if s["containing_function_id"] == function_id
                                  and s["target_symbol_id"] == function_id), None)
@@ -1041,6 +1044,153 @@ class Workspace:
             self._insert_array_assignment_tokens(doc, function_id, array_id, resolved_index,
                                                  resolved_value, result_statement_id)
             result_statement = doc.statements.get(result_statement_id)
+
+        structured_body = operation.get("body", [])
+        if not isinstance(structured_body, list) or len(structured_body) > 4096:
+            raise WorkspaceError("INVALID_BODY", "body must contain at most 4096 typed statements")
+
+        def append_line(parts: list[tuple[str, str]], indent: int) -> list[Token]:
+            current_result = doc.statements.get(result_statement_id)
+            if current_result is None:
+                raise WorkspaceError("STATEMENT_CREATION_FAILED", "Function result anchor disappeared")
+            at_line = current_result["line"]
+            position = next((i for i, token in enumerate(doc.tokens) if token.line == at_line), None)
+            if position is None:
+                raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not locate function result anchor")
+            generated = self._new_tokens([("WS", "  " * (indent + 1))] + parts + [("NEWLINE", "\n")])
+            doc.tokens[position:position] = generated
+            self._recolumn(doc)
+            self._index(doc)
+            return generated
+
+        def checked_expression(request: Any) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
+            resolved = self._resolve_constructor_handles(request, handles)
+            params, symbols = self._expression_context(doc)
+            parsed, references = parse_request(resolved, symbols, row["scope_id"],
+                                               function_id, params)
+            parts, emitted = expression_tokens(parsed, symbols)
+            if references != emitted:
+                raise WorkspaceError("INTERNAL_BINDING_ERROR", "Control expression binding list changed")
+            return parts, references
+
+        def verify_generated(generated: list[Token], expected: tuple[str, ...], *,
+                             target_symbol: str | None = None) -> None:
+            expr_ids = tuple(doc.token_symbol.get(token.uid) for token in generated
+                             if token.kind == "IDENT" and token.text.upper() not in KEYWORDS)
+            wanted = ((target_symbol,) if target_symbol is not None else ()) + expected
+            if expr_ids != wanted:
+                raise WorkspaceError("BINDING_MISMATCH", "Structured body tokens resolved to unexpected symbols",
+                                     {"expected": list(wanted), "actual": list(expr_ids)})
+
+        def append_block(items: list[dict[str, Any]], depth: int = 0) -> None:
+            if depth > 16:
+                raise WorkspaceError("CONTROL_DEPTH", "Nested IF/FOR blocks are limited to depth 16")
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
+                    raise WorkspaceError("INVALID_BODY_STATEMENT", "Each body item requires a typed kind")
+                kind = item["kind"]
+                if kind == "assign":
+                    if set(item) != {"kind", "target", "expression"} or not isinstance(item["target"], dict):
+                        raise WorkspaceError("INVALID_BODY_STATEMENT", "assign requires target and expression")
+                    target = item["target"]
+                    if target == {"kind": "result"}:
+                        target_id, target_name = function_id, doc.symbols[function_id].name
+                    elif set(target) == {"kind", "name"} and target.get("kind") == "local":
+                        local_name = target["name"]
+                        target_id = handles.get(local_name.casefold()) if isinstance(local_name, str) else None
+                        target_symbol = doc.symbols.get(target_id) if target_id else None
+                        if target_symbol is None or target_symbol.kind != "variable" or target_symbol.scope_id != row["scope_id"]:
+                            raise WorkspaceError("INVALID_ASSIGNMENT_TARGET", "Body assignment target must be a declared numeric local")
+                        target_name = target_symbol.name
+                    else:
+                        raise WorkspaceError("INVALID_ASSIGNMENT_TARGET", "Body target must be result or a local_ref name")
+                    expression_parts, refs = checked_expression(item["expression"])
+                    generated = append_line([("IDENT", target_name), ("WS", " "), ("OP", "="),
+                                             ("WS", " ")] + expression_parts, depth)
+                    verify_generated(generated, refs, target_symbol=target_id)
+                elif kind == "array_assign":
+                    if set(item) != {"kind", "array_ref", "index", "expression"}:
+                        raise WorkspaceError("INVALID_BODY_STATEMENT", "array_assign requires array_ref, index, and expression")
+                    ref = item["array_ref"]
+                    if not isinstance(ref, dict) or ref.get("kind") != "local_ref" or not isinstance(ref.get("name"), str):
+                        raise WorkspaceError("INVALID_ARRAY_REFERENCE", "Body array_ref must be a constructor-local name")
+                    array_id = handles.get(ref["name"].casefold())
+                    array = doc.symbols.get(array_id) if array_id else None
+                    if array is None or array.kind != "array" or array.scope_id != row["scope_id"]:
+                        raise WorkspaceError("INVALID_ARRAY_REFERENCE", "array_assign must target a declared local numeric array")
+                    index_parts, index_refs = checked_expression(item["index"])
+                    value_parts, value_refs = checked_expression(item["expression"])
+                    generated = append_line([("IDENT", array.name), ("PUNCT", "(")] + index_parts +
+                        [("PUNCT", ")"), ("WS", " "), ("OP", "="), ("WS", " ")] + value_parts, depth)
+                    verify_generated(generated, (array_id,) + index_refs + value_refs)
+                elif kind == "if":
+                    if set(item) - {"kind", "condition", "then", "else"} or "condition" not in item or not isinstance(item.get("then"), list) or not isinstance(item.get("else", []), list):
+                        raise WorkspaceError("INVALID_IF", "if requires a typed condition, then list, and optional else list")
+                    condition_parts, condition_refs = checked_expression(item["condition"])
+                    generated = append_line([("IDENT", "IF"), ("WS", " ")] + condition_parts +
+                                            [("WS", " "), ("IDENT", "THEN")], depth)
+                    verify_generated(generated, condition_refs)
+                    append_block(item["then"], depth + 1)
+                    if item.get("else"):
+                        append_line([("IDENT", "ELSE")], depth)
+                        append_block(item["else"], depth + 1)
+                    append_line([("IDENT", "END"), ("WS", " "), ("IDENT", "IF")], depth)
+                elif kind == "for":
+                    required = {"kind", "variable", "start", "end", "body"}
+                    if not required.issubset(item) or set(item) - required - {"step"} or not isinstance(item["body"], list):
+                        raise WorkspaceError("INVALID_FOR", "for requires variable, constant start/end, optional step, and body list")
+                    loop_name = self._numeric_identifier(item["variable"], "Loop variable")
+                    key = loop_name.casefold()
+                    if key in handles:
+                        raise WorkspaceError("NAME_COLLISION", f"Loop variable {loop_name} already names a parameter, local, or array")
+                    start_parts, start_refs = checked_expression(item["start"])
+                    end_parts, end_refs = checked_expression(item["end"])
+                    step_parts, step_refs = checked_expression(item.get("step", {"kind": "number", "value": 1}))
+                    if start_refs or end_refs or step_refs:
+                        raise WorkspaceError("DYNAMIC_LOOP_BOUND", "FOR bounds and step must be numeric constants")
+                    # The projection performs the exact static trip-count validation.
+                    parts = [("IDENT", "FOR"), ("WS", " "), ("IDENT", loop_name), ("WS", " "),
+                             ("OP", "="), ("WS", " ")] + start_parts + [("WS", " "), ("IDENT", "TO"),
+                             ("WS", " ")] + end_parts
+                    if "step" in item:
+                        parts += [("WS", " "), ("IDENT", "STEP"), ("WS", " ")] + step_parts
+                    generated = append_line(parts, depth)
+                    self._index(doc)
+                    loop_token = next((token for token in generated if token.kind == "IDENT" and token.text.casefold() == key), None)
+                    loop_id = doc.token_symbol.get(loop_token.uid) if loop_token else None
+                    loop_symbol = doc.symbols.get(loop_id) if loop_id else None
+                    if loop_symbol is None or loop_symbol.kind != "variable" or loop_symbol.scope_id != row["scope_id"]:
+                        raise WorkspaceError("BINDING_MISMATCH", "FOR variable did not bind as a function local")
+                    handles[key] = loop_id
+                    verify_generated(generated, start_refs + end_refs + step_refs, target_symbol=loop_id)
+                    append_block(item["body"], depth + 1)
+                    next_line = append_line([("IDENT", "NEXT"), ("WS", " "), ("IDENT", loop_name)], depth)
+                    verify_generated(next_line, (), target_symbol=loop_id)
+                else:
+                    raise WorkspaceError("UNSUPPORTED_BODY_STATEMENT", f"Unsupported typed statement kind {kind!r}")
+
+        append_block(structured_body)
+
+        def assigns_result(items: list[dict[str, Any]]) -> bool:
+            for item in items:
+                if item.get("kind") == "assign" and item.get("target") == {"kind": "result"}:
+                    return True
+                if item.get("kind") == "if" and (assigns_result(item.get("then", [])) or
+                                                   assigns_result(item.get("else", []))):
+                    return True
+                if item.get("kind") == "for" and assigns_result(item.get("body", [])):
+                    return True
+            return False
+
+        # Keep the result anchor as a no-op after an explicitly constructed
+        # result assignment. The MIR worker initializes the result register to
+        # zero, and the typed body owns any intended initial value (for example
+        # -1 before a search loop).
+        if "expression" not in operation and assigns_result(structured_body):
+            generated, expected_refs = self._edit_expression_tokens(
+                doc, result_statement_id, {"kind": "symbol_ref", "symbol_id": function_id})
+            self._index(doc)
+            self._verify_expression_bindings(doc, generated, expected_refs)
 
         if "expression" in operation:
             resolved = self._resolve_constructor_handles(operation["expression"], handles)
@@ -1311,7 +1461,8 @@ class Workspace:
                                 expected_revision: int, expression: Any = None,
                                 locals: list[dict[str, Any]] | None = None,
                                 arrays: list[dict[str, Any]] | None = None,
-                                array_assignments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                                array_assignments: list[dict[str, Any]] | None = None,
+                                body: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         operation = {"operation": "create_numeric_function", "name": name,
                      "parameters": parameters}
         if expression is not None:
@@ -1322,6 +1473,8 @@ class Workspace:
             operation["arrays"] = arrays
         if array_assignments is not None:
             operation["array_assignments"] = array_assignments
+        if body is not None:
+            operation["body"] = body
         return self._transaction(document_id, expected_revision,
                                  operation)
 
@@ -1468,7 +1621,7 @@ class Workspace:
             "create_numeric_function": lambda: self.create_numeric_function(
                 params["document_id"], params["name"], params.get("parameters", []),
                 params["expected_revision"], params.get("expression"), params.get("locals"),
-                params.get("arrays"), params.get("array_assignments")),
+                params.get("arrays"), params.get("array_assignments"), params.get("body")),
             "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "render_document": lambda: self.render_document(params["document_id"]),

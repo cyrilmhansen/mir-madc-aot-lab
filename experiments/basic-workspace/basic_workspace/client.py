@@ -219,7 +219,8 @@ class WorkspaceClient:
                                   parameters: list[str], expression: Any = None,
                                   locals: list[dict[str, Any]] | None = None,
                                   arrays: list[dict[str, Any]] | None = None,
-                                  array_assignments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                                  array_assignments: list[dict[str, Any]] | None = None,
+                                  body: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         self._check_expected_revision(expected_revision)
         if expression is not None:
             self._validate_expression_symbols(expression, allow_local_ref=True)
@@ -232,6 +233,27 @@ class WorkspaceClient:
                 for field in ("index", "expression"):
                     if field in assignment:
                         self._validate_expression_symbols(assignment[field], allow_local_ref=True)
+        def validate_body(items):
+            for item in items or []:
+                if not isinstance(item, dict):
+                    raise RpcError("INVALID_BODY_STATEMENT", "Body items must be typed objects")
+                kind = item.get("kind")
+                if kind == "assign":
+                    self._validate_expression_symbols(item.get("expression"), allow_local_ref=True)
+                elif kind == "array_assign":
+                    self._validate_array_reference(item.get("array_ref"), True)
+                    for field in ("index", "expression"):
+                        self._validate_expression_symbols(item.get(field), allow_local_ref=True)
+                elif kind == "if":
+                    self._validate_expression_symbols(item.get("condition"), allow_local_ref=True)
+                    validate_body(item.get("then"))
+                    validate_body(item.get("else", []))
+                elif kind == "for":
+                    for field in ("start", "end", "step"):
+                        if field in item:
+                            self._validate_expression_symbols(item[field], allow_local_ref=True)
+                    validate_body(item.get("body"))
+        validate_body(body)
         params = {"expected_revision": expected_revision, "name": name,
                   "parameters": parameters}
         if expression is not None:
@@ -242,6 +264,8 @@ class WorkspaceClient:
             params["arrays"] = arrays
         if array_assignments is not None:
             params["array_assignments"] = array_assignments
+        if body is not None:
+            params["body"] = body
         result = self._rpc("create_numeric_function", self._doc_params(**params))
         self.revision = result["revision"]
         self._remember_created(result)
@@ -353,7 +377,7 @@ class WorkspaceClient:
                 self._validate_expression_symbols(child, allow_local_ref)
         elif kind == "unary":
             self._validate_expression_symbols(expression.get("operand"), allow_local_ref)
-        elif kind == "binary":
+        elif kind == "binary" or kind == "compare":
             self._validate_expression_symbols(expression.get("left"), allow_local_ref)
             self._validate_expression_symbols(expression.get("right"), allow_local_ref)
         elif kind == "array_element":
@@ -398,7 +422,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "workspace_execute_function": {"required": ["expected_revision", "function_id", "arguments"],
                                    "optional": ["engine"]},
     "workspace_create_function": {"required": ["expected_revision", "name", "parameters"],
-                                   "optional": ["expression", "locals", "arrays", "array_assignments"]},
+                                   "optional": ["expression", "locals", "arrays", "array_assignments", "body"]},
     "workspace_statements": {"required": ["function_id"], "optional": ["offset", "limit"]},
     "workspace_edit_expression": {"required": ["expected_revision", "statement_id", "expression"], "optional": []},
     "workspace_insert_assignment": {"required": ["expected_revision", "function_id", "target", "expression"],
@@ -481,6 +505,25 @@ class AgentToolAdapter:
                         for field in ("index", "expression"):
                             if field in assignment:
                                 self._validate_expression_symbols(assignment[field], allow_local_ref=True)
+                def validate_body(items):
+                    for item in items or []:
+                        kind = item.get("kind") if isinstance(item, dict) else None
+                        if kind == "assign":
+                            self._validate_expression_symbols(item.get("expression"), allow_local_ref=True)
+                        elif kind == "array_assign":
+                            self._validate_array_reference(item.get("array_ref"), True)
+                            for field in ("index", "expression"):
+                                self._validate_expression_symbols(item.get(field), allow_local_ref=True)
+                        elif kind == "if":
+                            self._validate_expression_symbols(item.get("condition"), allow_local_ref=True)
+                            validate_body(item.get("then"))
+                            validate_body(item.get("else", []))
+                        elif kind == "for":
+                            for field in ("start", "end", "step"):
+                                if field in item:
+                                    self._validate_expression_symbols(item[field], allow_local_ref=True)
+                            validate_body(item.get("body"))
+                validate_body(args.get("body"))
             else:
                 self._validate_expression_symbols(args["expression"])
         result = getattr(self.client, name)(**args)
@@ -564,7 +607,7 @@ class AgentToolAdapter:
                 self._validate_expression_symbols(child, allow_local_ref)
         elif kind == "unary":
             self._validate_expression_symbols(expression.get("operand"), allow_local_ref)
-        elif kind == "binary":
+        elif kind == "binary" or kind == "compare":
             self._validate_expression_symbols(expression.get("left"), allow_local_ref)
             self._validate_expression_symbols(expression.get("right"), allow_local_ref)
         elif kind == "array_element":

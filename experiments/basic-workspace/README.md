@@ -338,3 +338,24 @@ capabilities before a fair semantic-versus-text trial. The Cycle 6 atomic
 constructor, historical BASIC feasibility findings, ECS boundary, model
 timeout record, and exact in-memory demo are documented in
 [`results/continued-sessions/REPORT.md`](results/continued-sessions/REPORT.md).
+
+## Bounded control flow and entity-ID lookup
+
+The typed numeric projection supports `=`, `<>`, `<`, `<=`, `>`, `>=`,
+multiline `IF/ELSE/END IF`, and lexically matched `FOR/NEXT` with finite
+constant bounds and a statically verified limit of 10,000 iterations.
+Comparisons produce numeric 1/0; `IF` treats any nonzero value as true. Arrays
+are fixed, zero-based, per-call locals initialized to zero. The default MIR
+lowering uses bounds-checked `ALLOCA` stack storage. Set
+`BASIC_WORKSPACE_MEMORY_ARRAYS=0` to compare the earlier per-cell register
+dispatch path. Dynamic loop bounds, strings, cross-function state and general
+control flow remain unsupported. The pinned historical compiler's function
+`IF` lowering disagrees with these semantics; the exact differential and
+performance results are in
+[`results/control-flow-lookup/REPORT.md`](results/control-flow-lookup/REPORT.md).
+Reproduce the entirely in-memory AGE_BY_ID build and semantic update with:
+
+```sh
+experiments/basic-workspace/scripts/build-mir-worker.sh
+PYTHONPATH=experiments/basic-workspace python3 experiments/basic-workspace/control_flow_lookup_demo.py
+```

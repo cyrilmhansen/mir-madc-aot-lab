@@ -10,7 +10,9 @@ import time
 from typing import Any
 
 from .model import Workspace, WorkspaceError
-from .projection import CompilableProjection, Expr, FunctionProjection, build_projection
+from .projection import (Assignment, CompilableProjection, Expr, ForLoop,
+                         FunctionProjection, IfBlock, ProjectedStatement,
+                         build_projection)
 
 
 WORKER_TIMEOUT_SECONDS = 2.0
@@ -18,6 +20,7 @@ MAX_ARGUMENTS = 6
 MAX_ARRAYS_PER_FUNCTION = 32
 MAX_ARRAY_ELEMENTS = 256
 MAX_TOTAL_ARRAY_ELEMENTS = 4096
+MAX_LOOP_ITERATIONS = 10000
 
 
 class MirExecutionService:
@@ -121,8 +124,10 @@ def _encode_expr(expr: Expr, function_slots: dict[str, int], local_slots: dict[s
     if expr.kind == "unary_minus":
         return b"\x08" + _encode_expr(expr.children[0], function_slots, local_slots,
                                        array_slots, result_symbol_id)
-    if expr.kind == "binary":
+    if expr.kind == "binary" or expr.kind == "compare":
         opcodes = {"+": b"\x04", "-": b"\x05", "*": b"\x06", "/": b"\x07"}
+        opcodes.update({"=": b"\x0b", "<>": b"\x0c", "<": b"\x0d",
+                        "<=": b"\x0e", ">": b"\x0f", ">=": b"\x10"})
         if expr.value not in opcodes:
             raise WorkspaceError("UNSUPPORTED_OPERATOR", f"Unsupported arithmetic operator {expr.value}")
         return (opcodes[str(expr.value)] +
@@ -149,13 +154,67 @@ def _encode_expr(expr: Expr, function_slots: dict[str, int], local_slots: dict[s
     raise WorkspaceError("UNSUPPORTED_EXPRESSION", f"Unsupported projection expression kind {expr.kind}")
 
 
+def _encode_statement(statement: ProjectedStatement, function_slots: dict[str, int],
+                      local_slots: dict[str, int], array_slots: dict[str, int],
+                      result_symbol_id: str) -> bytes:
+    if isinstance(statement, Assignment):
+        if statement.target_is_array:
+            target_kind, slot = 2, array_slots.get(statement.target_symbol_id, -1)
+        elif statement.target_is_result:
+            target_kind, slot = 1, 0
+        else:
+            target_kind, slot = 0, local_slots.get(statement.target_symbol_id, -1)
+        if slot < 0:
+            raise WorkspaceError("UNRESOLVED_SYMBOL", "Structured assignment target is absent from projection")
+        output = bytearray(struct.pack("<BBHI", 0, target_kind, 0, slot))
+        if statement.target_is_array:
+            if statement.target_index is None:
+                raise WorkspaceError("INVALID_ARRAY_ASSIGNMENT", "Array assignment has no index")
+            output.extend(_encode_expr(statement.target_index, function_slots, local_slots,
+                                       array_slots, result_symbol_id))
+        output.extend(_encode_expr(statement.expression, function_slots, local_slots,
+                                   array_slots, result_symbol_id))
+        return bytes(output)
+    if isinstance(statement, IfBlock):
+        output = bytearray(struct.pack("<BBHI", 1, 0, 0, 0))
+        output.extend(_encode_expr(statement.condition, function_slots, local_slots,
+                                   array_slots, result_symbol_id))
+        output.extend(_u32(len(statement.then_body)))
+        for child in statement.then_body:
+            output.extend(_encode_statement(child, function_slots, local_slots, array_slots,
+                                            result_symbol_id))
+        output.extend(_u32(len(statement.else_body)))
+        for child in statement.else_body:
+            output.extend(_encode_statement(child, function_slots, local_slots, array_slots,
+                                            result_symbol_id))
+        return bytes(output)
+    if isinstance(statement, ForLoop):
+        try:
+            slot = local_slots[statement.variable_id]
+        except KeyError as exc:
+            raise WorkspaceError("INVALID_LOOP_VARIABLE", "FOR variable is absent from function locals") from exc
+        if not 1 <= statement.iteration_limit <= MAX_LOOP_ITERATIONS:
+            raise WorkspaceError("LOOP_LIMIT", "Static FOR iteration limit exceeds worker policy")
+        output = bytearray(struct.pack("<BBHI", 2, 0, 0, slot))
+        for value in (statement.start, statement.end, statement.step):
+            output.extend(_encode_expr(Expr("number", value), function_slots, local_slots,
+                                       array_slots, result_symbol_id))
+        output.extend(_u32(statement.iteration_limit))
+        output.extend(_u32(len(statement.body)))
+        for child in statement.body:
+            output.extend(_encode_statement(child, function_slots, local_slots, array_slots,
+                                            result_symbol_id))
+        return bytes(output)
+    raise WorkspaceError("UNSUPPORTED_STATEMENT", f"Unsupported projection statement {type(statement).__name__}")
+
+
 def encode_projection(projection: CompilableProjection, target_index: int,
                       arguments: list[float], engine: str = "interp") -> bytes:
     function_slots = {f.symbol_id: i for i, f in enumerate(projection.functions)}
     if not 0 <= target_index < len(projection.functions):
         raise WorkspaceError("SYMBOL_NOT_FOUND", "Requested function is absent from this projection")
-    output = bytearray(b"BWM2")
-    output.extend(struct.pack("<IIII", 2, 0 if engine == "interp" else 1,
+    output = bytearray(b"BWM3")
+    output.extend(struct.pack("<IIII", 3, 0 if engine == "interp" else 1,
                               target_index, len(projection.functions)))
     for function in projection.functions:
         argc = len(function.parameter_ids)
@@ -180,22 +239,8 @@ def encode_projection(projection: CompilableProjection, target_index: int,
             output.extend(_u32(array.lower_bound))
             output.extend(_u32(array.upper_bound))
         for statement in function.statements:
-            if statement.target_is_array:
-                target_kind, slot = 2, array_slots.get(statement.target_symbol_id, -1)
-            elif statement.target_is_result:
-                target_kind, slot = 1, 0
-            else:
-                target_kind, slot = 0, local_slots.get(statement.target_symbol_id, -1)
-                if slot < 0:
-                    raise WorkspaceError("UNRESOLVED_SYMBOL", "Assignment target identity is absent from the projection")
-            output.extend(struct.pack("<B3xI", target_kind, slot))
-            if statement.target_is_array:
-                if statement.target_index is None:
-                    raise WorkspaceError("INVALID_ARRAY_ASSIGNMENT", "Indexed assignment is missing its index")
-                output.extend(_encode_expr(statement.target_index, function_slots, local_slots,
-                                           array_slots, function.symbol_id))
-            output.extend(_encode_expr(statement.expression, function_slots, local_slots, array_slots,
-                                       function.symbol_id))
+            output.extend(_encode_statement(statement, function_slots, local_slots,
+                                            array_slots, function.symbol_id))
     output.extend(_u32(target_index))
     output.extend(_u32(len(arguments)))
     for value in arguments:
