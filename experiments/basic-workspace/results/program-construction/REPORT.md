@@ -131,7 +131,21 @@ in both arms. Those cache counts are reported independently from raw bytes.
 The local Ollama Gemma exploratory run is kept in `llm-trials/`. It used a
 different, earlier text tool set and reached an iteration limit in the semantic
 arm; its numbers must not be combined with the fair Sushi pilot or interpreted
-as a semantic-versus-text result.
+as a semantic-versus-text result. For the direct transport-size question, that
+run measured:
+
+| Initial Ollama/Gemma pilot (not a fair correctness comparison) | Semantic | Text |
+|---|---:|---:|
+| Largest compact messages + schema context | 13,104 bytes | 3,903 bytes |
+| Serialized request bodies, cumulative / largest | 118,849 / 13,849 bytes | 14,844 / 4,261 bytes |
+| Response wire bodies, cumulative / largest | 20,067 / 3,340 bytes | 10,010 / 3,767 bytes |
+| Provider prompt / completion tokens | 26,420 / 4,566 | 2,436 / 1,970 |
+
+Both invocations requested at most 1,024 output tokens per model turn. The
+64,000-byte local cap was not reached. These measurements count a tool-call
+conversation cumulatively: request-body bytes are not the same as context
+tokens, and provider completion-token totals are not the same as response
+wire bytes.
 
 Four further paired elementary tasks completed before the operator redirected
 the study to continued program-level sessions. All four completed tasks were
