@@ -83,6 +83,21 @@ class GenericVisualizationTests(unittest.TestCase):
         self.assertEqual(compiler.revision, 2)
         self.assertEqual(len(compiler.frames), 2)
 
+    def test_agent_mission_status_is_separate_from_committed_seed_and_code(self):
+        compiler=VIS.VisualFrameCompiler("pi","Pi","P.bas",4,"seed code",{5:"committed code"})
+        initial=compiler.consume({"event_id":"seed","event_type":"initial","revision":4,"provenance":"host",
+            "mission_status":"Agent mission pending · committed seed revision 4"})
+        self.assertEqual(initial["state"],"baseline")
+        self.assertEqual(initial["mission_status"],"Agent mission pending · committed seed revision 4")
+        denied=compiler.consume({"event_id":"reject","event_type":"rejection","revision":4,"provenance":"gateway"})
+        self.assertEqual(denied["code"],"seed code")
+        self.assertEqual(denied["mission_status"],initial["mission_status"])
+        final=compiler.consume({"event_id":"outcome","event_type":"mission_status","revision":4,"provenance":"host",
+            "mission_status":"Agent mission failed · no agent commit · revision 4 · timed out"})
+        self.assertEqual(final["state"],"status")
+        self.assertEqual(final["code"],"seed code")
+        self.assertIn("failed",final["mission_status"])
+
     def test_exact_semantic_spans_are_supported_without_guessing_positions(self):
         compiler = VIS.VisualFrameCompiler("x", "X", "X.bas", 1, "X = 3", {})
         event = {"event_id":"e","event_type":"initial","revision":1,"provenance":"workspace",

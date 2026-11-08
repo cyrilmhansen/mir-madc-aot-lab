@@ -6,6 +6,27 @@ const TOOL_NAMES = ["workspace_discover_functions", "workspace_inspect_program",
   "workspace_preview_function", "workspace_commit_preview", "workspace_validate_mission"];
 const MAX_RESPONSE = 1024 * 1024;
 
+const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
+const OPERATOR_SCHEMA = Type.Unsafe({ type: "string", enum: [...OPERATORS] });
+const NUMBER_EXPR = Type.Object({ kind: Type.Literal("number"), value: Type.Number() }, { additionalProperties: false });
+const ID_EXPR = Type.Object({ kind: Type.Literal("local_ref"), name: Type.Literal("ID") }, { additionalProperties: false });
+const ATOM_EXPR = Type.Union([NUMBER_EXPR, ID_EXPR]);
+const CALL_EXPR = Type.Object({ kind: Type.Literal("call"), function_handle: Type.Literal("age_by_id.function"),
+  arguments: Type.Array(ATOM_EXPR, { minItems: 1, maxItems: 1 }) }, { additionalProperties: false });
+const CALL_OR_ATOM_EXPR = Type.Union([ATOM_EXPR, CALL_EXPR]);
+// Mission-bounded expression grammar: atoms and bound calls, optionally
+// combined by one binary layer. This admits AGE_BY_ID(ID) >= 18 without an
+// exponential recursive schema or provider-facing $ref/$defs.
+const RESULT_TARGET = Type.Object({ kind: Type.Literal("result") }, { additionalProperties: false });
+const RESULT_ASSIGN = Type.Object({ kind: Type.Literal("assign"), target: RESULT_TARGET,
+  expression: ATOM_EXPR }, { additionalProperties: false });
+const IF_CONDITION = Type.Object({ kind: Type.Literal("binary"), operator: OPERATOR_SCHEMA,
+  left: CALL_OR_ATOM_EXPR, right: CALL_OR_ATOM_EXPR }, { additionalProperties: false });
+const IF_STATEMENT = Type.Object({ kind: Type.Literal("if"), condition: IF_CONDITION,
+  then: Type.Array(RESULT_ASSIGN, { maxItems: 64 }), else: Type.Optional(Type.Array(RESULT_ASSIGN, { maxItems: 64 })) },
+  { additionalProperties: false });
+const FUNCTION_STATEMENT = Type.Union([RESULT_ASSIGN, IF_STATEMENT]);
+
 class GatewayBridge {
   private socket?: net.Socket;
   private buffer = "";
@@ -88,9 +109,10 @@ export default function (pi: ExtensionAPI) {
       return toolResult(await gateway.call("inspect_program", { toolCallId }));
     }});
   pi.registerTool({ name: "workspace_preview_function", label: "Preview semantic function",
-    description: "Preview one typed numeric function creation through the mission gateway. Calls must use a discovered function handle. This does not commit.",
-    parameters: Type.Object({ expected_revision: Type.Integer(), callee_handle: Type.String(), name: Type.String(),
-      parameters: Type.Array(Type.String()), body: Type.Array(Type.Any()) }, { additionalProperties: false }),
+    description: 'Preview one typed numeric function through the mission gateway; preview never commits. Use the discovered AGE_BY_ID handle age_by_id.function. A result assignment looks like {"kind":"assign","target":{"kind":"result"},"expression":{"kind":"number","value":0}}. A bound call expression looks like {"kind":"call","function_handle":"age_by_id.function","arguments":[{"kind":"local_ref","name":"ID"}]}. Compose the comparison and one structured IF yourself. This mission-bounded schema supports numeric/ID result assignments, AGE_BY_ID calls nested in one binary condition layer, and result-assignment THEN/ELSE blocks (no nested IF blocks). No source text is accepted.',
+    parameters: Type.Object({ expected_revision: Type.Integer(), callee_handle: Type.Literal("age_by_id.function"), name: Type.String(),
+      parameters: Type.Array(Type.Literal("ID"), { minItems: 1, maxItems: 1 }),
+      body: Type.Array(FUNCTION_STATEMENT, { minItems: 1, maxItems: 64 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_create_function", { ...params, toolCallId }));
     }});

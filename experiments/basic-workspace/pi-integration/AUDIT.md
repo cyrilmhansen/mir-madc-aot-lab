@@ -42,8 +42,10 @@ Pi's current [extension](https://pi.dev/docs/latest/extensions), [RPC](https://p
 
 Reused without replacing the semantic engine: Cycle 14B's revision-4 typed seed, `SeniorMissionGateway`, age-independent adult mission validator, Cycle 15's `basic-visual.py live/replay`, normalized presentation-event compiler, and existing construction/replay helpers. The new code is limited to a loopback adapter, Pi extension, campaign launcher and focused bridge tests.
 
-## Limits found in the trial
+## Cycle 16B follow-up
 
-The preview tool's active JSON schema represents `body` as `array<{}>` (`Type.Any` items), so its nested typed statement grammar is not communicated to the model through the schema. The natural-language prompt named expression categories but did not specify the accepted object shapes. The gateway correctly rejected all eight model proposals. The Pi JSON event stream records tool starts and ends; the live extension journal in this run recorded starts, while gateway decisions and rejections were independently captured. No commit or execution validation occurred. The browser therefore showed the truthful revision-4 code, discovery and rejections, not a successful code evolution.
+The mission-specific preview schema was changed from `array<{}>` to a bounded TypeBox union that Pi serializes to explicit `anyOf` branches. Preflight captured exactly five active tools; the full schema is 20,343 bytes and the constructor body schema is 7,932 bytes. The body grammar and exact captured schema are documented in [REPORT.md](REPORT.md). Deterministic tests run the known-good body and all eight original rejected bodies through the captured Pi schema and the existing Python gateway.
 
-This is evidence of a correct boundary and a usability/schema defect, not evidence that Pi is incompatible. No second inference was made to hide or repair the failed attempt.
+One corrected real Sushi/Qwen mission ran once in `results/real-pi-02/`: five turns, five calls, one accepted preview, one commit (revision 4→5), interpreter/JIT and age-boundary validation passed, and fresh-workspace replay passed with 24 remapped identities. The original failed evidence in `results/real-pi-01/` remains unchanged.
+
+The missing Pi end-event observation was caused by the gateway idempotency key, not by Pi's extension API: both `tool_execution_start` and `tool_execution_end` used the same call ID and an empty phase. The gateway now uses the event type as its default phase. The historical extension journal remains unchanged; a separate sanitized adapter, explicitly sourced from the genuine Pi JSON session, includes the actual starts and ends. A regression test covers both distinct event types and repeated duplicates.

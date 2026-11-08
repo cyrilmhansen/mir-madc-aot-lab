@@ -1,6 +1,6 @@
 # Pi integration experiment
 
-Cycle 16 connects Pi to the existing Python semantic gateway and Cycle 15 browser viewer. See [AUDIT.md](AUDIT.md) and [REPORT.md](REPORT.md) for the architecture and actual outcome.
+Cycle 16 connects Pi to the existing Python semantic gateway and Cycle 15 browser viewer. Cycle 16B repairs the typed constructor schema and records one successful genuine retry. See [AUDIT.md](AUDIT.md) and [REPORT.md](REPORT.md) for the architecture and outcomes.
 
 ## Requirements
 
@@ -23,9 +23,20 @@ python3 experiments/basic-workspace/pi-integration/run_cycle16.py \
   --timeout 240 --open-browser
 ```
 
-The first command checks Pi's configured model catalog and exact active tool inventory; it does not call the inference endpoint. The second performs one bounded model session and starts the read-only live viewer before inference. **Do not repeat the second command into an existing evidence directory.** The actual trial in this report failed and must not be replaced with a scripted success.
+The first command checks Pi's configured model catalog and exact active tool inventory; it does not call the inference endpoint. The second command is the preserved Cycle 16 failure and must not be repeated into its output directory. Cycle 16B preflight and the single corrected retry are:
 
-To inspect the recorded result offline, open `results/real-pi-01/visual-replay-generic.html`. To serve the saved event stream again, use:
+```sh
+python3 experiments/basic-workspace/pi-integration/run_cycle16.py \
+  --preflight-only --output experiments/basic-workspace/pi-integration/results/preflight-08
+
+python3 experiments/basic-workspace/pi-integration/run_cycle16.py \
+  --output experiments/basic-workspace/pi-integration/results/real-pi-02 \
+  --timeout 180 --open-browser
+```
+
+Do not repeat the mission into either evidence directory. The actual result is recorded in the report. `tool-schemas.json` captures the JSON schemas Pi actually exposed; the Python gateway remains authoritative for validation and policy.
+
+To inspect the original failure offline, open `results/real-pi-01/visual-replay-generic.html`. The successful retry is `results/real-pi-02/visual-replay-generic.html`; its commit and validation screenshots are in that directory. To serve a saved event stream again, use:
 
 ```sh
 python3 experiments/basic-workspace/scripts/basic-visual.py live \

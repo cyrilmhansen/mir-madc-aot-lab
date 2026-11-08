@@ -54,6 +54,10 @@ class PiGatewayTests(unittest.TestCase):
         event={"type":"tool_execution_start","toolCallId":"call-1","toolName":"workspace_discover_functions"}
         self.assertFalse(self.gateway.record_pi(event)["deduplicated"])
         self.assertTrue(self.gateway.record_pi(event)["deduplicated"])
+        completion={"type":"tool_execution_end","toolCallId":"call-1","toolName":"workspace_discover_functions",
+                    "isError":False,"durationMs":2.0}
+        self.assertFalse(self.gateway.record_pi(completion)["deduplicated"])
+        self.assertTrue(self.gateway.record_pi(completion)["deduplicated"])
         server=MOD.Server(("127.0.0.1",0),self.gateway);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
             with socket.create_connection(server.server_address,timeout=2) as sock:
@@ -78,7 +82,7 @@ class PiGatewayTests(unittest.TestCase):
             self.assertTrue(response["ok"])
             self.assertEqual(response["request_id"],"bad-body")
             self.assertFalse(response["result"]["ok"])
-            self.assertEqual(response["result"]["code"],"MISSION_BODY")
+            self.assertEqual(response["result"]["code"],"INVALID_TYPED_STATEMENT")
             self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc),4)
             self.assertNotIn("FUNCTION IS_ADULT",self.gateway.ws.render_document(self.gateway.doc))
         finally:server.shutdown();server.server_close();thread.join(timeout=2)

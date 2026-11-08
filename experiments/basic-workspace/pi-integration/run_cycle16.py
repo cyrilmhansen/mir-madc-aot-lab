@@ -145,6 +145,9 @@ def main():
         validation=None
         if status["committed"]:
             validation=gateway_call("127.0.0.1",ready["port"],"validate_mission",{"expected_revision":status["revision"]})
+        outcome=gateway_call("127.0.0.1",ready["port"],"finalize_mission",{
+            "timed_out":pi_proc is None,"pi_exit_code":None if pi_proc is None else pi_proc.returncode,
+            "validation":validation})
         try:subprocess.run([sys.executable,str(ROOT/"scripts/basic-visual.py"),"replay",str(out)],check=True,capture_output=True,text=True)
         except Exception as exc:(out/"replay-error.txt").write_text(str(exc)+"\n")
         raw=[]
@@ -169,13 +172,15 @@ def main():
             "timed_out":pi_proc is None,"turn_end_events":len(turns),"tool_calls":len(tool_events),
             "tool_calls_by_name":{n:sum(e.get("toolName")==n for e in tool_events) for n in TOOLS},
             "provider_usage_from_pi_events":totals,"inference_and_process_wall_ms":round(elapsed,2),
+            "mission_status":outcome.get("mission_status"),
             "active_tools":json.loads((out/"tool-inventory.json").read_text()).get("tools",[]) if (out/"tool-inventory.json").exists() else [],
             "tool_schema_bytes":schemas.stat().st_size if schemas.exists() else None,
             "pi_event_stream_bytes":(out/"pi-session.jsonl").stat().st_size,
             "validation":validation,"viewer_url":url,"provider_preflight":"RPC model/tool inventory verified; actual endpoint/tool compatibility is the genuine mission request"}
         atomic_json(out/"summary.json",summary)
         print(json.dumps({"summary":str(out/"summary.json"),"viewer":url,"committed":status["committed"],
-            "revision":status["revision"],"turns":len(turns),"tool_calls":len(tool_events),"validation_passed":bool(validation and validation.get("mission_complete"))},indent=2))
+            "revision":status["revision"],"turns":len(turns),"tool_calls":len(tool_events),"mission_status":outcome.get("mission_status"),
+            "validation_passed":bool(validation and validation.get("mission_complete"))},indent=2))
         if pi_proc is None:return 2
         return 0 if validation and validation.get("mission_complete") else (0 if not status["committed"] else 1)
     finally:

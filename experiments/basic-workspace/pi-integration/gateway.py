@@ -2,6 +2,7 @@
 """Cycle 16 loopback bridge: Python owns Workspace and mission policy."""
 from __future__ import annotations
 import argparse, importlib.util, json, socketserver, sys, threading, time, uuid
+import math
 from pathlib import Path
 from typing import Any
 
@@ -44,21 +45,22 @@ class Cycle16Gateway:
             raise RuntimeError("could not construct the verified revision-4 age-55 seed")
         self.revision=self.ws.get_revision(self.doc)
         self.base=senior.normalized_state(projection_semantics(build_projection(self.ws,self.doc,self.revision)),self.aliases)
-        mission=campaign.make_adult_mission(); mission["mission_id"]="cycle16.pi.is-adult.v1"
+        mission=campaign.make_adult_mission(); mission["mission_id"]="cycle16b.pi.is-adult.v1"
         self.gateway=senior.SeniorMissionGateway(self.ws,self.doc,self.aliases,self.base,mission,self.trace,
-            "cycle16-real-pi-agent",function_name="IS_ADULT",function_handle="is_adult.function")
+            "cycle16b-real-pi-agent",function_name="IS_ADULT",function_handle="is_adult.function")
         self.pi_seen=set(); self.presentation_seq=0
         self.lock=threading.RLock()
         code=self.ws.render_document(self.doc)
         self.initial={"revision":self.revision,"code":code,"dependencies":self.dependencies()}
         bundle={"schema":"basic-workspace.visual-source","version":1,
-            "campaign":{"id":"cycle16-pi-is-adult","title":"Cycle 16 · Pi semantic construction","filename":"ADDRESS_BOOK.bas"},
+            "campaign":{"id":"cycle16b-pi-is-adult","title":"Cycle 16B · Pi typed semantic construction","filename":"ADDRESS_BOOK.bas"},
             "initial":self.initial,"snapshots":{str(self.revision):code}}
         (output/"visual-source.json").write_text(json.dumps(bundle,indent=2,ensure_ascii=False)+"\n")
         self.emit_visual({"event_id":"pi-seed-initial","frame_id":"pi-seed-initial","event_type":"initial",
             "presentation_sequence":1,"revision":self.revision,"provenance":"Deterministic Cycle 14B seed · not Pi activity",
             "mission_id":"IS_ADULT · Pi mission","title":"Existing revision-4 program",
             "description":"Deterministic seed from validated typed operations. The Pi agent has not acted yet.",
+            "mission_status":f"Agent mission pending · committed seed revision {self.revision}",
             "dependencies":self.initial["dependencies"]})
         self.flush_trace()
         (output/"MISSION.json").write_text(json.dumps(mission,indent=2)+"\n")
@@ -106,7 +108,10 @@ class Cycle16Gateway:
 
     def record_pi(self,params):
         row=dict(params); event_key=str(row.get("toolCallId") or row.get("request_id") or uuid.uuid4())
-        phase=str(row.get("phase","")); key=f"{event_key}:{phase}"
+        # Pi emits both start and end for one toolCallId. When there is no explicit
+        # phase, include the event type in the idempotency key so the completion is
+        # not mistaken for a duplicate start.
+        phase=str(row.get("phase") or row.get("type", "")); key=f"{event_key}:{phase}"
         duplicate=key in self.pi_seen
         if not duplicate:
             self.pi_seen.add(key); row["observed_at_monotonic_ns"]=time.monotonic_ns()
@@ -116,16 +121,98 @@ class Cycle16Gateway:
             (self.output/"tool-schemas.json").write_text(json.dumps(row.get("schemas",[]),indent=2)+"\n")
         return {"ok":True,"deduplicated":duplicate,"recorded_key":key}
 
+    @staticmethod
+    def typed_shape_error(request: Any) -> dict[str,Any] | None:
+        """Syntactic diagnostics only; mission authorization remains in SeniorMissionGateway."""
+        def issue(code,path,expected,received):
+            return {"ok":False,"code":code,"path":path,"expected":expected,
+                    "received_kind":type(received).__name__ if received is not None else "missing"}
+        def expr(node,path,depth=0):
+            if depth>3:return issue("INVALID_TYPED_EXPRESSION",path,{"max_depth":4},node)
+            if not isinstance(node,dict):return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"object"},node)
+            kind=node.get("kind")
+            if kind=="number":
+                if set(node)!={"kind","value"} or isinstance(node.get("value"),bool) or not isinstance(node.get("value"),(int,float)) or not math.isfinite(float(node["value"])):
+                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"number","required":["kind","value"]},kind)
+            elif kind=="local_ref":
+                if set(node)!={"kind","name"} or not isinstance(node.get("name"),str):
+                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"local_ref","required":["kind","name"]},kind)
+            elif kind=="binary":
+                if set(node)!={"kind","operator","left","right"}:
+                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"binary","required":["kind","operator","left","right"]},kind)
+                if node.get("operator") not in ("+","-","*","/","=","<>","<","<=",">",">="):
+                    return issue("INVALID_TYPED_EXPRESSION",path+".operator",{"enum":["+","-","*","/","=","<>","<","<=",">",">="]},node.get("operator"))
+                return expr(node["left"],path+".left",depth+1) or expr(node["right"],path+".right",depth+1)
+            elif kind=="call":
+                if set(node)!={"kind","function_handle","arguments"}:
+                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"call","required":["kind","function_handle","arguments"]},kind)
+                if not isinstance(node.get("function_handle"),str) or not isinstance(node.get("arguments"),list) or len(node["arguments"])!=1:
+                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"call","one_argument":True},kind)
+                return expr(node["arguments"][0],path+".arguments[0]",depth+1)
+            else:return issue("INVALID_TYPED_EXPRESSION",path,{"kind":["number","local_ref","binary","call"]},kind)
+            return None
+        def body(items,path,depth=0):
+            if depth>2:return issue("INVALID_TYPED_STATEMENT",path,{"max_if_nesting":2},items)
+            if not isinstance(items,list) or len(items)>64:return issue("INVALID_TYPED_STATEMENT",path,{"type":"array","maxItems":64},items)
+            for i,node in enumerate(items):
+                p=f"{path}[{i}]"
+                if not isinstance(node,dict):return issue("INVALID_TYPED_STATEMENT",p,{"kind":"object"},node)
+                kind=node.get("kind")
+                if kind=="assign":
+                    if set(node)!={"kind","target","expression"}:return issue("INVALID_TYPED_STATEMENT",p,{"kind":"assign","required":["kind","target","expression"]},kind)
+                    target=node.get("target")
+                    if target!={"kind":"result"}:return issue("INVALID_TYPED_STATEMENT",p+".target",{"kind":"result"},target)
+                    error=expr(node.get("expression"),p+".expression")
+                    if error:return error
+                elif kind=="if":
+                    if set(node)-{"kind","condition","then","else"} or "condition" not in node or not isinstance(node.get("then"),list) or ("else" in node and not isinstance(node["else"],list)):
+                        return issue("INVALID_TYPED_STATEMENT",p,{"kind":"if","required":["kind","condition","then"],"optional":["else"]},kind)
+                    error=expr(node["condition"],p+".condition")
+                    if error:return error
+                    error=body(node["then"],p+".then",depth+1)
+                    if error:return error
+                    if "else" in node:
+                        error=body(node["else"],p+".else",depth+1)
+                        if error:return error
+                else:return issue("INVALID_TYPED_STATEMENT",p+".kind",{"enum":["assign","if"]},kind)
+            return None
+        if not isinstance(request,dict):return issue("INVALID_TYPED_FUNCTION","arguments",{"type":"object"},request)
+        if set(request)!={"name","parameters","body"} or not isinstance(request.get("name"),str) or not isinstance(request.get("parameters"),list):
+            return issue("INVALID_TYPED_FUNCTION","arguments",{"required":["name","parameters","body"]},request)
+        statements=request.get("body")
+        if not isinstance(statements,list) or not statements:return issue("INVALID_TYPED_STATEMENT","body",{"type":"non-empty array"},statements)
+        return body(statements,"body")
+
     def handle(self,method:str,p:dict[str,Any],rid:str):
         if method=="record_pi_event":return self.record_pi(p)
         if method=="get_status":return {"revision":self.ws.get_revision(self.doc),"committed":self.gateway.committed,
             "document_id":self.doc,"function_handles":sorted(k for k in self.gateway.aliases if k.endswith(".function"))}
+        if method=="finalize_mission":
+            revision=self.ws.get_revision(self.doc); validation=p.get("validation") or {}
+            if self.gateway.committed and validation.get("mission_complete"):
+                status=f"Agent mission passed · committed revision {revision} · MIR/JIT verified"
+            elif self.gateway.committed:
+                status=f"Agent mission failed · revision {revision} committed, host validation did not pass"
+            else:
+                reason="timed out" if p.get("timed_out") else "ended without an agent commit"
+                status=f"Agent mission failed · no agent commit · revision {revision} · {reason}"
+            self.trace.emit("session_completed",phase="cycle16b-real-pi-agent",actor="host_observer",
+                mission_id=self.gateway.mission_id,revision=revision,committed=self.gateway.committed,
+                timed_out=bool(p.get("timed_out")),mission_status=status)
+            self.flush_trace()
+            self.emit_visual({"event_id":f"pi-mission-status-r{revision}","frame_id":f"pi-mission-status-r{revision}",
+                "event_type":"mission_status","revision":revision,"session_id":"pi-cycle16b",
+                "mission_id":"IS_ADULT · Pi mission","provenance":"Host observation of actual Pi/gateway outcome",
+                "title":"Mission outcome","description":status,"mission_status":status,
+                "outcome":{"agent_commit":self.gateway.committed,"validation":validation or None,
+                    "timed_out":bool(p.get("timed_out"))}})
+            return {"revision":revision,"committed":self.gateway.committed,"mission_status":status}
         if method=="discover_functions":
             result=self.gateway.discover_functions(); self.flush_trace()
             f=self.ws.documents[self.doc].functions[0]
             span=self.function_span(self.aliases["age_by_id.function"])
             self.emit_visual({"event_id":f"pi-discovery-{rid}","frame_id":f"pi-discovery-{rid}","event_type":"selection",
-                "revision":self.revision,"session_id":"pi-cycle16","mission_id":"IS_ADULT · Pi mission",
+                "revision":self.revision,"session_id":"pi-cycle16b","mission_id":"IS_ADULT · Pi mission",
                 "provenance":"Genuine Pi semantic-tool action · gateway discovery","source_event_ref":rid,
                 "title":"Pi discovers AGE_BY_ID","description":"Pi requested function discovery; the Python gateway returned the live signature and opaque identity.",
                 "focus":{"handles":["age_by_id.function"],**span}})
@@ -138,13 +225,31 @@ class Cycle16Gateway:
                 "dependencies":self.dependencies()}
         if method=="preview_create_function":
             request={k:p.get(k) for k in ("name","parameters","body")}
+            shape_error=self.typed_shape_error(request)
+            if shape_error:
+                txid="tx_"+uuid.uuid4().hex; revision=self.ws.get_revision(self.doc)
+                shape_error.update({"reliable":True,"revision":revision,"revision_unchanged":True,"transaction_id":txid})
+                self.trace.emit("operation_proposed",phase="cycle16b-real-pi-agent",actor="llm_tool",
+                    mission_id=self.gateway.mission_id,transaction_id=txid,base_revision=p.get("expected_revision"),
+                    operation_envelope={"operation":"create_numeric_function","arguments":request,"state":"proposed"})
+                self.trace.emit("transaction_rejected",phase="cycle16b-real-pi-agent",actor="mission_gateway",
+                    mission_id=self.gateway.mission_id,transaction_id=txid,base_revision=p.get("expected_revision"),
+                    resulting_revision=revision,code=shape_error["code"],path=shape_error["path"],
+                    expected=shape_error["expected"],received_kind=shape_error["received_kind"],authoritative_state_unchanged=True)
+                self.flush_trace()
+                self.emit_visual({"event_id":f"pi-rejection-{rid}","frame_id":f"pi-rejection-{rid}",
+                    "event_type":"rejection","revision":revision,"session_id":"pi-cycle16b","mission_id":"IS_ADULT · Pi mission",
+                    "provenance":"Pi typed request · Workspace schema diagnostic","source_event_ref":rid,
+                    "title":"Malformed typed request","description":f"{shape_error['code']} at {shape_error['path']}",
+                    "preview":{"status":"rejected","diagnostic":shape_error}})
+                return shape_error
             result=self.gateway.preview(request,p.get("expected_revision"),p.get("callee_handle")); self.flush_trace()
             self.dispatched[result.get("transaction_id",rid)]=rid
             last=next((e for e in reversed(self.trace.events) if e.get("event") in ("preview_accepted","transaction_rejected") and e.get("transaction_id")==result.get("transaction_id")),{})
             if result.get("ok"):
                 diff=last.get("proposed_diff",""); added=[line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
                 self.emit_visual({"event_id":f"pi-preview-{rid}","frame_id":f"pi-preview-{rid}","event_type":"preview",
-                    "revision":self.revision,"session_id":"pi-cycle16","mission_id":"IS_ADULT · Pi mission",
+                    "revision":self.revision,"session_id":"pi-cycle16b","mission_id":"IS_ADULT · Pi mission",
                     "provenance":"Pi typed proposal · MissionGateway accepted preview","source_event_ref":rid,
                     "title":"IS_ADULT proposal preview","description":"Candidate passed authorization; committed revision 4 remains unchanged until commit.",
                     "focus":{"handles":["is_adult.function"],"mapping":"verified_function_boundary"},
@@ -152,7 +257,7 @@ class Cycle16Gateway:
                     "outcome":{"authorized":True,"committed":False}})
             else:
                 self.emit_visual({"event_id":f"pi-rejection-{rid}","frame_id":f"pi-rejection-{rid}","event_type":"rejection",
-                    "revision":self.revision,"session_id":"pi-cycle16","mission_id":"IS_ADULT · Pi mission",
+                    "revision":self.revision,"session_id":"pi-cycle16b","mission_id":"IS_ADULT · Pi mission",
                     "provenance":"Pi proposal · MissionGateway rejection","source_event_ref":rid,
                     "title":"Proposal rejected","description":result.get("message",result.get("code","rejected")),
                     "focus":{"handles":["age_by_id.function"],"mapping":"unknown"},
@@ -166,9 +271,10 @@ class Cycle16Gateway:
                 scope=next(f for f in self.doc_functions() if f["symbol_id"]==self.aliases["is_adult.function"])
                 span["spans"]["call_lines"]=self.call_lines(self.aliases["age_by_id.function"],scope)
                 self.emit_visual({"event_id":f"pi-commit-{p.get('transaction_id')}","frame_id":f"pi-commit-{p.get('transaction_id')}","event_type":"commit",
-                    "revision":self.revision,"snapshot":source,"session_id":"pi-cycle16","mission_id":"IS_ADULT · Pi mission",
+                    "revision":self.revision,"snapshot":source,"session_id":"pi-cycle16b","mission_id":"IS_ADULT · Pi mission",
                     "provenance":"Workspace atomic commit · correlated with Pi tool call","source_event_ref":self.dispatched.get(p.get("transaction_id"),rid),
                     "title":"IS_ADULT committed","description":"New function committed at revision 5 with a bound call to AGE_BY_ID.",
+                    "mission_status":f"Agent commit revision {self.revision} · host validation pending",
                     "focus":{"handles":["is_adult.function","age_by_id.function"],**span},"dependencies":self.dependencies(),
                     "outcome":{"committed":True,"transaction_id":p.get("transaction_id"),"bound_callee":"AGE_BY_ID"}})
             else:
@@ -178,6 +284,7 @@ class Cycle16Gateway:
                     "preview":{"status":"rejected","message":result.get("message"),"diagnostic":result.get("code")}})
             return result
         if method=="validate_mission":
+            agent_requested=bool(p.get("toolCallId"))
             requested=p.get("expected_revision")
             result=campaign.adult_validator(self.ws,self.doc,self.gateway,requested)
             replay={"passed":False,"reason":"not_run"}; boundary={"passed":False,"reason":"not_run"}
@@ -198,12 +305,19 @@ class Cycle16Gateway:
                 (self.output/"equivalence.json").write_text(json.dumps({"mission":result,"boundary":boundary,"replay":replay},indent=2)+"\n")
             result["boundary_oracle"]=boundary; result["replay"]=replay
             self.append_log(self.output/"validation.jsonl",result)
+            passed=bool(result.get("mission_complete") and boundary.get("passed") and replay.get("passed"))
+            status=(f"Host validation passed · revision {self.revision}" if passed
+                    else f"Host validation failed · revision {self.revision}")
             self.emit_visual({"event_id":f"pi-validation-r{self.revision}-{rid}","frame_id":f"pi-validation-r{self.revision}-{rid}","event_type":"validation",
-                "revision":self.revision,"session_id":"pi-cycle16","mission_id":"IS_ADULT · Pi mission",
-                "provenance":"Independent host validation · MIR interpreter/JIT","source_event_ref":rid,
-                "title":"MIR and replay validation","description":"Independent oracle, threshold boundaries and fresh-workspace replay evaluated after commit.",
+                "revision":self.revision,"session_id":"pi-cycle16b","mission_id":"IS_ADULT · Pi mission",
+                "provenance":("Pi-requested validation executed by Python host · MIR interpreter/JIT" if agent_requested
+                              else "Independent host verification · MIR interpreter/JIT"),"source_event_ref":rid,
+                "title":("Pi requests MIR and replay validation" if agent_requested else "Host independently verifies MIR and replay"),
+                "description":("Pi invoked the validation tool; the Python host ran the mission oracle, threshold boundaries and fresh-workspace replay after commit."
+                               if agent_requested else "The host independently repeated the oracle, threshold boundary and fresh-workspace replay checks after the Pi tool completed."),
+                "mission_status":status,
                 "focus":{"handles":["is_adult.function"],"mapping":"verified_function_boundary"},
-                "validation":{"passed":bool(result.get("mission_complete") and boundary.get("passed") and replay.get("passed")),
+                "validation":{"passed":passed,
                     "interpreter_jit_agree":result.get("engines_agree"),"replay":replay},
                 "observation":{"function":"IS_ADULT","arguments":[101,205,900,999,2],
                     "engine_results":result.get("observed_results"),"revision":result.get("executed_revision"),
