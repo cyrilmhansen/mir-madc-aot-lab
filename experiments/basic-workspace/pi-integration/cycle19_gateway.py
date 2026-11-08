@@ -23,11 +23,12 @@ PROFILE_ID="basic-workspace.numeric-composition.v1"
 INPUTS=(-100,-1,0,1,59,60,99,100,101,200)
 
 class Cycle19Gateway:
-    def __init__(self, output:Path):
+    def __init__(self, output:Path, resume_from:Path|None=None):
         self.output=output; output.mkdir(parents=True,exist_ok=True)
         self.ws=Workspace(); self.doc=self.ws.create_empty_document("memory://cycle19/empty.bas")["document_id"]
         self.aliases:dict[str,str]={}; self.trace=age.Trace(); self.lock=threading.RLock()
         self.revision=self.ws.get_revision(self.doc); self.phase=1; self.preview_pending={}; self.dispatched={}
+        self.resume_verification=None
         self.pi_seen=set(); self.presentation_seq=0; self.committed_operations=[]; self.completed_missions=[]
         self.last_validation=None; self.session_id="cycle19-mission-1"
         self.mission_specs={1:{"mission_id":"cycle19.normalize-score.v1","name":"CLAMP_SCORE","handle":"clamp_score.function","parameter":"X","callee":None,
@@ -39,20 +40,23 @@ class Cycle19Gateway:
         self.visual_events=output/"visual-events.jsonl"; self.gateway_timings=output/"gateway-tool-timings.jsonl"
         self.pi_events=output/"pi-tool-lifecycle.jsonl"
         self.initial={"revision":self.revision,"code":"","dependencies":[]}
-        bundle={"schema":"basic-workspace.visual-source","version":1,
-            "campaign":{"id":"cycle19-empty-workspace","title":"Cycle 19 · agent-built BASIC from an empty Workspace","filename":"SCORES.bas"},
-            "initial":self.initial,"snapshots":{str(self.revision):""}}
-        self.write_json("visual-source.json",bundle)
         (output/"MISSION-1.json").write_text(json.dumps(self.mission_contract(1),indent=2)+"\n")
         (output/"MISSION-2.json").write_text(json.dumps(self.mission_contract(2,base_revision=2),indent=2)+"\n")
         profile=json.loads((ROOT/"results/semantic-replay/execution-profile.json").read_text())
         self.write_json("execution-profile.json",profile)
         self.append_log(output/"setup.jsonl",{"kind":"empty_workspace_created","revision":self.revision,
             "document_token_count":0,"functions":[],"host_inserted_program_logic":False,"execution_profile_id":PROFILE_ID})
-        self.emit_visual({"event_id":"cycle19-empty-start","event_type":"initial","revision":self.revision,
-            "session_id":"cycle19-mission-1","mission_id":self.mission_title,"provenance":"Workspace.create_empty_document",
-            "title":"Empty Workspace","description":"Canonical document created with zero tokens and no functions. No BASIC seed was inserted.",
-            "mission_status":"Mission 1 pending · empty committed revision 1","dependencies":[]})
+        if resume_from is None:
+            bundle={"schema":"basic-workspace.visual-source","version":1,
+                "campaign":{"id":"cycle19-empty-workspace","title":"Cycle 19 · agent-built BASIC from an empty Workspace","filename":"SCORES.bas"},
+                "initial":self.initial,"snapshots":{str(self.revision):""}}
+            self.write_json("visual-source.json",bundle)
+            self.emit_visual({"event_id":"cycle19-empty-start","event_type":"initial","revision":self.revision,
+                "session_id":"cycle19-mission-1","mission_id":self.mission_title,"provenance":"Workspace.create_empty_document",
+                "title":"Empty Workspace","description":"Canonical document created with zero tokens and no functions. No BASIC seed was inserted.",
+                "mission_status":"Mission 1 pending · empty committed revision 1","dependencies":[]})
+        else:
+            self._resume_from_cycle19(resume_from)
 
     def write_json(self,name:str,data:Any):
         (self.output/name).write_text(json.dumps(data,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
@@ -116,6 +120,15 @@ class Cycle19Gateway:
             if callee_handle!=required:raise WorkspaceError("MISSION_DEPENDENCY_FORBIDDEN",f"Only discovered {required} is authorized")
             if not calls or any(call.get("function_handle")!=required for call in calls):
                 raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED","IS_PASSING must call the discovered CLAMP_SCORE function")
+            if required not in self.aliases or self.aliases[required] not in {row["symbol_id"] for row in self.ws.documents[self.doc].functions}:
+                raise WorkspaceError("UNKNOWN_FUNCTION_HANDLE",f"Discovered handle {required} no longer resolves in this revision")
+            callable_row=senior.find_function(self._normalized(),required)
+            if callable_row.get("return_type")!="numeric":
+                raise WorkspaceError("FUNCTION_SIGNATURE_MISMATCH","The required dependency must return numeric")
+            for call in calls:
+                args=call.get("arguments")
+                if not isinstance(args,list) or len(args)!=len(callable_row.get("parameters",[])):
+                    raise WorkspaceError("FUNCTION_SIGNATURE_MISMATCH","CLAMP_SCORE call argument count does not match its discovered numeric signature")
             discovered_calls={required}
         resolved=senior.resolve_function_handles(request, self.aliases, discovered_calls)
         operation={"operation":"create_numeric_function",**resolved}
@@ -141,6 +154,138 @@ class Cycle19Gateway:
             sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
         import hashlib
         return hashlib.sha256(payload).hexdigest()
+    def _resume_from_cycle19(self,source_dir:Path):
+        """Rebuild revision 2 from the exact committed operation and verify its checkpoint."""
+        source_dir=source_dir.resolve()
+        stream=json.loads((source_dir/"mission-1-constructive-operations-partial.json").read_text(encoding="utf-8"))
+        checkpoint=json.loads((source_dir/"checkpoint.json").read_text(encoding="utf-8"))
+        prior_validation=json.loads((source_dir/"mission-1-host-validation.json").read_text(encoding="utf-8"))
+        prior_trace=[json.loads(line) for line in (source_dir/"history.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        source_bundle=json.loads((source_dir/"visual-source.json").read_text(encoding="utf-8"))
+        source_events=[json.loads(line) for line in (source_dir/"visual-events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        if stream.get("schema")!="basic-workspace.constructive-metafile" or stream.get("version")!=1:
+            raise WorkspaceError("RESUME_STREAM_SCHEMA","Unsupported original Mission 1 operation stream")
+        if stream.get("execution_profile_id")!=PROFILE_ID or checkpoint.get("execution_profile_id")!=PROFILE_ID:
+            raise WorkspaceError("RESUME_PROFILE_MISMATCH","Original operation and checkpoint must use the current execution profile")
+        operations=stream.get("operations")
+        if not isinstance(operations,list) or len(operations)!=1:
+            raise WorkspaceError("RESUME_OPERATION_COUNT","Mission 1 recovery requires exactly its one committed construction operation")
+        item=operations[0]
+        if item.get("operation")!="create_numeric_function" or item.get("portable_handle")!="clamp_score.function":
+            raise WorkspaceError("RESUME_OPERATION_MISMATCH","The original committed CLAMP_SCORE operation is required")
+        commit_events=[row for row in prior_trace if row.get("event")=="transaction_committed"
+                       and row.get("mission_id")=="cycle19.normalize-score.v1"]
+        proposal_events=[row for row in prior_trace if row.get("event")=="operation_proposed"
+                         and row.get("mission_id")=="cycle19.normalize-score.v1"]
+        if len(commit_events)!=1 or len(proposal_events)!=1:
+            raise WorkspaceError("RESUME_HISTORY_INCOMPLETE","Original mission must have one proposal and one authoritative commit")
+        committed=commit_events[0]
+        if item.get("arguments")!=proposal_events[0].get("arguments"):
+            raise WorkspaceError("RESUME_STREAM_MISMATCH","Portable operation differs from the genuine committed proposal")
+        if committed.get("resulting_revision")!=2 or committed.get("portable_handle")!="clamp_score.function":
+            raise WorkspaceError("RESUME_COMMIT_MISMATCH","Original commit evidence does not identify CLAMP_SCORE at revision 2")
+        if prior_validation.get("mission_complete") is not True or prior_validation.get("revision")!=2:
+            raise WorkspaceError("RESUME_VALIDATION_MISSING","Original Mission 1 host validation did not pass at revision 2")
+        if checkpoint.get("revision")!=2 or not isinstance(checkpoint.get("semantic_fingerprint"),str):
+            raise WorkspaceError("RESUME_CHECKPOINT_REVISION","Recovery checkpoint is not bound to revision 2")
+        old_entities=committed.get("created_entities",[])
+        old_function=next((row.get("symbol_id") for row in old_entities if row.get("kind")=="function" and row.get("name")=="CLAMP_SCORE"),None)
+        old_parameter=next((row.get("symbol_id") for row in old_entities if row.get("kind")=="parameter" and row.get("name")=="X"),None)
+        old_statements=[row.get("statement_id") for row in committed.get("created_statements",[])]
+        if not old_function or not old_parameter or len(old_statements)!=4 or any(not sid for sid in old_statements):
+            raise WorkspaceError("RESUME_IDENTITY_PROVENANCE","Original commit lacks the semantic identity provenance required for remapping")
+
+        # Apply the exact portable semantic operation to this new empty document.
+        args=senior.resolve_function_handles(item["arguments"],self.aliases,set())
+        applied=self.ws.apply_transaction(self.doc,1,[{"operation":"create_numeric_function",**args}])
+        if applied.get("revision")!=2:
+            raise WorkspaceError("RESUME_REVISION_MISMATCH","Reconstruction did not produce revision 2")
+        raw=projection_semantics(build_projection(self.ws,self.doc,2))
+        self.aliases=senior.aliases_for_new_function(raw,{},"CLAMP_SCORE","clamp_score.function")
+        normalized=senior.normalized_state(raw,self.aliases)
+        if normalized!=committed.get("semantic_snapshot"):
+            raise WorkspaceError("RESUME_SEMANTIC_MISMATCH","Reconstructed normalized semantics differ from the original committed snapshot")
+        fingerprint=self._program_fingerprint(normalized)
+        if fingerprint!=checkpoint.get("semantic_fingerprint"):
+            raise WorkspaceError("RESUME_FINGERPRINT_MISMATCH","Reconstructed definition does not match the original checkpoint fingerprint")
+        checkpoint_fn=(checkpoint.get("workspace_facts") or {}).get("functions")
+        expected_fn=[{"handle":"clamp_score.function","name":"CLAMP_SCORE","parameters":["clamp_score.parameter.id"],"return_type":"numeric"}]
+        if checkpoint_fn!=expected_fn:
+            raise WorkspaceError("RESUME_CHECKPOINT_FACTS","Checkpoint callable signature facts do not match reconstructed program")
+        observed=self._run_functions(2)
+        prior_results=checkpoint["workspace_facts"].get("validated_results")
+        if observed!=prior_results or observed!=prior_validation.get("observed_results"):
+            raise WorkspaceError("RESUME_BEHAVIOR_MISMATCH","Reconstructed MIR results differ from recorded independent validation")
+        if observed["interp"]!=observed["jit"]:
+            raise WorkspaceError("RESUME_ENGINE_MISMATCH","Reconstructed interpreter and JIT results disagree")
+        original_ids={"clamp_score.function":old_function,"clamp_score.parameter.id":old_parameter,
+            **{f"clamp_score.statement.{i}":sid for i,sid in enumerate(old_statements)}}
+        identity_mapping=[{"portable_handle":handle,"original_workspace_id":original_ids[handle],
+            "reconstructed_workspace_id":self.aliases[handle],"remapped":original_ids[handle]!=self.aliases[handle]}
+            for handle in sorted(self.aliases)]
+
+        self.revision=2; self.base_snapshot=normalized; self.base_aliases=dict(self.aliases)
+        self.phase=2; self.current_contract=self.mission_specs[2]; self.mission_title="Mission 2 · IS_PASSING"
+        self.session_id="cycle19b-mission-2"; self.discovered=set(); self.preview_pending={}; self.committed=False
+        self.last_validation=None; self.committed_operations=[item]
+        self.write_json("checkpoint.json",checkpoint)
+        self.write_json("reconstruction-verification.json",{"schema":"basic-workspace.cycle19b-reconstruction","version":1,
+            "source_campaign":"Cycle 19 genuine Mission 1","source_operation":"mission-1-constructive-operations-partial.json",
+            "starting_document_empty":True,"replay_actor":"host_deterministic_replay","resulting_revision":2,
+            "normalized_semantics_match_original_commit":True,"checkpoint_fingerprint_match":True,
+            "semantic_fingerprint":fingerprint,"checkpoint_document_id_reused":False,
+            "checkpoint_profile_match":True,"interpreter_jit_agree":True,"recorded_behavior_matches":True,
+            "observed_results":observed,
+            "identity_mapping":identity_mapping,
+            "new_workspace_handles":sorted(self.aliases),"portable_identity_count":len(self.aliases),
+            "identity_remappings":len(self.aliases),"passed":True})
+        # Reuse the original campaign's source snapshots and events, then append
+        # a clearly host-labelled reconstruction and fresh-session boundary.
+        original_code=next((row.get("snapshot") for row in source_events if row.get("event_type")=="commit" and row.get("revision")==2),None)
+        current_code=self.code()
+        if original_code is None or original_code!=current_code:
+            raise WorkspaceError("RESUME_SOURCE_MISMATCH","Reconstructed rendering does not match the original committed snapshot")
+        self.initial=source_bundle["initial"]
+        snapshots=dict(source_bundle.get("snapshots",{})); snapshots["2"]=current_code
+        self.write_json("visual-source.json",{"schema":"basic-workspace.visual-source","version":1,
+            "campaign":{"id":"cycle19b-recovery","title":"Cycle 19B · verified semantic recovery and continuation","filename":"SCORES.bas"},
+            "initial":self.initial,"snapshots":snapshots})
+        for event in source_events:
+            self.append_log(self.visual_events,event)
+            self.presentation_seq=max(self.presentation_seq,int(event.get("presentation_sequence",0)))
+        self.trace.emit("replay_completed",phase="cycle19b-reconstruction",actor="host_deterministic_replay",
+            mission_id=self.mission_specs[2]["mission_id"],revision=2,portable_operation_count=1,
+            normalized_semantics_match=True,fingerprint_match=True,behavior_match=True)
+        self.emit_visual({"event_id":"cycle19b-host-reconstruction","event_type":"reconstruction","revision":2,
+            "snapshot":current_code,"session_id":self.session_id,"mission_id":self.mission_title,
+            "provenance":"Host deterministic replay of the original genuine Mission 1 committed operation",
+            "title":"Revision 2 reconstructed from semantic operation","description":"The original CLAMP_SCORE operation was replayed into a new empty Workspace; checkpoint fingerprint, normalized semantics, interpreter and JIT results all match.",
+            "focus":{"handles":["clamp_score.function"],"mapping":"verified_function_boundary",
+                "spans":{"function_lines":self._function_span(self.aliases["clamp_score.function"])["spans"]["function_lines"]}},
+            "dependencies":self._dependencies(),"outcome":{"committed":True,"workspace_revision":2,"model_activity":False}})
+        self.emit_visual({"event_id":"cycle19b-checkpoint-verified","event_type":"checkpoint","revision":2,
+            "session_id":self.session_id,"mission_id":self.mission_title,
+            "provenance":"Host validation of revision-bound recovery checkpoint","title":"Verified checkpoint · fresh Pi context",
+            "description":"The checkpoint matches the reconstructed definition and recorded MIR observations. The new Pi conversation receives portable facts without prior transcripts or opaque document IDs.",
+            "focus":{"handles":["clamp_score.function"],"mapping":"verified_function_boundary",
+                "spans":{"function_lines":self._function_span(self.aliases["clamp_score.function"])["spans"]["function_lines"]}},
+            "outcome":{"revision":2,"semantic_fingerprint":fingerprint},"dependencies":self._dependencies()})
+        self.emit_visual({"event_id":"cycle19b-context-reset","event_type":"context_reset","revision":2,
+            "session_id":self.session_id,"mission_id":self.mission_title,
+            "provenance":"Host starts a fresh Pi conversation after deterministic reconstruction","title":"Fresh agent session · Mission 2",
+            "description":"Mission 2 starts from reconstructed revision 2. The earlier Cycle 19 Mission 2 transcript is not included.",
+            "focus":{"handles":["clamp_score.function"],"mapping":"verified_function_boundary"},
+            "dependencies":self._dependencies()})
+        self.append_log(self.output/"setup.jsonl",{"kind":"cycle19b_mission1_reconstructed_and_checkpoint_verified",
+            "revision":2,"semantic_fingerprint":fingerprint,"source_campaign":"Cycle 19 real-agent-01",
+            "source_visual_events":len(source_events),"fresh_model_conversation":True})
+        self.write_json("MISSION-2.json",self.mission_contract(2,base_revision=2))
+        self.write_json("mission-2-baseline.json",{"revision":2,"normalized_program":normalized,
+            "semantic_fingerprint":fingerprint,"captured_after_verified_reconstruction":True})
+        self.flush_trace()
+        self.resume_verification={"passed":True,"revision":2,"semantic_fingerprint":fingerprint,
+            "normalized_semantics_match_original_commit":True,"mir_results_match_checkpoint":True,
+            "interpreter_jit_agree":True,"portable_identity_count":len(self.aliases)}
     def _checkpoint(self,validation):
         normalized=self._normalized(); by_handle={row["handle"]:row for row in normalized["functions"]}
         return {"schema":"basic-workspace.semantic-recovery-checkpoint","version":1,
@@ -227,7 +372,10 @@ class Cycle19Gateway:
                 if "is_passing" in names:row["is_passing"]=executor.execute_function(ws,doc,revision,names["is_passing"],[x],engine)["result"]
                 obs[engine][str(x)]=row
         remapped=sum(self.aliases.get(h)!=aliases.get(h) for h in self.aliases)
-        return stream,norm,obs,remapped
+        identity_mapping=[{"portable_handle":handle,"committed_workspace_id":self.aliases[handle],
+            "replay_workspace_id":aliases[handle],"remapped":self.aliases[handle]!=aliases[handle]}
+            for handle in sorted(self.aliases)]
+        return stream,norm,obs,remapped,identity_mapping
 
     def validate_current(self,requested_revision:int,actor="host"):
         revision=self.ws.get_revision(self.doc)
@@ -255,10 +403,11 @@ class Cycle19Gateway:
             "boundary_oracle":{"passed":bool(results_match and engines_agree),
                 "cases":len(INPUTS),"expectation_source":"independent host-owned oracle"},
             "diagnostics":[] if complete else ["Output, prior-program, or binding invariant failed"]}
-        stream,replay_norm,replay_obs,remapped=self._replay()
+        stream,replay_norm,replay_obs,remapped,identity_mapping=self._replay()
         replay_ok=(norm==replay_norm and observed==replay_obs and replay_obs["interp"]==replay_obs["jit"])
         result["replay"]={"structural_equivalence":norm==replay_norm,"behavioral_equivalence":observed==replay_obs,
-            "engine_agreement":replay_obs["interp"]==replay_obs["jit"],"identity_remappings":remapped,"passed":replay_ok}
+            "engine_agreement":replay_obs["interp"]==replay_obs["jit"],"identity_remappings":remapped,
+            "identity_mapping":identity_mapping,"passed":replay_ok}
         result["mission_complete"]=bool(result["mission_complete"] and replay_ok)
         if result["mission_complete"]:
             self.write_json("constructive-operations.json",stream)
@@ -433,7 +582,7 @@ class Cycle19Gateway:
             return {"ok":True,"revision":self.ws.get_revision(self.doc)}
         if method=="get_status":return {"revision":self.ws.get_revision(self.doc),"phase":self.phase,
             "mission_id":self._mission_id(),"document_id":self.doc,"function_handles":self._function_handles(),
-            "committed":self.committed}
+            "committed":self.committed,"resume_verification":self.resume_verification}
         if method=="discover_functions":
             result=self._discover(rid); self.flush_trace(); return result
         if method=="inspect_program":
@@ -478,9 +627,11 @@ class Server(__import__("gateway").Server):
     pass
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument("--output",type=Path,required=True);ap.add_argument("--port",type=int,default=0);a=ap.parse_args()
-    service=Cycle19Gateway(a.output)
+    ap=argparse.ArgumentParser();ap.add_argument("--output",type=Path,required=True);ap.add_argument("--port",type=int,default=0)
+    ap.add_argument("--resume-from",type=Path);a=ap.parse_args()
+    service=Cycle19Gateway(a.output,a.resume_from)
     with Server(("127.0.0.1",a.port),service) as server:
-        print(json.dumps({"ready":True,"host":"127.0.0.1","port":server.server_address[1],"revision":service.revision},separators=(",",":")),flush=True)
+        print(json.dumps({"ready":True,"host":"127.0.0.1","port":server.server_address[1],"revision":service.revision,
+            "phase":service.phase,"resume_verification":service.resume_verification},separators=(",",":")),flush=True)
         server.serve_forever()
 if __name__=="__main__":main()

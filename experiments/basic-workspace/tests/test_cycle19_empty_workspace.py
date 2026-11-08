@@ -11,8 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PI_DIR = ROOT / "pi-integration"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(PI_DIR))
+sys.path.insert(0, str(ROOT / "scripts"))
 from cycle19_gateway import Cycle19Gateway  # noqa: E402
 from pi_lifecycle import completion_states  # noqa: E402
+from visualization import validate_presentation_event  # noqa: E402
 
 
 def assign(value):
@@ -46,6 +48,21 @@ def passing_request():
             "kind": "call", "function_handle": "clamp_score.function", "arguments": [ref()]}, number(60)),
          "then": [assign(number(1))]},
     ]}
+
+
+def historical_resume_dir():
+    return ROOT / "pi-integration/results/cycle19-empty-workspace/real-agent-01"
+
+
+def historical_rejected_proposal():
+    path = historical_resume_dir() / "mission-2-pi-session.jsonl"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if row.get("type") == "tool_execution_start" and row.get("toolName") == "workspace_preview_function":
+            args = dict(row["args"])
+            args.pop("toolCallId", None)
+            return args
+    raise AssertionError("original denied Pi proposal is missing from the preserved trace")
 
 
 class Cycle19EmptyWorkspaceTests(unittest.TestCase):
@@ -175,6 +192,93 @@ class Cycle19EmptyWorkspaceTests(unittest.TestCase):
         self.assertEqual(states["semantic_program"], "passed")
         self.assertEqual(states["host_validation"], "passed")
         self.assertEqual(states["program_commit"], "committed")
+
+    def resume_gateway(self):
+        return Cycle19Gateway(self.output, historical_resume_dir())
+
+    def test_original_committed_operation_reconstructs_and_matches_checkpoint(self):
+        old_checkpoint = json.loads((historical_resume_dir() / "checkpoint.json").read_text())
+        old_history = [json.loads(line) for line in (historical_resume_dir() / "history.jsonl").read_text().splitlines()]
+        old_commit = next(row for row in old_history if row.get("event") == "transaction_committed")
+        old_symbol = next(row["symbol_id"] for row in old_commit["created_entities"] if row["kind"] == "function")
+        g = self.resume_gateway()
+        self.assertEqual(g.ws.get_revision(g.doc), 2)
+        self.assertNotEqual(g.doc, old_checkpoint["document_id"])
+        self.assertNotEqual(g.aliases["clamp_score.function"], old_symbol)
+        self.assertEqual(g._normalized(), old_commit["semantic_snapshot"])
+        self.assertEqual(g._program_fingerprint(g._normalized()), old_checkpoint["semantic_fingerprint"])
+        observed = g._run_functions(2)
+        self.assertEqual(observed, old_checkpoint["workspace_facts"]["validated_results"])
+        self.assertEqual(observed["interp"], observed["jit"])
+        self.assertTrue(g.resume_verification["passed"])
+        mapping = json.loads((self.output / "reconstruction-verification.json").read_text())["identity_mapping"]
+        self.assertEqual(len(mapping), 6)
+        self.assertTrue(all(row["remapped"] for row in mapping))
+
+    def test_preserved_rejected_proposal_is_accepted_without_duplicate_callee_field(self):
+        g = self.resume_gateway()
+        proposal = historical_rejected_proposal()
+        self.assertNotIn("callee_handle", proposal)
+        self.assertEqual(proposal["body"][0]["condition"]["left"]["function_handle"], "clamp_score.function")
+        g.handle("discover_functions", {}, "discover-for-regression")
+        before = list(g.ws.documents[g.doc].tokens)
+        preview = g.handle("preview_create_function", proposal, "old-rejected-proposal-fixture")
+        self.assertTrue(preview["ok"])
+        self.assertTrue(preview["candidate_is_preview_only"])
+        self.assertEqual(preview["bound_callee_handle"], "clamp_score.function")
+        self.assertEqual(g.ws.get_revision(g.doc), 2)
+        self.assertEqual(g.ws.documents[g.doc].tokens, before)
+
+    def test_resume_requires_discovery_and_rejects_bad_signature_or_handle(self):
+        g = self.resume_gateway()
+        before = list(g.ws.documents[g.doc].tokens)
+        undiscovered = g.handle("preview_create_function", {"expected_revision": 2,
+            **passing_request()}, "no-discovery")
+        self.assertEqual(undiscovered["code"], "FUNCTION_NOT_DISCOVERED")
+        g.handle("discover_functions", {}, "discover")
+        bad_handle = passing_request()
+        bad_handle["body"][1]["condition"]["left"]["function_handle"] = "other.function"
+        denied = g.handle("preview_create_function", {"expected_revision": 2, **bad_handle}, "unauthorized-handle")
+        self.assertFalse(denied["ok"])
+        self.assertIn(denied["code"], {"MISSION_DEPENDENCY_FORBIDDEN", "MISSION_DEPENDENCY_REQUIRED"})
+        wrong_arity = passing_request()
+        wrong_arity["body"][1]["condition"]["left"]["arguments"] = [ref(), number(4)]
+        mismatch = g.handle("preview_create_function", {"expected_revision": 2, **wrong_arity}, "wrong-signature")
+        self.assertEqual(mismatch["code"], "FUNCTION_SIGNATURE_MISMATCH")
+        stale = g.handle("preview_create_function", {"expected_revision": 1, **passing_request()}, "stale-resume")
+        self.assertEqual(stale["code"], "STALE_REVISION")
+        self.assertEqual(g.ws.get_revision(g.doc), 2)
+        self.assertEqual(g.ws.documents[g.doc].tokens, before)
+
+    def test_full_two_function_replay_and_visual_provenance(self):
+        g = self.resume_gateway()
+        g.handle("discover_functions", {}, "discover")
+        preview = g.handle("preview_create_function", {"expected_revision": 2, **passing_request()}, "preview")
+        self.assertTrue(preview["ok"])
+        self.assertEqual(g.ws.get_revision(g.doc), 2)
+        commit = g.handle("commit_preview", {"transaction_id": preview["transaction_id"]}, "commit")
+        self.assertTrue(commit["committed"])
+        self.assertEqual(commit["revision"], 3)
+        result = g.handle("host_validate", {"expected_revision": 3}, "host-validate")
+        self.assertTrue(result["mission_complete"])
+        self.assertTrue(result["engines_agree"])
+        self.assertTrue(result["replay"]["passed"])
+        self.assertEqual(len(result["replay"]["identity_mapping"]), 11)
+        self.assertTrue(all(row["remapped"] for row in result["replay"]["identity_mapping"]))
+        stream = json.loads((self.output / "constructive-operations.json").read_text())
+        self.assertEqual(len(stream["operations"]), 2)
+        self.assertEqual(stream["operations"][0]["arguments"],
+                         json.loads((historical_resume_dir() / "mission-1-constructive-operations-partial.json").read_text())["operations"][0]["arguments"])
+        self.assertEqual(stream["operations"][1]["callee_handle"], "clamp_score.function")
+        events = [json.loads(line) for line in (self.output / "visual-events.jsonl").read_text().splitlines()]
+        for event in events:
+            validate_presentation_event(event)
+        replay_idx = next(i for i, e in enumerate(events) if e.get("event_type") == "reconstruction")
+        new_discovery_idx = max(i for i, e in enumerate(events) if e.get("event_type") == "selection")
+        new_commit = [e for e in events if e.get("event_type") == "commit" and e.get("revision") == 3]
+        self.assertEqual(len(new_commit), 1)
+        self.assertGreater(new_discovery_idx, replay_idx)
+        self.assertIn("host deterministic replay", events[replay_idx]["provenance"].lower())
 
 
 if __name__ == "__main__":
