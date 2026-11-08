@@ -63,7 +63,7 @@ Age 17 returned adult=0, age 18 returned adult=1, and unknown IDs remained 0 in 
 
 Arm B's nine draft operations were: parameter reference; bound call; literals 18, 1 and 0; `>=` expression; IF with then/else blocks; one result assignment in each branch. Each operation had a distinct operation ID and handle and advanced the draft revision. The final candidate alone went through the atomic mission preview/commit. `draft-operation-history.json` records the draft activity; `constructive-operations.json` contains only the committed constructor operation required for replay.
 
-The draft tests verify unknown draft/handle, wrong type, invalid parent and operation order, duplicate IDs, stale draft and Workspace revisions, partial-batch rollback, scope denial, commit without an accepted preview, post-commit mutation and external Workspace commit invalidation. Rejected or uncommitted draft changes do not mutate canonical state. Full Workspace suite: 152 tests passed.
+The draft tests verify unknown draft/handle, wrong type, invalid parent and operation order, duplicate IDs, stale draft and Workspace revisions, partial-batch rollback, scope denial, commit without an accepted preview, post-commit mutation and external Workspace commit invalidation. Rejected or uncommitted draft changes do not mutate canonical state. **Erratum (Cycle 18 audit):** the operator summary recorded 153 tests; rerunning `python3 -m unittest discover -s tests` before Cycle 18 additions confirms 153, so the previous 152 count was a reporting error. The exact cause of the one-test discrepancy was not established.
 
 ## Visualization and provenance
 

@@ -11,7 +11,7 @@ from typing import Any
 
 OPERATORS = {"+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="}
 HANDLE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,47}$")
-MAX_BATCH = 16
+MAX_BATCH = 32
 MAX_OPS = 128
 
 
@@ -41,6 +41,7 @@ class Draft:
     name: str
     parameters: list[str]
     callee_handle: str
+    callee_arity: int = 1
     revision: int = 0
     nodes: dict[str, dict[str, Any]] = field(default_factory=dict)
     blocks: dict[str, list[str]] = field(default_factory=lambda: {"root": []})
@@ -66,7 +67,7 @@ class DraftProtocol:
     def begin(self, *, mission_id: str, base_revision: int, name: str,
               parameters: list[str], callee_handle: str,
               allowed_name: str, allowed_parameters: list[str],
-              allowed_callee_handle: str) -> dict[str, Any]:
+              allowed_callee_handle: str, allowed_callee_arity: int = 1) -> dict[str, Any]:
         if not isinstance(base_revision, int) or base_revision < 0:
             raise DraftError("INVALID_BASE_REVISION", "base_revision must be a non-negative integer")
         if not isinstance(name, str) or name != allowed_name:
@@ -76,8 +77,11 @@ class DraftProtocol:
         if callee_handle != allowed_callee_handle:
             raise DraftError("UNKNOWN_PORTABLE_FUNCTION", "The draft must call the permitted discovered function handle",
                              path="callee_handle", expected=allowed_callee_handle, received=callee_handle)
+        if not isinstance(allowed_callee_arity,int) or allowed_callee_arity<0 or allowed_callee_arity>8:
+            raise DraftError("INVALID_ALLOWED_SIGNATURE","Gateway supplied an invalid permitted callee arity")
         draft_id = "draft_" + uuid.uuid4().hex
-        draft = Draft(draft_id, mission_id, base_revision, name, list(parameters), callee_handle)
+        draft = Draft(draft_id, mission_id, base_revision, name, list(parameters), callee_handle,
+                      callee_arity=allowed_callee_arity)
         self.drafts[draft_id] = draft
         return {"ok": True, "draft_id": draft_id, "draft_revision": 0,
                 "base_revision": base_revision, "mission_id": mission_id,
@@ -151,10 +155,10 @@ class DraftProtocol:
             target, args = operation["function_handle"], operation["arguments"]
             if target != draft.callee_handle:
                 raise DraftError("UNKNOWN_PORTABLE_FUNCTION", "Call target must be the discovered function handle", op_id=op_id, path="function_handle", expected=draft.callee_handle, received=target)
-            if not isinstance(args, list) or len(args) != 1:
-                raise DraftError("ARITY_MISMATCH", "AGE_BY_ID takes exactly one argument", op_id=op_id, path="arguments", expected=1, received=len(args) if isinstance(args, list) else type(args).__name__)
-            arg = self._expr(draft, args[0], op_id, "arguments[0]")
-            draft.nodes[handle] = {"node_type": "numeric", "kind": "call", "function_handle": target, "arguments": [arg]}
+            if not isinstance(args, list) or len(args) != draft.callee_arity:
+                raise DraftError("ARITY_MISMATCH", "Call argument count does not match the discovered signature", op_id=op_id, path="arguments", expected=draft.callee_arity, received=len(args) if isinstance(args, list) else type(args).__name__)
+            resolved_args=[self._expr(draft,arg,op_id,f"arguments[{i}]") for i,arg in enumerate(args)]
+            draft.nodes[handle] = {"node_type": "numeric", "kind": "call", "function_handle": target, "arguments": resolved_args}
             result["created_handle"] = handle
         elif kind == "define_binary_expression":
             handle = self._handle(draft, operation["handle"], op_id, "handle")
@@ -212,9 +216,18 @@ class DraftProtocol:
         for index, operation in enumerate(operations):
             try:
                 result=self._apply_one(staged, operation); results.append(result); staged.revision+=1
+                reference_fields={"define_function_call":["arguments"],"define_unary_expression":["operand"],
+                    "define_binary_expression":["left","right"],"append_result_assignment":["expression"],
+                    "append_if_block":["condition"]}.get(operation.get("kind"),[])
+                references=[]
+                for field_name in reference_fields:
+                    field_value=operation.get(field_name)
+                    values=field_value if isinstance(field_value,list) else [field_value]
+                    references.extend(value for value in values if isinstance(value,str) and value in staged.nodes)
                 progress.append({"draft_revision":staged.revision,"operation_id":result["op_id"],
                     "operation_kind":result["kind"],
                     "created_handles":[result[k] for k in ("created_handle","then_block","else_block") if k in result],
+                    "reused_expression_handles":sorted(set(references)),
                     "request":self.request_from_draft(staged,allow_empty=True)})
             except DraftError as exc:
                 exc.path = f"operations[{index}]" + (f".{exc.path}" if exc.path else "")

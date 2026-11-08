@@ -135,13 +135,17 @@ class SeniorMissionGateway:
     def __init__(self, workspace: Workspace, document_id: str, aliases: dict[str, str],
                  base_snapshot: dict[str, Any], mission: dict[str, Any], trace: Any,
                  phase: str = "agent", function_name: str = "IS_SENIOR",
-                 function_handle: str = "is_senior.function"):
+                 function_handle: str = "is_senior.function",
+                 required_callee_handle: str = "age_by_id.function",
+                 discoverable_function_handles: set[str] | None = None):
         self.workspace, self.document_id = workspace, document_id
         self.aliases = dict(aliases)
         self.base_aliases = dict(aliases)
         self.base_snapshot = copy.deepcopy(base_snapshot)
         self.mission, self.trace, self.phase = mission, trace, phase
         self.function_name, self.function_handle = function_name, function_handle
+        self.required_callee_handle = required_callee_handle
+        self.discoverable_function_handles = set(discoverable_function_handles or {"age_by_id.function"})
         self.parameter_handle = f"{function_handle.rsplit('.', 1)[0]}.parameter.id"
         self.mission_id = mission.get("mission_id", MISSION_ID)
         self.discovered_handles: set[str] = set()
@@ -155,8 +159,9 @@ class SeniorMissionGateway:
         funcs = [x for x in symbols if x["kind"] == "function" and x["scope_id"] == "module"]
         result = []
         for function in funcs:
-            handle = "age_by_id.function" if function["name"].casefold() == "age_by_id" else None
-            if handle is None or self.aliases.get(handle) != function["symbol_id"]:
+            handle = next((h for h in self.discoverable_function_handles
+                           if self.aliases.get(h) == function["symbol_id"]), None)
+            if handle is None:
                 continue
             self.discovered_handles.add(handle)
             row = next(f for f in self.workspace.documents[self.document_id].functions
@@ -172,16 +177,25 @@ class SeniorMissionGateway:
         raw = projection_semantics(build_projection(self.workspace, self.document_id, revision))
         return {"revision": revision, "structure": normalized_state(raw, self.aliases)}
 
+    def _function_signature(self, handle: str) -> tuple[int, str]:
+        symbol_id=self.aliases.get(handle)
+        matches=[f for f in self.workspace.documents[self.document_id].functions
+                 if f["symbol_id"]==symbol_id]
+        if len(matches)!=1:
+            raise WorkspaceError("UNKNOWN_PORTABLE_FUNCTION", f"Portable function handle {handle!r} does not resolve uniquely")
+        fn=matches[0]
+        return len(fn["parameters"]), "numeric"
+
     def _preflight(self, request: dict[str, Any], expected_revision: int,
                    callee_handle: str) -> tuple[dict[str, Any], str]:
         if self.committed:
             raise WorkspaceError("MISSION_EDIT_LIMIT", "This mission permits one new function")
         if expected_revision != self.workspace.get_revision(self.document_id):
             raise WorkspaceError("STALE_REVISION", "Construction is based on a stale revision")
-        if self.discovered_handles != {"age_by_id.function"}:
-            raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover AGE_BY_ID before constructing a caller")
-        if callee_handle != "age_by_id.function" or callee_handle not in self.discovered_handles:
-            raise WorkspaceError("UNKNOWN_PORTABLE_FUNCTION", "Select the discovered AGE_BY_ID function handle")
+        if self.required_callee_handle not in self.discovered_handles:
+            raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover the permitted callee before constructing a caller")
+        if callee_handle != self.required_callee_handle or callee_handle not in self.discovered_handles:
+            raise WorkspaceError("UNKNOWN_PORTABLE_FUNCTION", "Call target is not the discovered function authorized by this mission")
         if not isinstance(request, dict) or set(request) != {"name", "parameters", "body"}:
             raise WorkspaceError("MISSION_OPERATION_FORBIDDEN", f"Mission permits one typed {self.function_name} constructor")
         if request["name"].casefold() != self.function_name.casefold() or request["parameters"] != ["ID"]:
@@ -208,10 +222,18 @@ class SeniorMissionGateway:
             elif kind == "call":
                 if set(expr) != {"kind", "function_handle", "arguments"}:
                     raise WorkspaceError("MISSION_CALL", "Calls require a portable function handle")
-                if expr["function_handle"] != "age_by_id.function" or "age_by_id.function" not in self.discovered_handles:
-                    raise WorkspaceError("UNKNOWN_PORTABLE_FUNCTION", "Only the discovered AGE_BY_ID handle is permitted")
-                if not isinstance(expr["arguments"], list) or len(expr["arguments"]) != 1:
-                    raise WorkspaceError("MISSION_CALL_ARITY", "AGE_BY_ID requires one argument")
+                target=expr["function_handle"]
+                if target not in self.aliases:
+                    raise WorkspaceError("UNKNOWN_PORTABLE_FUNCTION", f"Unknown portable function handle {target!r}")
+                arity, return_type=self._function_signature(target)
+                if target not in self.discovered_handles:
+                    raise WorkspaceError("FUNCTION_NOT_DISCOVERED", f"Discover {target!r} before calling it")
+                if target != self.required_callee_handle:
+                    raise WorkspaceError("MISSION_DEPENDENCY_FORBIDDEN", f"Mission permits calls to {self.required_callee_handle!r}")
+                if return_type!="numeric":
+                    raise WorkspaceError("MISSION_CALL_TYPE", "Only numeric-returning functions can be called by this mission")
+                if not isinstance(expr["arguments"], list) or len(expr["arguments"]) != arity:
+                    raise WorkspaceError("MISSION_CALL_ARITY", f"Call requires {arity} argument(s), matching its discovered signature")
                 for child in expr["arguments"]: check_expr(child, depth + 1)
                 calls.append(expr)
             else:
@@ -235,10 +257,10 @@ class SeniorMissionGateway:
                     raise WorkspaceError("MISSION_BODY", "Only assignments and structured IF blocks are permitted")
         check_body(request["body"])
         if not calls:
-            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", f"{self.function_name} must call the discovered AGE_BY_ID")
+            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", f"{self.function_name} must call the discovered {self.required_callee_handle}")
         resolved_body = resolve_function_handles(request["body"], self.aliases, self.discovered_handles)
         return {"operation": "create_numeric_function", "name": request["name"],
-                "parameters": request["parameters"], "body": resolved_body}, "age_by_id.function"
+                "parameters": request["parameters"], "body": resolved_body}, self.required_callee_handle
 
     def _candidate(self, request: dict[str, Any], expected_revision: int,
                    callee_handle: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
@@ -258,9 +280,9 @@ class SeniorMissionGateway:
         if added["parameters"] != [self.parameter_handle] or added["arrays"] or added["locals"]:
             raise WorkspaceError("MISSION_SIGNATURE", f"Unexpected {self.function_name} parameters, locals or arrays")
         calls = [x for x in expression_references(added["statements"], "call")
-                 if x.get("value") == "age_by_id.function"]
+                 if x.get("value") == self.required_callee_handle]
         if not calls:
-            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", f"Typed {self.function_name} candidate does not bind a call to AGE_BY_ID")
+            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", f"Typed {self.function_name} candidate does not bind a call to {self.required_callee_handle}")
         return operation, normalized, candidate_aliases
 
     def reject_operation(self, operation: dict[str, Any], expected_revision: int) -> dict[str, Any]:
@@ -300,7 +322,7 @@ class SeniorMissionGateway:
         self.trace.emit("preview_accepted", phase=self.phase, actor="mission_gateway",
                         mission_id=self.mission_id, transaction_id=txid, base_revision=expected_revision,
                         resulting_revision=preview["expected_result_revision"],
-                        created_function=self.function_handle, calls="age_by_id.function",
+                        created_function=self.function_handle, calls=self.required_callee_handle,
                         proposed_diff=preview.get("diff", ""), candidate_semantic_snapshot=candidate,
                         validation=preview["diagnostics"],
                         operation_envelope={"state": "validated", "transaction_id": txid,
@@ -309,7 +331,7 @@ class SeniorMissionGateway:
                             "expected_result_revision": preview["expected_result_revision"]})
         return {"ok": True, "transaction_id": txid, "base_revision": expected_revision,
                 "expected_result_revision": preview["expected_result_revision"],
-                "new_function_handle": self.function_handle, "bound_callee_handle": "age_by_id.function",
+                "new_function_handle": self.function_handle, "bound_callee_handle": self.required_callee_handle,
                 "candidate_function_count": len(candidate["functions"]), "diagnostics": preview["diagnostics"],
                 "candidate_is_preview_only": True}
 
@@ -357,7 +379,7 @@ class SeniorMissionGateway:
                         bound_call="age_by_id.function")
         return {"ok": True, "committed": True, "revision": result["revision"],
                 "function_handle": self.function_handle, "function_id": actual_aliases[self.function_handle],
-                "callee_handle": "age_by_id.function"}
+                "callee_handle": self.required_callee_handle}
 
 
 def validation_envelope(*, requested_revision: int, workspace_revision: int,

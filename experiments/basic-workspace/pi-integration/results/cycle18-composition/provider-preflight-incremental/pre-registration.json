@@ -1,0 +1,63 @@
+{
+  "schema": "basic-workspace.semantic-composition-plan",
+  "version": 1,
+  "registered_before_model_inference": true,
+  "provider": "sushi",
+  "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+  "pi_version": "1.5.0",
+  "thinking_level": "low",
+  "max_wall_seconds_per_arm": 180,
+  "automatic_retries": 0,
+  "sampling_overrides": null,
+  "output_token_override": null,
+  "mission_kind": "category",
+  "workspace_seed": {
+    "revision": 4,
+    "functions": [
+      "AGE_BY_ID",
+      "IS_SENIOR"
+    ],
+    "ages": {
+      "101": 25,
+      "205": 55,
+      "900": 53
+    },
+    "age_205_updated_before_mission": true,
+    "independent_workspace_per_arm": true
+  },
+  "common_task": "Add AGE_CATEGORY(ID) to the existing program. It returns -1 when AGE_BY_ID(ID) is -1; 0 for ages 0 through 17; 1 for ages 18 through 49; and 2 for ages 50 through 130. Preserve AGE_BY_ID, IS_SENIOR and all existing data.",
+  "common_instructions": "Use only the semantic Workspace tools. Discover callable functions and inspect the current live program before editing. AGE_CATEGORY must depend on an actual semantic call to the discovered AGE_BY_ID function. Do not submit BASIC source text. Preview the complete candidate through the gateway, commit only an accepted preview, then request MIR interpreter/JIT validation. The gateway enforces the permitted edit and current revision. Report any rejection; do not bypass it.",
+  "arm_specific_instructions": {
+    "atomic": "Construct the complete numeric function with the whole-function constructor. Choose a supported implementation that meets every category and unknown-ID case; the task does not prescribe a statement sequence.",
+    "incremental": "Begin a revision-bound temporary draft and compose numeric expressions and result-assignment/IF statements using draft-local handles. Reuse a handle when an expression is needed in multiple statements. Inspect and preview the complete draft, commit only the authorized preview, then request MIR validation. Draft operations are temporary and do not commit BASIC individually. Choose a supported implementation that meets the full task; the task does not prescribe a statement sequence."
+  },
+  "success_criteria": [
+    "Genuine accepted preview and one authorized atomic commit",
+    "AGE_CATEGORY calls discovered AGE_BY_ID through a bound semantic function reference",
+    "AGE_BY_ID, IS_SENIOR, arrays and existing data remain unchanged",
+    "Independent expected classifications for IDs 101, 205, 900, 999 and 2",
+    "Both MIR engines match for isolated ages 0, 17, 18, 49, 50 and 130, and unknown IDs return -1",
+    "Fresh-workspace replay passes structural, binding and behavioral equivalence"
+  ],
+  "comparison_dimensions": [
+    "semantic_representation",
+    "model_interaction_granularity",
+    "workspace_commit_granularity"
+  ],
+  "arms": {
+    "atomic": {
+      "semantic_representation": "nested typed expression/statement tree",
+      "interaction_granularity": "one proposal tool call",
+      "commit_granularity": "one atomic Workspace transaction"
+    },
+    "incremental": {
+      "semantic_representation": "flat typed graph with draft-local references",
+      "interaction_granularity": "observed tool calls and operations per batch",
+      "commit_granularity": "one atomic Workspace transaction"
+    }
+  },
+  "outputs": {
+    "atomic": "arm-a-atomic",
+    "incremental": "arm-b-incremental"
+  }
+}

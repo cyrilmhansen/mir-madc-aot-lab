@@ -23,11 +23,19 @@ from basic_workspace.mir_execution import MirExecutionService
 from draft_protocol import DraftProtocol, DraftError
 
 class Cycle16Gateway:
-    def __init__(self, output: Path, authoring_mode: str = "atomic"):
+    def __init__(self, output: Path, authoring_mode: str = "atomic", mission_kind: str = "adult"):
         if authoring_mode not in {"atomic", "incremental"}: raise ValueError("unsupported authoring mode")
+        if mission_kind not in {"adult", "category"}: raise ValueError("unsupported mission kind")
         self.authoring_mode=authoring_mode
+        self.mission_kind=mission_kind
+        self.function_name="IS_ADULT" if mission_kind=="adult" else "AGE_CATEGORY"
+        self.function_handle="is_adult.function" if mission_kind=="adult" else "age_category.function"
+        self.required_callee_handle="age_by_id.function"
+        self.allowed_parameters=["ID"]
+        self.discoverable_functions={"age_by_id.function","is_senior.function"} if mission_kind=="category" else {"age_by_id.function"}
         self.output=output; output.mkdir(parents=True,exist_ok=True)
         self.pi_events=output/"pi-tool-lifecycle.jsonl"; self.visual_events=output/"visual-events.jsonl"
+        self.gateway_timings=output/"gateway-tool-timings.jsonl"
         self.trace=age.Trace(); self.ws=Workspace()
         self.doc,self.aliases,self.seed=age.create_seed(self.ws,self.trace,"cycle16-deterministic-seed")
         rev=self.ws.get_revision(self.doc)
@@ -49,18 +57,28 @@ class Cycle16Gateway:
             raise RuntimeError("could not construct the verified revision-4 age-55 seed")
         self.revision=self.ws.get_revision(self.doc)
         self.base=senior.normalized_state(projection_semantics(build_projection(self.ws,self.doc,self.revision)),self.aliases)
-        mission=campaign.make_adult_mission(); mission["mission_id"]=f"cycle17.pi.is-adult.{authoring_mode}.v1"
+        mission=campaign.make_adult_mission()
+        mission["mission_id"]=f"cycle18.pi.age-category.{authoring_mode}.v1" if mission_kind=="category" else f"cycle17.pi.is-adult.{authoring_mode}.v1"
+        if mission_kind=="category":
+            mission["objective"]="Add AGE_CATEGORY(ID): unknown ID -> -1; age 0..17 -> 0; 18..49 -> 1; 50..130 -> 2. Preserve AGE_BY_ID, IS_SENIOR and data."
+            mission["enforcement"]["allowed_function"]={"name":"AGE_CATEGORY","parameter_count":1,"parameter_type":"numeric"}
+            mission["functional_goal"]={"classes":{"unknown":-1,"0..17":0,"18..49":1,"50..130":2}}
         self.gateway=senior.SeniorMissionGateway(self.ws,self.doc,self.aliases,self.base,mission,self.trace,
-            f"cycle17-{authoring_mode}-agent",function_name="IS_ADULT",function_handle="is_adult.function")
+            f"cycle18-category-{authoring_mode}-agent" if mission_kind=="category" else f"cycle17-{authoring_mode}-agent",
+            function_name=self.function_name,function_handle=self.function_handle,
+            required_callee_handle=self.required_callee_handle,
+            discoverable_function_handles=self.discoverable_functions)
         self.pi_seen=set(); self.presentation_seq=0
-        self.session_id=f"pi-cycle17-{authoring_mode}"; self.mission_title=f"IS_ADULT · {authoring_mode} arm"
+        self.session_id=f"pi-cycle18-category-{authoring_mode}" if mission_kind=="category" else f"pi-cycle17-{authoring_mode}"
+        self.mission_title=f"AGE_CATEGORY · {authoring_mode} arm" if mission_kind=="category" else f"IS_ADULT · {authoring_mode} arm"
         self.draft_protocol=DraftProtocol(); self.draft_id=None; self.draft_transactions={}
         self.draft_log=output/"draft-operations.jsonl"
         self.lock=threading.RLock()
         code=self.ws.render_document(self.doc)
         self.initial={"revision":self.revision,"code":code,"dependencies":self.dependencies()}
         bundle={"schema":"basic-workspace.visual-source","version":1,
-            "campaign":{"id":f"cycle17-{authoring_mode}-is-adult","title":f"Cycle 17 · {authoring_mode.title()} semantic construction","filename":"ADDRESS_BOOK.bas"},
+            "campaign":{"id":f"cycle18-{authoring_mode}-age-category" if mission_kind=="category" else f"cycle17-{authoring_mode}-is-adult",
+                "title":f"Cycle 18 · {authoring_mode.title()} AGE_CATEGORY construction" if mission_kind=="category" else f"Cycle 17 · {authoring_mode.title()} semantic construction","filename":"ADDRESS_BOOK.bas"},
             "initial":self.initial,"snapshots":{str(self.revision):code}}
         (output/"visual-source.json").write_text(json.dumps(bundle,indent=2,ensure_ascii=False)+"\n")
         self.emit_visual({"event_id":"pi-seed-initial","frame_id":"pi-seed-initial","event_type":"initial",
@@ -80,17 +98,163 @@ class Cycle16Gateway:
             "functions":["AGE_BY_ID","IS_SENIOR"],"age_205":55,"pi_activity":False})
         self.dispatched={}; self.committed=False
 
+    def category_replay_stream(self, request: dict[str,Any]) -> dict[str,Any]:
+        return {"schema":"basic-workspace.constructive-metafile","version":1,
+            "execution_profile_id":campaign.PROFILE_ID,
+            "portable_handles":["age_by_id.function","is_senior.function","people.age.205",self.function_handle],
+            "operations":[
+                {"operation":"create_numeric_function","portable_handle":"age_by_id.function","arguments":self.seed["operation"]},
+                {"operation":"create_numeric_function","portable_handle":"is_senior.function","callee_handle":"age_by_id.function","arguments":self.seed_senior.committed_request},
+                {"operation":"edit_assignment_expression","target_handle":"people.age.205","expression":{"kind":"number","value":55.0}},
+                {"operation":"create_numeric_function","portable_handle":self.function_handle,"callee_handle":"age_by_id.function","arguments":request}]}
+
+    @staticmethod
+    def replay_category_stream(stream:dict[str,Any]):
+        if stream.get("schema")!="basic-workspace.constructive-metafile" or stream.get("version")!=1:
+            raise WorkspaceError("REPLAY_SCHEMA","Unknown constructive stream")
+        ws=Workspace(); doc,aliases,seed=age.create_seed(ws,age.Trace(),"cycle18-category-replay")
+        operations=stream.get("operations",[])
+        if len(operations)!=4 or operations[0].get("arguments")!=seed["operation"]:
+            raise WorkspaceError("REPLAY_OPERATION_SEQUENCE","AGE_CATEGORY replay seed differs")
+        if operations[0].get("portable_handle")!="age_by_id.function":
+            raise WorkspaceError("REPLAY_HANDLE_MISSING","AGE_BY_ID portable handle is missing")
+        for index,operation in enumerate(operations[1:],1):
+            revision=ws.get_revision(doc)
+            if operation["operation"]=="create_numeric_function":
+                callee=operation.get("callee_handle")
+                if callee!="age_by_id.function" or callee not in aliases:
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING",f"Cannot resolve call handle {callee!r}")
+                function_handle=operation.get("portable_handle")
+                function_name={"is_senior.function":"IS_SENIOR","age_category.function":"AGE_CATEGORY"}.get(function_handle)
+                if function_name is None: raise WorkspaceError("REPLAY_HANDLE_MISSING",f"Unknown function handle {function_handle!r}")
+                resolved=senior.resolve_function_handles(operation["arguments"],aliases,{callee})
+                applied=ws.apply_transaction(doc,revision,[{"operation":"create_numeric_function",**resolved}])
+                raw=projection_semantics(build_projection(ws,doc,applied["revision"]))
+                aliases=senior.aliases_for_new_function(raw,aliases,function_name,function_handle)
+            elif operation["operation"]=="edit_assignment_expression":
+                target=operation.get("target_handle")
+                if target!="people.age.205" or target not in aliases:
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING","Age assignment handle is unresolved")
+                ws.apply_transaction(doc,revision,[{"operation":"edit_assignment_expression",
+                    "statement_id":aliases[target],"expression":operation["expression"]}])
+            else: raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED","Unsupported category replay operation")
+        return ws,doc,aliases,senior.normalized_state(projection_semantics(build_projection(ws,doc,ws.get_revision(doc))),aliases)
+
+    @staticmethod
+    def category_observations(workspace,doc,revision,aliases,executor=None):
+        executor=executor or MirExecutionService(timeout=12)
+        ids=[101,205,900,999,2]
+        return {engine:{str(entity_id):{
+            "age":executor.execute_function(workspace,doc,revision,aliases["age_by_id.function"],[entity_id],engine)["result"],
+            "senior":executor.execute_function(workspace,doc,revision,aliases["is_senior.function"],[entity_id],engine)["result"],
+            "category":executor.execute_function(workspace,doc,revision,aliases["age_category.function"],[entity_id],engine)["result"]}
+            for entity_id in ids} for engine in ("interp","jit")}
+
+    def category_boundary_oracle(self,request:dict[str,Any]):
+        cases={}; executor=MirExecutionService(timeout=12)
+        for boundary_age in (0,17,18,49,50,130):
+            ws=Workspace(); doc,aliases,seed=age.create_seed(ws,age.Trace(),f"age-category-boundary-{boundary_age}")
+            revision=seed["revision"]
+            senior_op={"operation":"create_numeric_function",**senior.resolve_function_handles(
+                self.seed_senior.committed_request,aliases,{"age_by_id.function"})}
+            added=ws.apply_transaction(doc,revision,[senior_op]); revision=added["revision"]
+            raw=projection_semantics(build_projection(ws,doc,revision))
+            aliases=senior.aliases_for_new_function(raw,aliases,"IS_SENIOR","is_senior.function")
+            edited=ws.apply_transaction(doc,revision,[{"operation":"edit_assignment_expression",
+                "statement_id":aliases["people.age.205"],"expression":{"kind":"number","value":float(boundary_age)}}])
+            revision=edited["revision"]
+            category_op={"operation":"create_numeric_function",**senior.resolve_function_handles(
+                request,aliases,{"age_by_id.function"})}
+            added=ws.apply_transaction(doc,revision,[category_op]); revision=added["revision"]
+            raw=projection_semantics(build_projection(ws,doc,revision))
+            aliases=senior.aliases_for_new_function(raw,aliases,"AGE_CATEGORY","age_category.function")
+            observed={engine:{
+                "age":executor.execute_function(ws,doc,revision,aliases["age_by_id.function"],[205],engine)["result"],
+                "category":executor.execute_function(ws,doc,revision,aliases["age_category.function"],[205],engine)["result"],
+                "unknown":executor.execute_function(ws,doc,revision,aliases["age_category.function"],[999],engine)["result"]}
+                for engine in ("interp","jit")}
+            expected={"age":float(boundary_age),"category":0.0 if boundary_age<18 else 1.0 if boundary_age<50 else 2.0,"unknown":-1.0}
+            cases[str(boundary_age)]={"observed":observed,"expected":expected,
+                "matches":all(value==expected for value in observed.values()),"engines_agree":observed["interp"]==observed["jit"]}
+        passed=all(row["matches"] and row["engines_agree"] for row in cases.values())
+        return {"cases":cases,"passed":passed,"isolated_workspaces":True}
+
+    def validate_category(self,requested_revision:int):
+        revision=self.ws.get_revision(self.doc)
+        if requested_revision!=revision:
+            return {"reliable":False,"code":"STALE_VALIDATION_REVISION","mission_complete":False,
+                "requested_revision":requested_revision,"workspace_revision":revision,"executed_revision":None}
+        if not self.gateway.committed:
+            return {"reliable":True,"phase":"pre-create","mission_complete":False,"revision":revision,
+                "diagnostics":["AGE_CATEGORY not committed"]}
+        try:
+            observed=self.category_observations(self.ws,self.doc,revision,self.gateway.aliases)
+            normalized=senior.normalized_state(projection_semantics(build_projection(self.ws,self.doc,revision)),self.gateway.aliases)
+        except (WorkspaceError,KeyError) as exc:
+            return {"reliable":False,"code":getattr(exc,"code","PROJECTION_INVALID"),"message":str(exc),
+                "mission_complete":False,"executed_revision":revision}
+        expected={"101":{"age":25.0,"senior":0.0,"category":1.0},
+            "205":{"age":55.0,"senior":1.0,"category":2.0},
+            "900":{"age":53.0,"senior":1.0,"category":2.0},
+            "999":{"age":-1.0,"senior":0.0,"category":-1.0},
+            "2":{"age":-1.0,"senior":0.0,"category":-1.0}}
+        engines_agree=observed["interp"]==observed["jit"]
+        values_match=all(observed[engine]==expected for engine in observed)
+        edges=senior.candidate_call_edges(normalized)
+        dependency={"caller":self.function_handle,"callee":self.required_callee_handle} in edges
+        base_unchanged=all(senior.find_function(normalized,row["handle"])==row
+            for row in self.gateway.base_snapshot["functions"])
+        complete=bool(values_match and engines_agree and dependency and base_unchanged)
+        result={"schema":"basic-workspace.age-category-validation","version":1,"reliable":True,
+            "phase":"post-create","revision":revision,"requested_revision":requested_revision,
+            "workspace_revision":revision,"executed_revision":revision,"observed_results":observed,
+            "expected_results":expected,"expectation_source":"independent host-owned mission oracle",
+            "engines_agree":engines_agree,"values_match":values_match,
+            "existing_functions_unchanged":base_unchanged,"age_by_id_call_bound":dependency,
+            "mission_complete":complete,"diagnostics":[] if complete else ["Category oracle or invariant check failed"]}
+        boundary=self.category_boundary_oracle(self.gateway.committed_request) if complete else {"passed":False,"reason":"mission oracle failed"}
+        stream=self.category_replay_stream(self.gateway.committed_request)
+        replay={"passed":False,"reason":"not_run"}
+        if complete:
+            replay_ws,replay_doc,replay_aliases,replay_state=self.replay_category_stream(stream)
+            replay_revision=replay_ws.get_revision(replay_doc)
+            replay_observed=self.category_observations(replay_ws,replay_doc,replay_revision,replay_aliases)
+            replay_normalized=senior.normalized_state(projection_semantics(build_projection(replay_ws,replay_doc,replay_revision)),replay_aliases)
+            remapped=sum(self.gateway.aliases.get(handle)!=replay_aliases.get(handle) for handle in self.gateway.aliases)
+            replay={"structural_equivalence":normalized==replay_state==replay_normalized,
+                "behavioral_equivalence":observed==replay_observed,
+                "interpreter_jit_agreement":replay_observed["interp"]==replay_observed["jit"],
+                "identity_remappings":remapped,
+                "passed":normalized==replay_state==replay_normalized and observed==replay_observed and replay_observed["interp"]==replay_observed["jit"] and boundary.get("passed")}
+            (self.output/"constructive-operations.json").write_text(json.dumps(stream,indent=2)+"\n")
+            (self.output/"equivalence.json").write_text(json.dumps({"mission":result,"boundary":boundary,"replay":replay},indent=2)+"\n")
+        result["boundary_oracle"]=boundary; result["replay"]=replay
+        return result
+
     @staticmethod
     def append_log(path: Path,row: dict[str,Any]):
         with path.open("a",encoding="utf-8") as f:f.write(json.dumps(row,ensure_ascii=False,separators=(",",":"))+"\n")
 
     def flush_trace(self): self.trace.write(self.output/"history.jsonl")
 
+    def record_gateway_timing(self,request:dict[str,Any],elapsed_ms:float):
+        params=request.get("params") or {}; method=request.get("method")
+        tool_methods={"discover_functions","inspect_program","preview_create_function","commit_preview",
+            "validate_mission","begin_function_draft","apply_draft_operations","inspect_function_draft","preview_function_draft"}
+        self.append_log(self.gateway_timings,{"request_id":request.get("request_id"),
+            "tool_call_id":params.get("toolCallId"),"method":method,"elapsed_ms":round(elapsed_ms,3),
+            "operation_count":len(params.get("operations",[])) if isinstance(params.get("operations"),list) else None,
+            "agent_tool":method in tool_methods})
+
     def emit_visual(self,event:dict[str,Any]):
         self.presentation_seq+=1; event["presentation_sequence"]=self.presentation_seq
         self.append_log(self.visual_events,event)
 
     def doc_functions(self): return self.ws.documents[self.doc].functions
+    def function_name_for_handle(self,handle:str)->str:
+        symbol_id=self.aliases.get(handle)
+        if symbol_id is None or symbol_id not in self.ws.documents[self.doc].symbols:return handle
+        return self.ws.documents[self.doc].symbols[symbol_id].name
     def function_span(self,symbol_id:str):
         rows=[f for f in self.doc_functions() if f["symbol_id"]==symbol_id]
         if len(rows)!=1:return {"mapping":"unknown","spans":{}}
@@ -113,20 +277,21 @@ class Cycle16Gateway:
             out.append({"caller":names.get(edge["caller"],edge["caller"]),"callee":names.get(edge["callee"],edge["callee"])})
         return out
 
-    @staticmethod
-    def render_draft_lines(request: dict[str, Any]) -> list[str]:
+    def render_draft_lines(self, request: dict[str, Any]) -> list[str]:
+        function_names={symbol: self.ws.documents[self.doc].symbols[symbol].name
+            for handle,symbol in self.aliases.items() if handle.endswith(".function") and symbol in self.ws.documents[self.doc].symbols}
         def expr(row):
             kind=row["kind"]
             if kind=="number": return str(int(row["value"])) if float(row["value"]).is_integer() else str(row["value"])
             if kind=="local_ref": return row["name"]
-            if kind=="call": return "AGE_BY_ID("+", ".join(expr(x) for x in row["arguments"])+")"
+            if kind=="call": return function_names.get(self.aliases.get(row["function_handle"]),row["function_handle"])+"("+", ".join(expr(x) for x in row["arguments"])+")"
             if kind=="unary": return row["operator"]+expr(row["operand"])
             if kind=="binary": return f"({expr(row['left'])} {row['operator']} {expr(row['right'])})"
             raise ValueError("unsupported draft expression in display projection")
         def block(rows, indent=2):
             lines=[]; prefix=" "*indent
             for row in rows:
-                if row["kind"]=="assign": lines.append(f"{prefix}IS_ADULT = {expr(row['expression'])}")
+                if row["kind"]=="assign": lines.append(f"{prefix}{request['name']} = {expr(row['expression'])}")
                 else:
                     lines.append(f"{prefix}IF {expr(row['condition'])} THEN")
                     lines.extend(block(row.get("then",[]),indent+2))
@@ -192,8 +357,9 @@ class Cycle16Gateway:
             elif kind=="call":
                 if set(node)!={"kind","function_handle","arguments"}:
                     return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"call","required":["kind","function_handle","arguments"]},kind)
-                if not isinstance(node.get("function_handle"),str) or not isinstance(node.get("arguments"),list) or len(node["arguments"])!=1:
-                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"call","one_argument":True},kind)
+                if (not isinstance(node.get("function_handle"),str) or not isinstance(node.get("arguments"),list)
+                        or not 1<=len(node["arguments"])<=8):
+                    return issue("INVALID_TYPED_EXPRESSION",path,{"kind":"call","argument_count":"1..8"},kind)
                 return expr(node["arguments"][0],path+".arguments[0]",depth+1)
             else:return issue("INVALID_TYPED_EXPRESSION",path,{"kind":["number","local_ref","binary","call"]},kind)
             return None
@@ -282,23 +448,28 @@ class Cycle16Gateway:
                 "dependencies":self.dependencies()}
         if method=="begin_function_draft":
             try:
-                if not self.gateway.discovered_handles or "age_by_id.function" not in self.gateway.discovered_handles:
+                if self.required_callee_handle not in self.gateway.discovered_handles:
                     raise DraftError("FUNCTION_NOT_DISCOVERED","Discover callable functions before beginning a draft")
                 expected=p.get("expected_revision")
                 if expected!=self.ws.get_revision(self.doc):
                     raise DraftError("STALE_WORKSPACE_REVISION","Draft base revision must match the live Workspace",
                         path="expected_revision",expected=self.ws.get_revision(self.doc),received=expected)
+                discovered=[row for row in self.gateway.discover_functions().get("functions",[]) if row["handle"]==p.get("callee_handle")]
+                if len(discovered)!=1:
+                    raise DraftError("FUNCTION_NOT_DISCOVERED","Draft call target must be discovered and permitted by this mission",
+                        path="callee_handle",expected=sorted(self.discoverable_functions),received=p.get("callee_handle"))
+                signature=discovered[0]
                 result=self.draft_protocol.begin(mission_id=self.gateway.mission_id,base_revision=expected,
                     name=p.get("name"),parameters=p.get("parameters"),callee_handle=p.get("callee_handle"),
-                    allowed_name=self.gateway.function_name,allowed_parameters=["ID"],
-                    allowed_callee_handle="age_by_id.function")
+                    allowed_name=self.function_name,allowed_parameters=self.allowed_parameters,
+                    allowed_callee_handle=self.required_callee_handle,allowed_callee_arity=signature["parameter_count"])
                 self.draft_id=result["draft_id"]
                 self.record_draft_event("draft_started",draft_id=self.draft_id,row={"draft_revision":0,"base_revision":expected})
                 self.emit_visual({"event_id":f"draft-start-{self.draft_id}","frame_id":f"draft-start-{self.draft_id}",
                     "event_type":"selection","revision":self.revision,"session_id":self.session_id,
                     "mission_id":self.mission_title,"provenance":"Genuine Pi draft operation · no Workspace mutation",
-                    "title":"Incremental function draft started","description":"A temporary draft is open. The authoritative BASIC remains at revision 4.",
-                    "focus":{"handles":["age_by_id.function"],"mapping":"verified_function_boundary"},
+                    "title":f"Incremental {self.function_name} draft started","description":f"A temporary draft is open. The authoritative BASIC remains at revision {self.revision}.",
+                    "focus":{"handles":[self.required_callee_handle],"mapping":"verified_function_boundary"},
                     "outcome":{"draft_id":self.draft_id,"draft_revision":0,"committed":False}})
                 return result
             except DraftError as error:return self.draft_diagnostic(error)
@@ -332,7 +503,8 @@ class Cycle16Gateway:
                     "description":f"Applied draft operation {step['operation_id']} at draft revision {step['draft_revision']}; these steps arrived together in one Pi tool call. Committed Workspace remains revision {before}.",
                     "focus":{"handles":["draft."+h for h in step["created_handles"]],"mapping":"unknown"},
                     "preview":{"status":"draft","function":request["name"],"append_lines":lines,
-                        "bound_callee":"AGE_BY_ID","draft_revision":step["draft_revision"],
+                        "bound_callee":self.function_name_for_handle(self.required_callee_handle),"draft_revision":step["draft_revision"],
+                        "reused_expression_handles":step["reused_expression_handles"],
                         "operation_id":step["operation_id"],"operation_kind":step["operation_kind"]},
                     "outcome":{"committed":False,"draft_revision":step["draft_revision"],"workspace_revision":before}})
             return result
@@ -366,10 +538,10 @@ class Cycle16Gateway:
                     self.emit_visual({"event_id":f"draft-preview-{result['transaction_id']}","frame_id":f"draft-preview-{result['transaction_id']}",
                         "event_type":"preview","revision":d.base_revision,"session_id":self.session_id,
                         "mission_id":self.mission_title,"provenance":"MissionGateway accepted complete draft candidate",
-                        "title":"Complete candidate preview accepted","description":"Full draft passed the existing MissionGateway; committed Workspace remains unchanged until commit.",
-                        "focus":{"handles":["age_by_id.function"],"mapping":"verified_function_boundary"},
+                        "title":f"Complete {self.function_name} candidate preview accepted","description":"Full draft passed the existing MissionGateway; committed Workspace remains unchanged until commit.",
+                        "focus":{"handles":[self.required_callee_handle],"mapping":"verified_function_boundary"},
                         "preview":{"status":"accepted","function":request["name"],"append_lines":lines,
-                            "bound_callee":"AGE_BY_ID","draft_revision":d.revision},
+                            "bound_callee":self.function_name_for_handle(d.callee_handle),"draft_revision":d.revision},
                         "outcome":{"authorized":True,"committed":False,"transaction_id":result["transaction_id"]}})
                 else:
                     self.record_draft_event("candidate_preview_rejected",draft_id=draft_id,row={
@@ -406,9 +578,9 @@ class Cycle16Gateway:
                 self.emit_visual({"event_id":f"pi-preview-{rid}","frame_id":f"pi-preview-{rid}","event_type":"preview",
                     "revision":self.revision,"session_id":self.session_id,"mission_id":self.mission_title,
                     "provenance":"Pi typed proposal · MissionGateway accepted preview","source_event_ref":rid,
-                    "title":"IS_ADULT proposal preview","description":"Candidate passed authorization; committed revision 4 remains unchanged until commit.",
-                    "focus":{"handles":["is_adult.function"],"mapping":"verified_function_boundary"},
-                    "preview":{"status":"accepted","append_lines":added,"bound_callee":"AGE_BY_ID"},
+                    "title":f"{self.function_name} proposal preview","description":f"Candidate passed authorization; committed revision {self.revision} remains unchanged until commit.",
+                    "focus":{"handles":[self.function_handle],"mapping":"verified_function_boundary"},
+                    "preview":{"status":"accepted","append_lines":added,"bound_callee":self.function_name_for_handle(self.required_callee_handle)},
                     "outcome":{"authorized":True,"committed":False}})
             else:
                 self.emit_visual({"event_id":f"pi-rejection-{rid}","frame_id":f"pi-rejection-{rid}","event_type":"rejection",
@@ -444,16 +616,16 @@ class Cycle16Gateway:
                         "operations":d.history,"constructive_metafile_is_separate":True},indent=2)+"\n")
                     self.record_draft_event("draft_committed",draft_id=draft_id,row={"draft_revision":d.revision,
                         "transaction_id":txid,"committed_revision":self.revision})
-                self.aliases=self.gateway.aliases; span=self.function_span(self.aliases["is_adult.function"])
-                scope=next(f for f in self.doc_functions() if f["symbol_id"]==self.aliases["is_adult.function"])
-                span["spans"]["call_lines"]=self.call_lines(self.aliases["age_by_id.function"],scope)
+                self.aliases=self.gateway.aliases; span=self.function_span(self.aliases[self.function_handle])
+                scope=next(f for f in self.doc_functions() if f["symbol_id"]==self.aliases[self.function_handle])
+                span["spans"]["call_lines"]=self.call_lines(self.aliases[self.required_callee_handle],scope)
                 self.emit_visual({"event_id":f"pi-commit-{p.get('transaction_id')}","frame_id":f"pi-commit-{p.get('transaction_id')}","event_type":"commit",
                     "revision":self.revision,"snapshot":source,"session_id":self.session_id,"mission_id":self.mission_title,
                     "provenance":"Workspace atomic commit · correlated with Pi tool call","source_event_ref":self.dispatched.get(p.get("transaction_id"),rid),
-                    "title":"IS_ADULT committed","description":"New function committed at revision 5 with a bound call to AGE_BY_ID.",
+                    "title":f"{self.function_name} committed","description":f"New function committed at revision {self.revision} with a bound call to {self.function_name_for_handle(self.required_callee_handle)}.",
                     "mission_status":f"Agent commit revision {self.revision} · host validation pending",
-                    "focus":{"handles":["is_adult.function","age_by_id.function"],**span},"dependencies":self.dependencies(),
-                    "outcome":{"committed":True,"transaction_id":p.get("transaction_id"),"bound_callee":"AGE_BY_ID"}})
+                    "focus":{"handles":[self.function_handle,self.required_callee_handle],**span},"dependencies":self.dependencies(),
+                    "outcome":{"committed":True,"transaction_id":p.get("transaction_id"),"bound_callee":self.function_name_for_handle(self.required_callee_handle)}})
             else:
                 self.emit_visual({"event_id":f"pi-commit-reject-{rid}","frame_id":f"pi-commit-reject-{rid}","event_type":"rejection",
                     "revision":self.ws.get_revision(self.doc),"provenance":"Workspace/MissionGateway commit rejection",
@@ -463,24 +635,29 @@ class Cycle16Gateway:
         if method=="validate_mission":
             agent_requested=bool(p.get("toolCallId"))
             requested=p.get("expected_revision")
-            result=campaign.adult_validator(self.ws,self.doc,self.gateway,requested)
-            replay={"passed":False,"reason":"not_run"}; boundary={"passed":False,"reason":"not_run"}
-            if result.get("mission_complete"):
-                boundary=campaign.boundary_oracle({},self.seed_senior.committed_request,self.gateway.committed_request)
-                stream=campaign.build_stream(self.seed["operation"],self.seed_senior.committed_request,
-                    self.gateway.committed_request,sorted(self.gateway.aliases))
-                replay_ws,replay_doc,replay_aliases,replay_state=campaign.replay_stream(stream,age.Trace())
-                replay_rev=replay_ws.get_revision(replay_doc)
-                original=campaign.execute_all(self.ws,self.doc,self.revision,self.gateway.aliases)
-                remapped=campaign.execute_all(replay_ws,replay_doc,replay_rev,replay_aliases)
-                normalized=senior.normalized_state(projection_semantics(build_projection(self.ws,self.doc,self.revision)),self.gateway.aliases)
-                replay={"structural_equivalence":normalized==replay_state,
-                    "behavioral_equivalence":original==remapped,"interpreter_jit_agreement":remapped["interp"]==remapped["jit"],
-                    "identity_remappings":sum(self.gateway.aliases[k]!=replay_aliases.get(k) for k in self.gateway.aliases),
-                    "passed":normalized==replay_state and original==remapped and remapped["interp"]==remapped["jit"]}
-                stream_path=self.output/"constructive-operations.json"; stream_path.write_text(json.dumps(stream,indent=2)+"\n")
-                (self.output/"equivalence.json").write_text(json.dumps({"mission":result,"boundary":boundary,"replay":replay},indent=2)+"\n")
-            result["boundary_oracle"]=boundary; result["replay"]=replay
+            if self.mission_kind=="category":
+                result=self.validate_category(requested)
+                boundary=result.get("boundary_oracle",{"passed":False,"reason":"not_run"})
+                replay=result.get("replay",{"passed":False,"reason":"not_run"})
+            else:
+                result=campaign.adult_validator(self.ws,self.doc,self.gateway,requested)
+                replay={"passed":False,"reason":"not_run"}; boundary={"passed":False,"reason":"not_run"}
+                if result.get("mission_complete"):
+                    boundary=campaign.boundary_oracle({},self.seed_senior.committed_request,self.gateway.committed_request)
+                    stream=campaign.build_stream(self.seed["operation"],self.seed_senior.committed_request,
+                        self.gateway.committed_request,sorted(self.gateway.aliases))
+                    replay_ws,replay_doc,replay_aliases,replay_state=campaign.replay_stream(stream,age.Trace())
+                    replay_rev=replay_ws.get_revision(replay_doc)
+                    original=campaign.execute_all(self.ws,self.doc,self.revision,self.gateway.aliases)
+                    remapped=campaign.execute_all(replay_ws,replay_doc,replay_rev,replay_aliases)
+                    normalized=senior.normalized_state(projection_semantics(build_projection(self.ws,self.doc,self.revision)),self.gateway.aliases)
+                    replay={"structural_equivalence":normalized==replay_state,
+                        "behavioral_equivalence":original==remapped,"interpreter_jit_agreement":remapped["interp"]==remapped["jit"],
+                        "identity_remappings":sum(self.gateway.aliases[k]!=replay_aliases.get(k) for k in self.gateway.aliases),
+                        "passed":normalized==replay_state and original==remapped and remapped["interp"]==remapped["jit"]}
+                    stream_path=self.output/"constructive-operations.json"; stream_path.write_text(json.dumps(stream,indent=2)+"\n")
+                    (self.output/"equivalence.json").write_text(json.dumps({"mission":result,"boundary":boundary,"replay":replay},indent=2)+"\n")
+                result["boundary_oracle"]=boundary; result["replay"]=replay
             self.append_log(self.output/"validation.jsonl",result)
             passed=bool(result.get("mission_complete") and boundary.get("passed") and replay.get("passed"))
             status=(f"Host validation passed · revision {self.revision}" if passed
@@ -493,10 +670,10 @@ class Cycle16Gateway:
                 "description":("Pi invoked the validation tool; the Python host ran the mission oracle, threshold boundaries and fresh-workspace replay after commit."
                                if agent_requested else "The host independently repeated the oracle, threshold boundary and fresh-workspace replay checks after the Pi tool completed."),
                 "mission_status":status,
-                "focus":{"handles":["is_adult.function"],"mapping":"verified_function_boundary"},
+                "focus":{"handles":[self.function_handle],"mapping":"verified_function_boundary"},
                 "validation":{"passed":passed,
                     "interpreter_jit_agree":result.get("engines_agree"),"replay":replay},
-                "observation":{"function":"IS_ADULT","arguments":[101,205,900,999,2],
+                "observation":{"function":self.function_name,"arguments":[101,205,900,999,2],
                     "engine_results":result.get("observed_results"),"revision":result.get("executed_revision"),
                     "agreement":result.get("engines_agree")},"dependencies":self.dependencies()})
             return result
@@ -516,8 +693,10 @@ class Handler(socketserver.StreamRequestHandler):
                 if not isinstance(rid,str) or not rid:raise ValueError("request_id is required")
                 # Pi may dispatch tool calls concurrently. Keep revision checks,
                 # preview bookkeeping and commits serialized against one Workspace.
+                started=time.perf_counter_ns()
                 with service.lock:
                     result=service.handle(req.get("method"),req.get("params",{}),rid)
+                service.record_gateway_timing(req,(time.perf_counter_ns()-started)/1_000_000)
                 resp={"request_id":rid,"ok":True,"result":result}
             except Exception as ex:
                 resp={"request_id":req.get("request_id","") if 'req' in locals() else "","ok":False,
@@ -531,8 +710,9 @@ class Server(socketserver.ThreadingTCPServer):
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument("--output",type=Path,required=True);ap.add_argument("--port",type=int,default=0)
-    ap.add_argument("--authoring-mode",choices=("atomic","incremental"),default="atomic");args=ap.parse_args()
-    service=Cycle16Gateway(args.output,args.authoring_mode)
+    ap.add_argument("--authoring-mode",choices=("atomic","incremental"),default="atomic")
+    ap.add_argument("--mission-kind",choices=("adult","category"),default="adult");args=ap.parse_args()
+    service=Cycle16Gateway(args.output,args.authoring_mode,args.mission_kind)
     with Server(("127.0.0.1",args.port),service) as server:
         print(json.dumps({"ready":True,"host":"127.0.0.1","port":server.server_address[1],"revision":service.revision}),flush=True)
         server.serve_forever()

@@ -13,10 +13,10 @@ const MAX_RESPONSE = 1024 * 1024;
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
 const OPERATOR_SCHEMA = Type.Unsafe({ type: "string", enum: [...OPERATORS] });
 const NUMBER_EXPR = Type.Object({ kind: Type.Literal("number"), value: Type.Number() }, { additionalProperties: false });
-const ID_EXPR = Type.Object({ kind: Type.Literal("local_ref"), name: Type.Literal("ID") }, { additionalProperties: false });
+const ID_EXPR = Type.Object({ kind: Type.Literal("local_ref"), name: Type.String() }, { additionalProperties: false });
 const ATOM_EXPR = Type.Union([NUMBER_EXPR, ID_EXPR]);
-const CALL_EXPR = Type.Object({ kind: Type.Literal("call"), function_handle: Type.Literal("age_by_id.function"),
-  arguments: Type.Array(ATOM_EXPR, { minItems: 1, maxItems: 1 }) }, { additionalProperties: false });
+const CALL_EXPR = Type.Object({ kind: Type.Literal("call"), function_handle: Type.String(),
+  arguments: Type.Array(ATOM_EXPR, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false });
 const CALL_OR_ATOM_EXPR = Type.Union([ATOM_EXPR, CALL_EXPR]);
 // Mission-bounded expression grammar: atoms and bound calls, optionally
 // combined by one binary layer. This admits AGE_BY_ID(ID) >= 18 without an
@@ -35,9 +35,9 @@ const FUNCTION_STATEMENT = Type.Union([RESULT_ASSIGN, IF_STATEMENT]);
 // are assembled from nodes rather than recursively repeated in every request.
 const DRAFT_OPERATION = Type.Union([
   Type.Object({ op_id: Type.String(), kind: Type.Literal("define_number"), handle: Type.String(), value: Type.Number() }, { additionalProperties: false }),
-  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_parameter_ref"), handle: Type.String(), name: Type.Literal("ID") }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_parameter_ref"), handle: Type.String(), name: Type.String() }, { additionalProperties: false }),
   Type.Object({ op_id: Type.String(), kind: Type.Literal("define_function_call"), handle: Type.String(),
-    function_handle: Type.Literal("age_by_id.function"), arguments: Type.Array(Type.String(), { minItems: 1, maxItems: 1 }) }, { additionalProperties: false }),
+    function_handle: Type.String(), arguments: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }),
   Type.Object({ op_id: Type.String(), kind: Type.Literal("define_unary_expression"), handle: Type.String(),
     operator: Type.Unsafe({ type: "string", enum: ["+", "-"] }), operand: Type.String() }, { additionalProperties: false }),
   Type.Object({ op_id: Type.String(), kind: Type.Literal("define_binary_expression"), handle: Type.String(),
@@ -130,9 +130,9 @@ export default function (pi: ExtensionAPI) {
       return toolResult(await gateway.call("inspect_program", { toolCallId }));
     }});
   pi.registerTool({ name: "workspace_preview_function", label: "Preview semantic function",
-    description: 'Preview one typed numeric function through the mission gateway; preview never commits. Use the discovered AGE_BY_ID handle age_by_id.function. A result assignment looks like {"kind":"assign","target":{"kind":"result"},"expression":{"kind":"number","value":0}}. A bound call expression looks like {"kind":"call","function_handle":"age_by_id.function","arguments":[{"kind":"local_ref","name":"ID"}]}. Compose the comparison and one structured IF yourself. This mission-bounded schema supports numeric/ID result assignments, AGE_BY_ID calls nested in one binary condition layer, and result-assignment THEN/ELSE blocks (no nested IF blocks). No source text is accepted.',
-    parameters: Type.Object({ expected_revision: Type.Integer(), callee_handle: Type.Literal("age_by_id.function"), name: Type.String(),
-      parameters: Type.Array(Type.Literal("ID"), { minItems: 1, maxItems: 1 }),
+    description: 'Preview one typed numeric function through the mission gateway; preview never commits. Discover the permitted function and use its returned portable handle. A result assignment looks like {"kind":"assign","target":{"kind":"result"},"expression":{"kind":"number","value":0}}. A bound call expression looks like {"kind":"call","function_handle":"<discovered-handle>","arguments":[{"kind":"local_ref","name":"<parameter>"}]}. Compose comparisons and structured IF blocks yourself. This bounded typed grammar accepts numeric expressions and result-assignment THEN/ELSE blocks; the gateway separately enforces the mission-specific function and signature. No source text is accepted.',
+    parameters: Type.Object({ expected_revision: Type.Integer(), callee_handle: Type.String(), name: Type.String(),
+      parameters: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
       body: Type.Array(FUNCTION_STATEMENT, { minItems: 1, maxItems: 64 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_create_function", { ...params, toolCallId }));
@@ -150,15 +150,15 @@ export default function (pi: ExtensionAPI) {
       return toolResult(await gateway.call("validate_mission", { ...params, toolCallId }, 120000));
     }});
   pi.registerTool({ name: "workspace_begin_function_draft", label: "Begin typed function draft",
-    description: "Open a temporary revision-bound numeric function draft. This does not change committed BASIC. Discover AGE_BY_ID first.",
-    parameters: Type.Object({ expected_revision: Type.Integer(), name: Type.Literal("IS_ADULT"),
-      parameters: Type.Array(Type.Literal("ID"), { minItems: 1, maxItems: 1 }),
-      callee_handle: Type.Literal("age_by_id.function") }, { additionalProperties: false }),
+    description: "Open a temporary revision-bound numeric function draft. This does not change committed BASIC. Discover the permitted call target first.",
+    parameters: Type.Object({ expected_revision: Type.Integer(), name: Type.String(),
+      parameters: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
+      callee_handle: Type.String() }, { additionalProperties: false }),
     async execute(toolCallId, params) { return toolResult(await gateway.call("begin_function_draft", { ...params, toolCallId })); }});
   pi.registerTool({ name: "workspace_apply_draft_operations", label: "Apply typed draft operations",
     description: "Apply an ordered atomic batch of flat typed draft operations. Earlier draft-local handles may be referenced by later operations. A failed batch changes neither draft nor Workspace.",
     parameters: Type.Object({ draft_id: Type.String(), expected_draft_revision: Type.Integer(),
-      operations: Type.Array(DRAFT_OPERATION, { minItems: 1, maxItems: 16 }) }, { additionalProperties: false }),
+      operations: Type.Array(DRAFT_OPERATION, { minItems: 1, maxItems: 32 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) { return toolResult(await gateway.call("apply_draft_operations", { ...params, toolCallId })); }});
   pi.registerTool({ name: "workspace_inspect_function_draft", label: "Inspect function draft",
     description: "Inspect the typed draft's revision, handles, ordered statements and pending preview without changing committed BASIC.",
