@@ -37,13 +37,13 @@ def inspect_arm(path:Path,arm:str):
             open_assistant=max(0,open_assistant-1); last_assistant_end=stamp
             usage=message.get("usage")
             if isinstance(usage,dict) and any(isinstance(v,(int,float)) and v for v in usage.values()):
-                last_usage={"time":stamp,"usage":{k:usage.get(k) for k in ("input","output","cacheRead","cacheWrite","totalTokens") if k in usage}}
-            rows.append({"order":index,"kind":"assistant_message_end","time":stamp,"stop_reason":message.get("stopReason"),"usage_recorded":isinstance(usage,dict)})
+                last_usage={"assistant_message_timestamp":stamp,"usage":{k:usage.get(k) for k in ("input","output","cacheRead","cacheWrite","totalTokens") if k in usage}}
+            rows.append({"order":index,"kind":"assistant_message_end","message_timestamp":stamp,"stop_reason":message.get("stopReason"),"usage_recorded":isinstance(usage,dict)})
         elif typ in ("message_start","message_end") and role=="toolResult":
             texts=[]
             # Do not export tool result text; only record tool-result arrival time.
             if typ=="message_end":
-                rows.append({"order":index,"kind":"tool_result_message_end","time":stamp})
+                rows.append({"order":index,"kind":"tool_result_message_end","message_timestamp":stamp})
         elif typ=="tool_execution_start":
             call=event.get("toolCallId"); name=event.get("toolName")
             if isinstance(call,str): tool_pending[call]=name
@@ -73,7 +73,7 @@ def inspect_arm(path:Path,arm:str):
     end_count=sum(e.get("type")=="message_end" and (e.get("message") or {}).get("role")=="assistant" for e in raw[last_start_i+1:]) if last_start_i>=0 else 0
     turn_end_after=sum(e.get("type")=="turn_end" for e in raw[last_start_i+1:]) if last_start_i>=0 else 0
     agent_end=sum(e.get("type")=="agent_end" for e in raw); settled=sum(e.get("type")=="agent_settled" for e in raw)
-    last_tool_result=next((r["time"] for r in reversed(rows) if r["kind"]=="tool_result_message_end" and r.get("time")),None)
+    last_tool_result=next((r["message_timestamp"] for r in reversed(rows) if r["kind"]=="tool_result_message_end" and r.get("message_timestamp")),None)
     gap=None
     if last_tool_result and timeout_time:
         gap=round((datetime.fromisoformat(timeout_time.replace("Z","+00:00"))-datetime.fromisoformat(last_tool_result.replace("Z","+00:00"))).total_seconds(),3)
@@ -93,7 +93,7 @@ def inspect_arm(path:Path,arm:str):
       "turn_start_count":event_counts.get("turn_start",0),"turn_end_count":event_counts.get("turn_end",0),
       "model_prompt_message_time":next((iso_ms((e.get("message") or {}).get("timestamp")) for e in raw if e.get("type")=="message_start" and (e.get("message") or {}).get("role")=="user"),None),
       "timeout_recorded_at_file_mtime":timeout_time,"timeout_seconds":summary.get("session_timeout_seconds"),"process_wall_ms":summary.get("inference_and_process_wall_ms"),
-      "last_successful_tool":last_completed_tool,"last_tool_result_message_time":last_tool_result,"elapsed_last_tool_result_to_timeout_seconds":gap,
+      "last_successful_tool":last_completed_tool,"last_tool_result_message_timestamp":last_tool_result,"elapsed_tool_result_timestamp_to_timeout_seconds":gap,
       "final_assistant_message_started_at":last_assistant_start,"final_assistant_message_ended":bool(end_count),"final_assistant_turn_ended":bool(turn_end_after),
       "final_assistant_update_event_count_after_start":final_assistant_updates,"assistant_stream_open_at_cutoff":open_assistant>0,
       "pending_tool_calls_at_cutoff":tool_pending,"agent_end_events":agent_end,"agent_settled_events":settled,
@@ -112,5 +112,5 @@ def main():
     data={"schema":"basic-workspace.pi-stall-diagnostic","version":1,"evidence_kind":"offline analysis of preserved genuine Cycle 18 Pi sessions","arms":arms,
       "limitations":["Historical native Pi JSON events do not timestamp each message_update delta or tool_execution_start/end event.","The open final assistant message has no message_end/turn_end/agent_end; final provider usage is therefore unavailable.","These records cannot distinguish slow token generation from an upstream/provider wait or Pi stream handling delay.","The timeout JSON file mtime is the host's timeout-record write time, not a native Pi process-exit timestamp."]}
     (args.output/"timelines.json").write_text(json.dumps(data,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
-    print(json.dumps({"output":str(args.output/"timelines.json"),"arms":[{k:a[k] for k in ("arm","last_successful_tool","elapsed_last_tool_result_to_timeout_seconds","assistant_stream_open_at_cutoff","pending_tool_calls_at_cutoff","agent_end_events","last_completed_provider_usage","host_mission_validation")} for a in arms]},indent=2))
+    print(json.dumps({"output":str(args.output/"timelines.json"),"arms":[{k:a[k] for k in ("arm","last_successful_tool","elapsed_tool_result_timestamp_to_timeout_seconds","assistant_stream_open_at_cutoff","pending_tool_calls_at_cutoff","agent_end_events","last_completed_provider_usage","host_mission_validation")} for a in arms]},indent=2))
 if __name__=="__main__":main()
