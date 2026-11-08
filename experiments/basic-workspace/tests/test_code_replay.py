@@ -13,8 +13,8 @@ SPEC.loader.exec_module(REPLAY)
 class CodeFirstReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.frames14 = REPLAY.code14_frames()
-        cls.frames13 = REPLAY.code13_frames()
+        cls.frames14 = REPLAY.adapt_cycle14_history()
+        cls.frames13 = REPLAY.adapt_cycle13_history()
         cls.by_id = {frame["id"]: frame for frame in cls.frames14}
 
     def test_longitudinal_chronology_has_checkpoint_and_context_reset(self):

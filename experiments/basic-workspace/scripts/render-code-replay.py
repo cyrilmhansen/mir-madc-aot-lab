@@ -7,6 +7,7 @@ import html
 import json
 from pathlib import Path
 from typing import Any
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "semantic-replay"
@@ -90,7 +91,8 @@ def model_turn_for(session_path: Path, tool_name: str, successful: bool | None =
     raise ValueError(f"No matching {tool_name} call in {session_path}")
 
 
-def code14_frames() -> list[dict[str, Any]]:
+def adapt_cycle14_history() -> list[dict[str, Any]]:
+    """Recover verified presentation events from the split longitudinal transcripts."""
     run = LONG / "calibrated-run-01"
     resume = OUT14
     events1 = read_events(run / "history.jsonl")
@@ -265,7 +267,8 @@ def code14_frames() -> list[dict[str, Any]]:
     return frames
 
 
-def code13_frames() -> list[dict[str, Any]]:
+def adapt_cycle13_history() -> list[dict[str, Any]]:
+    """Recover the genuine function-composition interaction from its saved transcript."""
     events = read_events(C13 / "history.jsonl")
     initial = committed_snapshot(events, "initial-construction")
     final = committed_snapshot(events, "agent")
@@ -311,77 +314,48 @@ def code13_frames() -> list[dict[str, Any]]:
     ]
 
 
-HTML = r'''<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BASIC semantic replay</title><style>
-:root{color-scheme:dark;--bg:#0d1118;--panel:#151c27;--panel2:#1b2532;--line:#2a3747;--text:#e4edf7;--muted:#95a5b8;--blue:#68b7ff;--green:#55d5a1;--yellow:#f2c76c;--red:#ff777f;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
-header{height:54px;display:flex;align-items:center;gap:14px;padding:0 18px;background:#111822;border-bottom:1px solid var(--line);flex:none}header h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.01em}header .tag{color:var(--muted);font-size:12px;border:1px solid var(--line);border-radius:20px;padding:4px 9px}header select{margin-left:auto;background:#202a37;color:var(--text);border:1px solid #38485a;border-radius:6px;padding:7px 10px}
-.summary{height:55px;display:flex;align-items:center;gap:16px;padding:7px 18px;border-bottom:1px solid var(--line);background:#101721;flex:none}.mission{font-weight:650;font-size:14px}.sub{color:var(--muted);font-size:12px}.pill{border-radius:15px;padding:4px 9px;font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}.pill.committed,.pill.validated{background:#143829;color:#7ce8b8}.pill.proposed,.pill.selected,.pill.checkpoint{background:#423617;color:#ffd978}.pill.rejected{background:#48242a;color:#ff9397}.pill.host{background:#26374a;color:#b7d9ff}
-main{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;padding:12px 14px 8px;min-height:0;flex:1}.editor{min-width:0;display:flex;flex-direction:column;border:1px solid #293646;border-radius:10px;background:#10161f;overflow:hidden;box-shadow:0 10px 32px #0003}.editor-head{height:43px;padding:0 14px;display:flex;align-items:center;gap:11px;background:#161f2b;border-bottom:1px solid var(--line);flex:none}.filedot{width:9px;height:9px;border-radius:50%;background:#67b8ff}.file{font-family:var(--mono);color:#b9c7d8;font-size:12px}.rev{margin-left:auto;color:#a8b7c8;font:12px var(--mono)}.editor-scroll{overflow:auto;flex:1;scroll-behavior:smooth;padding:12px 0 20px}.source{font:14px/1.82 var(--mono);min-width:max-content}.code-line{display:grid;grid-template-columns:54px minmax(600px,1fr);padding:0 20px 0 0;border-left:3px solid transparent;min-height:25px}.code-line .ln{user-select:none;text-align:right;padding-right:15px;color:#526174}.code-line .code{white-space:pre;color:#d9e3ef}.code-line.focus{background:#17314a77;border-left-color:var(--blue)}.code-line.change{background:#193a2c88;border-left-color:var(--green)}.code-line.call{background:#16344988;border-left-color:#54c7e7}.code-line.rejected-focus{background:#4823296b;border-left-color:var(--red)}.code-line .proposed-value{color:var(--yellow);background:#41331c;border:1px dashed #a78238;border-radius:4px;padding:1px 5px;margin-left:8px;font:11px system-ui}.kw{color:#c792ea}.num{color:#f4bf75}.str{color:#a8dba3}.op{color:#8ccaff}.comment{color:#81909e;font-style:italic}.ident{color:#d8e3f0}.call-highlight{color:#7ddafa;text-decoration:underline;text-decoration-color:#3e91a7;text-underline-offset:3px}
-.proposal-box{margin:15px 20px 8px 74px;border:1px dashed #927331;border-radius:8px;background:#2a2418;padding:9px 12px;color:var(--yellow);width:max-content;min-width:600px}.proposal-label{font:11px system-ui;text-transform:uppercase;letter-spacing:.08em;color:#eac66f;margin-bottom:4px}.proposal-code{font:13px/1.7 var(--mono);white-space:pre}.proposal-code .plus{color:#89e0b6;margin-right:8px}.reject-box{margin:14px 20px 8px 74px;border:1px solid #714249;border-radius:7px;background:#301b20;padding:10px 13px;color:#ffadb0;width:max-content;max-width:80ch}.annotation{display:inline-block;font:11px system-ui;color:#a9eacb;background:#1d3c2e;border-radius:5px;padding:3px 7px;margin:5px 0 5px 74px}.pane{min-width:0;display:flex;flex-direction:column;gap:10px;overflow:auto}.card{background:var(--panel);border:1px solid #293646;border-radius:9px;padding:12px 13px}.card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#93a8bf;margin:0 0 8px}.step-title{font-size:15px;line-height:1.3;font-weight:660;margin:0 0 6px}.step-desc{margin:0;color:#c2ceda;font-size:12px;line-height:1.55}.meta{color:var(--muted);font-size:11px;margin-top:9px}.dep{font:12px/1.6 var(--mono);color:#c8dded}.dep b{color:#69d8b1;font-weight:500}.result-row{display:grid;grid-template-columns:44px 1fr 1fr;gap:5px;font:11px/1.5 var(--mono);padding:4px 0;border-bottom:1px solid #26313d}.result-row.head{color:var(--muted)}.pass{color:#74e5b3}.fail{color:#ff9298}.status-text{font-size:12px;font-weight:650}.focus-chip{display:inline-block;margin:4px 4px 0 0;border:1px solid #344b60;color:#b6d5ee;border-radius:5px;padding:3px 6px;font:10px var(--mono)}details{margin-top:9px;color:var(--muted);font-size:11px}details pre{max-height:220px;overflow:auto;color:#c6d5e4;background:#0d131a;padding:9px;border-radius:5px;white-space:pre-wrap;word-break:break-word;font:10px/1.45 var(--mono)}
-footer{height:145px;background:#111822;border-top:1px solid var(--line);padding:9px 14px 8px;flex:none;display:flex;flex-direction:column;gap:8px}.controls{display:flex;align-items:center;gap:8px}.controls button{background:#202a37;color:var(--text);border:1px solid #3a4a5c;border-radius:6px;padding:5px 11px;cursor:pointer}.controls button:hover{border-color:var(--blue)}.controls .play{background:#184b3c;border-color:#2d8366}.controls label{color:var(--muted);font-size:11px;margin-left:6px}.controls input[type=range]{accent-color:#58d6a5}.controls select{background:#202a37;color:var(--text);border:1px solid #38485a;border-radius:5px;padding:4px}.timeline{display:flex;align-items:center;gap:6px;overflow-x:auto;padding:0 1px 3px}.tick{flex:none;max-width:140px;min-width:84px;text-align:left;background:#182230;border:1px solid #344255;border-radius:6px;padding:5px 7px;cursor:pointer;color:#a7b7c8;font-size:10px;line-height:1.15}.tick.active{border-color:#66b7ff;background:#1a3147;color:#fff}.tick.rejected{border-bottom:2px solid var(--red)}.tick.committed{border-bottom:2px solid var(--green)}.tick .t-rev{display:block;color:#7393ad;font:9px var(--mono);margin-top:3px}.motion{transition:background-color .2s ease,border-color .2s ease}.hidden{display:none!important}@media(max-width:850px){main{grid-template-columns:1fr}.pane{display:none}header .tag{display:none}.code-line{grid-template-columns:45px minmax(420px,1fr)}footer{height:140px}}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
-</style></head><body>
-<header><span class="filedot"></span><h1>BASIC Workspace · Semantic Replay</h1><span class="tag">Code-first view · canonical snapshot playback</span><select id="campaign"></select></header>
-<section class="summary"><span class="mission" id="mission"></span><span class="sub" id="campaignStatus"></span><span class="pill" id="statePill"></span><span class="sub" id="revision"></span></section>
-<main><section class="editor"><div class="editor-head"><span class="filedot"></span><span class="file" id="filename">AGE_BY_ID.bas</span><span class="rev" id="revBadge"></span></div><div class="editor-scroll" id="scroll"><div class="source" id="source"></div><div id="proposal"></div><div id="annotation"></div></div></section>
-<aside class="pane"><section class="card"><h2>Action</h2><p class="step-title" id="stepTitle"></p><p class="step-desc" id="stepDesc"></p><div class="meta" id="provenance"></div><div id="semanticFocus"></div><div id="diagnostic"></div><details id="evidenceDetails"><summary>Evidence and diagnostics</summary><pre id="evidence"></pre></details></section>
-<section class="card"><h2>Function dependency</h2><div class="dep" id="deps"></div></section><section class="card"><h2>MIR observations</h2><div id="results"></div><div class="meta" id="validation"></div></section></aside></main>
-<footer><div class="controls"><button id="prev" title="Previous action">◀</button><button id="play" class="play">▶ Play</button><button id="next" title="Next action">▶</button><label for="speed">Speed</label><input id="speed" type="range" min="0.5" max="3" value="1" step="0.5"><span id="speedLabel" class="sub">1×</span><label for="chapter">Chapter</label><select id="chapter"></select><span class="sub" id="counter" style="margin-left:auto"></span></div><input id="scrub" type="range" min="0" max="0" value="0" step="1"></footer>
-<script id="frames-data" type="application/json">__FRAME_DATA__</script><script>
-const DATA=JSON.parse(document.getElementById('frames-data').textContent);let campaignIndex=0,index=0,timer=null;
-const $=id=>document.getElementById(id);const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function active(){return DATA.campaigns[campaignIndex]}function frames(){return active().frames}
-function highlighter(line){let out='',i=0;const re=/('[^\n]*|"(?:\\.|[^"\\])*"|\b(?:FUNCTION|END|DIM|FOR|TO|STEP|NEXT|IF|THEN|ELSE|GOTO|GOSUB|RETURN|DATA|READ|RESTORE|SUB|CALL)\b|\b\d+(?:\.\d+)?\b|>=|<=|<>|=|\+|-|\*|\/|\b[A-Za-z_][A-Za-z0-9_$]*\b)/gi;for(const m of line.matchAll(re)){out+=esc(line.slice(i,m.index));const t=m[0];let cls='ident';if(/^['"]/.test(t))cls='str';else if(/^\d/.test(t))cls='num';else if(/^(FUNCTION|END|DIM|FOR|TO|STEP|NEXT|IF|THEN|ELSE|GOTO|GOSUB|RETURN|DATA|READ|RESTORE|SUB|CALL)$/i.test(t))cls='kw';else if(/^(>=|<=|<>|=|\+|-|\*|\/)$/i.test(t))cls='op';out+=`<span class="${cls}">${esc(t)}</span>`;i=m.index+t.length}out+=esc(line.slice(i));return out}
-function populate(){const fs=frames();$('scrub').max=String(fs.length-1);$('timeline').innerHTML='';}
-function setupTimeline(){const fs=frames();const tl=document.createElement('div');tl.className='timeline';tl.id='timeline';for(let i=0;i<fs.length;i++){const f=fs[i],b=document.createElement('button');b.className=`tick ${f.state||''}`;b.innerHTML=`${esc(f.title)}<span class="t-rev">r${f.revision}</span>`;b.title=f.provenance;b.onclick=()=>show(i);tl.appendChild(b)}const old=document.querySelector('.timeline');if(old)old.replaceWith(tl);else $('scrub').before(tl)}
-function setSelects(){const sel=$('campaign');sel.innerHTML='';DATA.campaigns.forEach((c,i)=>{const o=document.createElement('option');o.value=i;o.textContent=c.title;sel.appendChild(o)});sel.onchange=()=>{campaignIndex=Number(sel.value);index=0;setupTimeline();show(0)};const ch=$('chapter');ch.innerHTML='';const names=[...new Set(frames().map(f=>f.chapter))];for(const n of names){const o=document.createElement('option');o.value=n;o.textContent=n;ch.appendChild(o)}ch.onchange=()=>{const target=frames().findIndex(f=>f.chapter===ch.value);if(target>=0)show(target)};setupTimeline()}
-function show(i){const fs=frames();index=Math.max(0,Math.min(i,fs.length-1));const f=fs[index];$('scrub').value=String(index);$('mission').textContent=f.chapter;$('campaignStatus').textContent=active().summary;$('statePill').textContent=f.state;$('statePill').className=`pill ${f.state}`;$('revision').textContent=`revision ${f.revision}`;$('revBadge').textContent=`BASIC · r${f.revision}`;$('stepTitle').textContent=f.title;$('stepDesc').textContent=f.description;$('provenance').textContent=`Provenance: ${f.provenance}`;$('filename').textContent=active().filename||'PROGRAM.bas';$('counter').textContent=`Action ${index+1} / ${fs.length}`;if($('chapter').value!==f.chapter)$('chapter').value=f.chapter;if(location.hash!==`#${f.id}`)history.replaceState(null,'',`#${f.id}`);
- const highlights=f.highlights||{}, hi=new Set([...(highlights.lines||[]),...(highlights.function_lines||[])]), calls=new Set(highlights.call_lines||[]), codeLines=(f.code||'').replace(/\n$/,'').split('\n');const src=$('source');src.innerHTML='';codeLines.forEach((line,n)=>{const num=n+1,div=document.createElement('div');let cls='code-line';if(hi.has(num))cls+=' '+(f.state==='rejected'?'rejected-focus':(f.state==='committed'||f.state==='validated'?'change':'focus'));if(calls.has(num))cls+=' call';div.className=cls;const call=line.includes('AGE_BY_ID(ID)')&&highlights.semantic_handle&&['is_senior.function','is_adult.function'].includes(highlights.semantic_handle);div.innerHTML=`<span class="ln">${String(num).padStart(2,' ')}</span><span class="code">${highlighter(line)}${call?'<span class="focus-chip call-highlight">bound call → AGE_BY_ID</span>':''}</span>`;src.appendChild(div);if(f.proposal?.line===num&&f.proposal?.new){const chip=document.createElement('span');chip.className='proposed-value';chip.textContent=`proposed ${f.proposal.new.trim()}`;div.querySelector('.code').appendChild(chip)}});
- const proposal=$('proposal');proposal.innerHTML='';if(f.proposal?.append_lines){const box=document.createElement('div');box.className='proposal-box';box.innerHTML='<div class="proposal-label">Preview only · current source remains committed revision '+f.revision+'</div><div class="proposal-code"></div>';box.querySelector('.proposal-code').innerHTML=f.proposal.append_lines.map((l,j)=>`<div class="${(f.proposal.call_lines||[]).includes((f.proposal.highlight_lines||[])[j])?'call-highlight':''}"><span class="plus">+</span>${highlighter(l)}</div>`).join('');proposal.appendChild(box)}else if(f.proposal?.status==='rejected'){const box=document.createElement('div');box.className='reject-box';box.innerHTML=`<b>Denied · no committed source change</b><br>${esc(f.proposal.function||'')} · ${esc(f.proposal.message||f.proposal.diagnostic||'Rejected')}`;proposal.appendChild(box)}
- $('annotation').innerHTML=f.proposal?.annotation&&f.state==='committed'?`<div class="annotation">${esc(f.proposal.annotation)}</div>`:'';
- const focus=$('semanticFocus');focus.innerHTML='';for(const h of [highlights.semantic_handle,...(f.proposal?.semantic_handle?[f.proposal.semantic_handle]:[])].filter(Boolean)){const s=document.createElement('span');s.className='focus-chip';s.textContent=h;focus.appendChild(s)}if(f.proposal?.bound_callee){const s=document.createElement('span');s.className='focus-chip';s.textContent=`calls ${f.proposal.bound_callee}`;focus.appendChild(s)}
- const diag=$('diagnostic');diag.innerHTML='';if(f.proposal?.status==='rejected'){diag.innerHTML=`<p class="status-text fail">${esc(f.proposal.diagnostic||'Rejected')} · revision stays ${f.revision}</p>`}else if(f.validation){diag.innerHTML=`<p class="status-text ${f.validation.passed?'pass':'fail'}">${f.validation.passed?'✓':'×'} ${f.validation.passed?'Validation passed':'Validation failed'}</p>`}
- const sourceUpper=(f.code||'').toUpperCase();const deps=[];if(sourceUpper.includes('FUNCTION AGE_BY_ID'))deps.push({caller:'AGE_BY_ID',callee:'PERSON_ID[] · PERSON_AGE[]'});if(sourceUpper.includes('FUNCTION IS_SENIOR')&&sourceUpper.includes('AGE_BY_ID(ID)'))deps.push({caller:'IS_SENIOR',callee:'AGE_BY_ID(ID)'});if(sourceUpper.includes('FUNCTION IS_ADULT')&&sourceUpper.includes('AGE_BY_ID(ID)'))deps.push({caller:'IS_ADULT',callee:'AGE_BY_ID(ID)'});const proposed=(f.proposal?.append_lines||[]).join('\n').toUpperCase();if(proposed.includes('FUNCTION IS_SENIOR')&&proposed.includes('AGE_BY_ID(ID)'))deps.push({caller:'Preview · IS_SENIOR',callee:'AGE_BY_ID(ID)'});if(proposed.includes('FUNCTION IS_ADULT')&&proposed.includes('AGE_BY_ID(ID)'))deps.push({caller:'Preview · IS_ADULT',callee:'AGE_BY_ID(ID)'});$('deps').innerHTML=deps.length?deps.map(e=>`<div>${esc(e.caller)}<br>　└ ${e.caller.startsWith('Preview')?'proposes':'calls'} <b>${esc(e.callee)}</b></div>`).join(''):'<span class="sub">No function dependency in this frame.</span>';
- const results=f.results||{};let rows='';for(const [engine,vals] of Object.entries(results)){if(vals&&typeof vals==='object'){for(const [id,val] of Object.entries(vals)){let age=val?.age??val,senior=val?.senior,adult=val?.adult;rows+=`<div class="result-row"><span>${esc(engine)}</span><span>ID ${esc(id)} → ${esc(age)}</span><span>${senior!==undefined?`senior ${esc(senior)} `:''}${adult!==undefined?`adult ${esc(adult)}`:''}</span></div>`}}}$('results').innerHTML=rows||'<div class="sub">No runtime result recorded at this step.</div>';const v=f.validation||{};$('validation').textContent=[v.interpreter_jit_agree?'Interpreter = JIT':null,v.dependency_bound?'call binding verified':null,v.boundary_17_18?'17/18 boundary passed':null].filter(Boolean).join(' · ');
- const evidence={provenance:f.provenance,event_refs:f.event_refs||[],mapping:highlights.mapping||null,validation:f.validation||null,checkpoint:f.checkpoint||null,actual_proposal:f.proposal||null};$('evidence').textContent=JSON.stringify(evidence,null,2);for(const t of document.querySelectorAll('.tick'))t.classList.remove('active');document.querySelectorAll('.tick')[index]?.classList.add('active');const focusLine=(highlights.lines||highlights.function_lines||[])[0];if(focusLine){const node=src.children[focusLine-1];if(node)node.scrollIntoView({block:'center',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'})}else $('scroll').scrollTop=0;
-}
-function step(delta){show(index+delta)}$('prev').onclick=()=>step(-1);$('next').onclick=()=>step(1);$('scrub').oninput=e=>show(Number(e.target.value));$('speed').oninput=e=>$('speedLabel').textContent=`${e.target.value}×`;$('play').onclick=()=>{if(timer){clearInterval(timer);timer=null;$('play').textContent='▶ Play';return}$('play').textContent='Ⅱ Pause';timer=setInterval(()=>{if(index>=frames().length-1){clearInterval(timer);timer=null;$('play').textContent='▶ Play'}else step(1)},1600/Number($('speed').value))};
-setSelects();const initialId=decodeURIComponent(location.hash.slice(1));let initialCampaign=DATA.campaigns.findIndex(c=>c.frames.some(f=>f.id===initialId));if(initialCampaign>=0){campaignIndex=initialCampaign;$('campaign').value=String(campaignIndex);setupTimeline();const initialFrame=frames().findIndex(f=>f.id===initialId);show(initialFrame)}else show(0);
-</script></body></html>'''
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from visualization import render, adapt_legacy_frames, VISUAL_EVENT_SCHEMA, VISUAL_FRAME_JSON_SCHEMA
 
-def render(data: dict[str, Any], out: Path) -> None:
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
-    out.write_text(HTML.replace("__FRAME_DATA__", payload), encoding="utf-8")
 
 
 def build_artifacts() -> dict[str, Any]:
-    frames14 = code14_frames()
+    frames14 = adapt_cycle14_history()
     summary14 = read_json(OUT14 / "summary.json")
-    equivalence = summary14["replay"]
-    deps14 = [{"caller":"is_senior.function","callee":"age_by_id.function"},
-              {"caller":"is_adult.function","callee":"age_by_id.function"}]
-    data14 = {"schema":"basic-workspace.visual-frames","version":1,
-              "campaigns":[{"id":"longitudinal-14b","title":"Cycle 14B · Continued development",
-                  "filename":"ADDRESS_BOOK.bas","summary":"IS_SENIOR · age 205 update · context recovery · IS_ADULT",
-                  "dependencies":deps14,"frames":frames14}],
-              "mapping_policy":"Function identity comes from semantic handles. Statement highlight uses the unique source line diff when historical token spans were not recorded; no cursor positions are inferred."}
-    frame_path14=OUT14/"visual-frames.json"
+    deps14 = {
+        2:[{"caller":"age_by_id.function","callee":"PERSON_ID[] · PERSON_AGE[]"}],
+        3:[{"caller":"age_by_id.function","callee":"PERSON_ID[] · PERSON_AGE[]"},{"caller":"is_senior.function","callee":"age_by_id.function"}],
+        4:[{"caller":"age_by_id.function","callee":"PERSON_ID[] · PERSON_AGE[]"},{"caller":"is_senior.function","callee":"age_by_id.function"}],
+        5:[{"caller":"age_by_id.function","callee":"PERSON_ID[] · PERSON_AGE[]"},{"caller":"is_senior.function","callee":"age_by_id.function"},{"caller":"is_adult.function","callee":"age_by_id.function"}],
+    }
+    campaign14={"id":"longitudinal-14b","title":"Cycle 14B · Continued development","filename":"ADDRESS_BOOK.bas",
+               "summary":"Function composition · entity update · context recovery"}
+    data14 = adapt_legacy_frames(campaign14, frames14, deps14)
+    events14=data14.pop("_presentation_events")
+    source14=data14.pop("_presentation_source")
+    frame_path14=OUT14/"visual-frames-generic.json"
     frame_path14.write_text(json.dumps(data14,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
-    html_path14=OUT14/"visual-replay.html";render(data14,html_path14)
+    html_path14=OUT14/"visual-replay-generic.html";render(data14,html_path14)
+    (OUT14/"presentation-event.schema.json").write_text(json.dumps(VISUAL_EVENT_SCHEMA,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    (OUT14/"visual-frame.schema.json").write_text(json.dumps(VISUAL_FRAME_JSON_SCHEMA,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    (OUT14/"visual-source.json").write_text(json.dumps(source14,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    (OUT14/"visual-events.jsonl").write_text("".join(json.dumps(e,ensure_ascii=False,separators=(",",":"))+"\n" for e in events14),encoding="utf-8")
 
-    frames13=code13_frames()
-    summary13=read_json(C13/"summary.json")
-    data13={"schema":"basic-workspace.visual-frames","version":1,
-            "campaigns":[{"id":"cycle13-real-model","title":"Cycle 13 · Real-model composition",
-                "filename":"AGE_BY_ID.bas","summary":"A genuine model adds a bound IS_SENIOR caller",
-                "dependencies":[{"caller":"is_senior.function","callee":"age_by_id.function"}],
-                "frames":frames13}],
-            "mapping_policy":"The selected function is identified by its semantic handle; inserted code is highlighted from the unique committed source diff."}
-    frame_path13=C13/"visual-frames.json";frame_path13.write_text(json.dumps(data13,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
-    html_path13=C13/"visual-replay.html";render(data13,html_path13)
+    frames13=adapt_cycle13_history()
+    campaign13={"id":"cycle13-real-model","title":"Cycle 13 · Real-model composition","filename":"AGE_BY_ID.bas",
+                "summary":"A genuine model adds a bound semantic caller"}
+    deps13={2:[{"caller":"age_by_id.function","callee":"PERSON_ID[] · PERSON_AGE[]"}],
+            3:[{"caller":"age_by_id.function","callee":"PERSON_ID[] · PERSON_AGE[]"},{"caller":"is_senior.function","callee":"age_by_id.function"}]}
+    data13=adapt_legacy_frames(campaign13,frames13,deps13)
+    events13=data13.pop("_presentation_events")
+    source13=data13.pop("_presentation_source")
+    frame_path13=C13/"visual-frames-generic.json";frame_path13.write_text(json.dumps(data13,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    html_path13=C13/"visual-replay-generic.html";render(data13,html_path13)
+    (C13/"presentation-event.schema.json").write_text(json.dumps(VISUAL_EVENT_SCHEMA,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    (C13/"visual-frame.schema.json").write_text(json.dumps(VISUAL_FRAME_JSON_SCHEMA,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    (C13/"visual-source.json").write_text(json.dumps(source13,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    (C13/"visual-events.jsonl").write_text("".join(json.dumps(e,ensure_ascii=False,separators=(",",":"))+"\n" for e in events13),encoding="utf-8")
     return {"cycle14":{"frames":len(frames14),"frames_json_bytes":frame_path14.stat().st_size,
                        "html_bytes":html_path14.stat().st_size,"path":str(html_path14)},
             "cycle13":{"frames":len(frames13),"frames_json_bytes":frame_path13.stat().st_size,
