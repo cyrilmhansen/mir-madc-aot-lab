@@ -71,7 +71,7 @@ class PiCompositionTests(unittest.TestCase):
     def tearDown(self):self.tmp.cleanup()
 
     def test_live_atomic_schema_accepts_category_and_a_different_generic_call_handle(self):
-        schemas=json.loads((RESULTS/"preflight-final-atomic"/"tool-schemas.json").read_text())
+        schemas=json.loads((ROOT/"tests/fixtures/pi-cycle18/workspace_preview_function.json").read_text())["tools"]
         tool=next(x for x in schemas if x["name"]=="workspace_preview_function")
         params=tool["parameters"]
         request={"expected_revision":4,"callee_handle":"age_by_id.function","name":"AGE_CATEGORY",
@@ -86,7 +86,7 @@ class PiCompositionTests(unittest.TestCase):
         self.assertFalse(schema_matches(params,request))
 
     def test_live_draft_schema_is_flat_and_accepts_reused_call_handle(self):
-        schemas=json.loads((RESULTS/"preflight-final-incremental"/"tool-schemas.json").read_text())
+        schemas=json.loads((ROOT/"tests/fixtures/pi-cycle18/workspace_apply_draft_operations.json").read_text())["tools"]
         tool=next(x for x in schemas if x["name"]=="workspace_apply_draft_operations")
         params=tool["parameters"]
         payload={"draft_id":"draft-local","expected_draft_revision":0,"operations":draft_operations()}

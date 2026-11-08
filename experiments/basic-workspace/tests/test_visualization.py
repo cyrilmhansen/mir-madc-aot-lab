@@ -73,6 +73,15 @@ class GenericVisualizationTests(unittest.TestCase):
         with self.assertRaises(VIS.PresentationError):
             compiler.consume({"event_id":"e2","event_type":"commit","presentation_sequence":2,"revision":3,"provenance":"host"})
 
+    def test_lifecycle_status_is_carried_without_advancing_committed_program(self):
+        compiler=VIS.VisualFrameCompiler("x","X","X.bas",1,"committed",{})
+        frame=compiler.consume({"event_id":"wait","event_type":"mission_status","revision":1,
+            "provenance":"host observation","mission_status":"Program passed · Pi session timed_out",
+            "lifecycle":{"state":"timed_out","workspace_revision":1}})
+        self.assertEqual(frame["code"],"committed")
+        self.assertEqual(frame["revision"],1)
+        self.assertEqual(frame["lifecycle"]["state"],"timed_out")
+
     def test_repeated_event_id_does_not_duplicate_commit(self):
         compiler = VIS.VisualFrameCompiler("x", "X", "X.bas", 1, "old", {2:"new"})
         event = {"event_id":"seed","event_type":"initial","presentation_sequence":1,"revision":1,"provenance":"host"}

@@ -5,6 +5,8 @@ import argparse, hashlib, json, os, pathlib, socket, subprocess, sys, time, urll
 
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parent
+sys.path.insert(0,str(HERE))
+from pi_lifecycle import run_pi_observed
 MODEL="Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw"
 ATOMIC_TOOLS=["workspace_discover_functions","workspace_inspect_program","workspace_preview_function","workspace_commit_preview","workspace_validate_mission"]
 DRAFT_TOOLS=["workspace_discover_functions","workspace_inspect_program","workspace_commit_preview","workspace_validate_mission",
@@ -155,19 +157,26 @@ def main():
                         f"Cycle 18 AGE_CATEGORY {args.arm} authoring" if args.mission_kind=="category" else f"Cycle 17 IS_ADULT {args.arm} authoring",
                         "--print","--",prompt]
         pi_err=(out/"pi-stderr.log").open("w",encoding="utf-8")
-        pi_started=time.monotonic()
-        with (out/"pi-session.jsonl").open("w",encoding="utf-8") as pi_out:
-            try:pi_proc=subprocess.run(pi_command,stdout=pi_out,stderr=pi_err,env=env,timeout=args.timeout,check=False)
-            except subprocess.TimeoutExpired:
-                pi_proc=None;(out/"pi-timeout.json").write_text(json.dumps({"timeout_seconds":args.timeout,"timed_out":True},indent=2)+"\n")
-        elapsed=(time.monotonic()-pi_started)*1000;pi_err.close()
+        def publish_lifecycle(state, info):
+            try: gateway_call("127.0.0.1",ready["port"],"record_agent_status",{"state":state,"info":info})
+            except Exception: pass
+        pi_lifecycle=run_pi_observed(pi_command,env=env,timeout_seconds=args.timeout,
+            raw_event_path=out/"pi-session.jsonl",lifecycle_path=out/"pi-observed-lifecycle.jsonl",
+            stderr_file=pi_err,on_status=publish_lifecycle,no_progress_seconds=10.0,shutdown_grace_seconds=2.0)
+        pi_err.close()
+        pi_proc=None if pi_lifecycle["timed_out"] else subprocess.CompletedProcess(pi_command,pi_lifecycle["exit_code"])
+        if pi_lifecycle["timed_out"]:
+            atomic_json(out/"pi-timeout.json",{"timeout_seconds":args.timeout,"timed_out":True,
+                "last_observed_event":pi_lifecycle["observer"].get("last_event_type"),
+                "agent_state":pi_lifecycle["observer"].get("state"),"pending_tool_ids":pi_lifecycle["pending_tool_ids"]})
+        elapsed=pi_lifecycle["elapsed_ms"]
         status=gateway_call("127.0.0.1",ready["port"],"get_status",{})
         validation=None
         if status["committed"]:
             validation=gateway_call("127.0.0.1",ready["port"],"validate_mission",{"expected_revision":status["revision"]})
         outcome=gateway_call("127.0.0.1",ready["port"],"finalize_mission",{
             "timed_out":pi_proc is None,"pi_exit_code":None if pi_proc is None else pi_proc.returncode,
-            "validation":validation})
+            "validation":validation,"pi_lifecycle":pi_lifecycle["observer"]})
         try:subprocess.run([sys.executable,str(ROOT/"scripts/basic-visual.py"),"replay",str(out)],check=True,capture_output=True,text=True)
         except Exception as exc:(out/"replay-error.txt").write_text(str(exc)+"\n")
         raw=[]
@@ -265,6 +274,7 @@ def main():
             "provider_usage_from_pi_events":totals,"inference_and_process_wall_ms":round(elapsed,2),
             "gateway_tool_processing_ms":gateway_total_ms,"gateway_tool_processing_by_method":gateway_by_method,
             "mission_status":outcome.get("mission_status"),
+            "completion_states":outcome.get("completion_states"),"pi_lifecycle":pi_lifecycle["observer"],
             "active_tools":json.loads((out/"tool-inventory.json").read_text()).get("tools",[]) if (out/"tool-inventory.json").exists() else [],
             "tool_schema_bytes":schema_bytes,"tool_schema_tokens_estimate_bytes_div_4":round(schema_bytes/4) if schema_bytes is not None else None,
             "registered_plan_sha256":hashlib.sha256(args.registered_plan.read_bytes()).hexdigest() if args.registered_plan else None,

@@ -9,6 +9,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT))
+from pi_lifecycle import completion_states
 
 def load(name: str, path: Path):
     spec=importlib.util.spec_from_file_location(name,path); mod=importlib.util.module_from_spec(spec)
@@ -397,6 +398,23 @@ class Cycle16Gateway:
 
     def handle(self,method:str,p:dict[str,Any],rid:str):
         if method=="record_pi_event":return self.record_pi(p)
+        if method=="record_agent_status":
+            state=str(p.get("state","unknown")); info=p.get("info") if isinstance(p.get("info"),dict) else {}
+            revision=self.ws.get_revision(self.doc)
+            labels={"working":"Agent working","waiting_for_tool":"Agent waiting for tool",
+                "no_observable_progress":"No Pi event observed; agent state unresolved",
+                "agent_turn_ended":"Pi agent turn ended; session settlement not yet observed",
+                "agent_session_completed":"Pi reports agent session settled; waiting for process exit"}
+            title=labels.get(state,"Pi lifecycle: "+state.replace("_"," "))
+            self.append_log(self.output/"pi-viewer-status.jsonl",{"record_type":"viewer_status",
+                "state":state,"revision":revision,"info":info,"observed_monotonic_ns":time.monotonic_ns()})
+            self.emit_visual({"event_id":f"pi-live-status-{uuid.uuid4()}","frame_id":f"pi-live-status-{uuid.uuid4()}",
+                "event_type":"mission_status","revision":revision,"session_id":self.session_id,
+                "mission_id":self.mission_title,"provenance":"Host observation of Pi JSON event arrivals",
+                "title":title,"description":info.get("description",title),"mission_status":title,
+                "lifecycle":{"state":state,"info":info,"workspace_revision":revision},
+                "outcome":{"agent_commit":self.gateway.committed}})
+            return {"ok":True,"state":state,"revision":revision}
         draft_methods={"begin_function_draft","apply_draft_operations","inspect_function_draft","preview_function_draft"}
         if method in draft_methods and self.authoring_mode!="incremental":
             return {"ok":False,"code":"AUTHORING_MODE_MISMATCH","message":"Draft tools are disabled for the atomic arm",
@@ -409,27 +427,43 @@ class Cycle16Gateway:
             "authoring_mode":self.authoring_mode,"draft_id":self.draft_id}
         if method=="finalize_mission":
             revision=self.ws.get_revision(self.doc); validation=p.get("validation") or {}
+            lifecycle=p.get("pi_lifecycle") if isinstance(p.get("pi_lifecycle"),dict) else {}
             validation_ok=bool(validation.get("mission_complete") and validation.get("engines_agree") and
                 (validation.get("boundary_oracle") or {}).get("passed") and
                 (validation.get("replay") or {}).get("passed"))
-            if self.gateway.committed and validation_ok:
-                status=f"Agent mission passed · committed revision {revision} · MIR/JIT verified"
-            elif self.gateway.committed:
-                status=f"Agent mission failed · revision {revision} committed, host validation did not pass"
+            mission_events=[e for e in self.trace.events if e.get("mission_id")==self.gateway.mission_id]
+            if self.gateway.committed or any(e.get("event")=="preview_accepted" for e in mission_events):
+                authorization_status="authorized"
+            elif any(e.get("event")=="transaction_rejected" for e in mission_events):
+                authorization_status="denied"
             else:
-                reason="timed out" if p.get("timed_out") else "ended without an agent commit"
-                status=f"Agent mission failed · no agent commit · revision {revision} · {reason}"
+                authorization_status="not_attempted"
+            states=completion_states(committed=self.gateway.committed,validation=p.get("validation") if isinstance(p.get("validation"),dict) else None,
+                timed_out=bool(p.get("timed_out")),exit_code=p.get("pi_exit_code"),
+                agent_end_seen=bool(lifecycle.get("agent_end_seen")),
+                agent_settled_seen=bool(lifecycle.get("agent_settled_seen")),
+                pending_tool_count=len(lifecycle.get("pending_tools",{})) if isinstance(lifecycle.get("pending_tools"),dict) else len(lifecycle.get("pending_tool_ids",[])),
+                authorization_status=authorization_status)
+            status=(f"Program {states['semantic_program']} · authorization {states['mission_authorization']} · "
+                f"commit {states['program_commit']} · "
+                f"host validation {states['host_validation']} · Pi session {states['pi_agent_session']} · "
+                f"launcher {states['launcher_process']} · revision {revision}")
+            self.append_log(self.output/"pi-viewer-status.jsonl",{"record_type":"completion_classification",
+                "completion_states":states,"revision":revision,"agent_lifecycle":lifecycle,
+                "validation_revision":validation.get("executed_revision")})
             self.trace.emit("session_completed",phase=f"cycle17-{self.authoring_mode}-agent",actor="host_observer",
                 mission_id=self.gateway.mission_id,revision=revision,committed=self.gateway.committed,
-                timed_out=bool(p.get("timed_out")),mission_status=status)
+                timed_out=bool(p.get("timed_out")),mission_status=status,completion_states=states)
             self.flush_trace()
             self.emit_visual({"event_id":f"pi-mission-status-r{revision}","frame_id":f"pi-mission-status-r{revision}",
                 "event_type":"mission_status","revision":revision,"session_id":self.session_id,
                 "mission_id":self.mission_title,"provenance":"Host observation of actual Pi/gateway outcome",
                 "title":"Mission outcome","description":status,"mission_status":status,
+                "lifecycle":{"completion_states":states,"agent":lifecycle,
+                    "validation_revision":validation.get("executed_revision")},
                 "outcome":{"agent_commit":self.gateway.committed,"validation":validation or None,
                     "timed_out":bool(p.get("timed_out"))}})
-            return {"revision":revision,"committed":self.gateway.committed,"mission_status":status}
+            return {"revision":revision,"committed":self.gateway.committed,"mission_status":status,"completion_states":states}
         if method=="discover_functions":
             result=self.gateway.discover_functions(); self.flush_trace()
             f=self.ws.documents[self.doc].functions[0]

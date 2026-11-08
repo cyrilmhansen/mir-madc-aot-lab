@@ -104,6 +104,7 @@ class VisualFrameCompiler:
                  "dependencies":list(event.get("dependencies",self.dependencies)), "observation":self.latest_observation,
                  "observation_freshness":_freshness(self.latest_observation,self.revision), "event_refs":event.get("source_event_ref",event_id)}
         if self.mission_status is not None:frame["mission_status"]=self.mission_status
+        if event.get("lifecycle") is not None:frame["lifecycle"]=event["lifecycle"]
         self.frames.append(frame)
         return frame
 

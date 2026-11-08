@@ -106,4 +106,23 @@ class PiGatewayTests(unittest.TestCase):
         self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc),4)
         self.assertFalse(self.gateway.gateway.committed)
 
+    def test_lifecycle_status_and_timeout_classification_do_not_commit(self):
+        waiting=self.gateway.handle("record_agent_status",{"state":"no_observable_progress",
+            "info":{"assistant_stream_open":True,"pending_tool_names":[]}},"status")
+        self.assertTrue(waiting["ok"])
+        self.assertEqual(waiting["revision"],4)
+        self.assertFalse(self.gateway.gateway.committed)
+        finished=self.gateway.handle("finalize_mission",{"timed_out":True,"pi_exit_code":None,
+            "validation":None,"pi_lifecycle":{"state":"assistant_stream_open","agent_end_seen":False,
+                "agent_settled_seen":False,"pending_tools":{}}},"finish")
+        self.assertEqual(finished["completion_states"],{"semantic_program":"not_validated",
+            "mission_authorization":"not_attempted","program_commit":"not_committed",
+            "host_validation":"not_run","pi_agent_session":"incomplete_or_unobserved","launcher_process":"timed_out"})
+        self.assertFalse(self.gateway.gateway.committed)
+        self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc),4)
+        events=[json.loads(line) for line in (Path(self.temp.name)/"visual-events.jsonl").read_text().splitlines()]
+        self.assertEqual(events[-1]["event_type"],"mission_status")
+        self.assertIn("Pi session incomplete_or_unobserved",events[-1]["mission_status"])
+        self.assertIn("launcher timed_out",events[-1]["mission_status"])
+
 if __name__=="__main__":unittest.main()
