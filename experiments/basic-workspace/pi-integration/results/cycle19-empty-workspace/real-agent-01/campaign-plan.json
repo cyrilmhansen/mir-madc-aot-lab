@@ -1,0 +1,99 @@
+{
+  "schema": "basic-workspace.cycle19-experiment-plan",
+  "version": 1,
+  "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+  "pi_version": "1.5.0",
+  "workspace_start": "empty document, revision 1, zero tokens",
+  "missions": [
+    {
+      "schema": "basic-workspace.mission-contract",
+      "version": 1,
+      "mission_id": "cycle19.normalize-score.v1",
+      "objective": "Create CLAMP_SCORE(X): return 0 below 0, X from 0 through 100, and 100 above 100.",
+      "execution_profile": "basic-workspace.numeric-composition.v1",
+      "base_document_revision": 1,
+      "allowed_operations": [
+        "create_numeric_function"
+      ],
+      "allowed_function": {
+        "name": "CLAMP_SCORE",
+        "parameters": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      "required_discovered_dependency": null,
+      "preserved_program_invariants": [
+        "all prior functions and bindings remain structurally unchanged",
+        "exactly one new function is added",
+        "no arrays, locals, renames, edits, or unrelated declarations"
+      ],
+      "required_validation": {
+        "engines": [
+          "interp",
+          "jit"
+        ],
+        "expected_outputs": "independent host oracle"
+      },
+      "trust_boundary": "This contract is enforced only through the loopback MissionGateway; unrestricted host access is outside this experiment."
+    },
+    {
+      "schema": "basic-workspace.mission-contract",
+      "version": 1,
+      "mission_id": "cycle19.classify-passing.v1",
+      "objective": "Create IS_PASSING(X): return 1 when CLAMP_SCORE(X) is at least 60, otherwise 0.",
+      "execution_profile": "basic-workspace.numeric-composition.v1",
+      "base_document_revision": 2,
+      "allowed_operations": [
+        "create_numeric_function"
+      ],
+      "allowed_function": {
+        "name": "IS_PASSING",
+        "parameters": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      "required_discovered_dependency": "clamp_score.function",
+      "preserved_program_invariants": [
+        "all prior functions and bindings remain structurally unchanged",
+        "exactly one new function is added",
+        "no arrays, locals, renames, edits, or unrelated declarations"
+      ],
+      "required_validation": {
+        "engines": [
+          "interp",
+          "jit"
+        ],
+        "expected_outputs": "independent host oracle"
+      },
+      "trust_boundary": "This contract is enforced only through the loopback MissionGateway; unrestricted host access is outside this experiment."
+    }
+  ],
+  "authoring_mode": "atomic whole-function constructor",
+  "session_timeout_seconds": 240,
+  "automatic_retries": 0,
+  "preflight": {
+    "mode": "rpc",
+    "model_available": true,
+    "model_count": 1,
+    "active_tools": [
+      "workspace_discover_functions",
+      "workspace_inspect_program",
+      "workspace_preview_function",
+      "workspace_commit_preview",
+      "workspace_validate_mission"
+    ],
+    "expected_tools": [
+      "workspace_discover_functions",
+      "workspace_inspect_program",
+      "workspace_preview_function",
+      "workspace_commit_preview",
+      "workspace_validate_mission"
+    ],
+    "tool_inventory_exact": true,
+    "elapsed_ms": 271.76,
+    "model_endpoint_called": false
+  },
+  "session_limit_per_mission": 1
+}
