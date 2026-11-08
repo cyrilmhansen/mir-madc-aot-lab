@@ -2,8 +2,12 @@ import net from "node:net";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const TOOL_NAMES = ["workspace_discover_functions", "workspace_inspect_program",
-  "workspace_preview_function", "workspace_commit_preview", "workspace_validate_mission"];
+const COMMON_TOOLS = ["workspace_discover_functions", "workspace_inspect_program",
+  "workspace_commit_preview", "workspace_validate_mission"];
+const ATOMIC_TOOLS = [...COMMON_TOOLS, "workspace_preview_function"];
+const DRAFT_TOOLS = [...COMMON_TOOLS, "workspace_begin_function_draft", "workspace_apply_draft_operations",
+  "workspace_inspect_function_draft", "workspace_preview_function_draft"];
+const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS : ATOMIC_TOOLS;
 const MAX_RESPONSE = 1024 * 1024;
 
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
@@ -26,6 +30,23 @@ const IF_STATEMENT = Type.Object({ kind: Type.Literal("if"), condition: IF_CONDI
   then: Type.Array(RESULT_ASSIGN, { maxItems: 64 }), else: Type.Optional(Type.Array(RESULT_ASSIGN, { maxItems: 64 })) },
   { additionalProperties: false });
 const FUNCTION_STATEMENT = Type.Union([RESULT_ASSIGN, IF_STATEMENT]);
+
+// Flat discriminated operations reference draft-local handles. Expression trees
+// are assembled from nodes rather than recursively repeated in every request.
+const DRAFT_OPERATION = Type.Union([
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_number"), handle: Type.String(), value: Type.Number() }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_parameter_ref"), handle: Type.String(), name: Type.Literal("ID") }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_function_call"), handle: Type.String(),
+    function_handle: Type.Literal("age_by_id.function"), arguments: Type.Array(Type.String(), { minItems: 1, maxItems: 1 }) }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_unary_expression"), handle: Type.String(),
+    operator: Type.Unsafe({ type: "string", enum: ["+", "-"] }), operand: Type.String() }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("define_binary_expression"), handle: Type.String(),
+    operator: OPERATOR_SCHEMA, left: Type.String(), right: Type.String() }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("append_result_assignment"), handle: Type.String(),
+    block: Type.String(), expression: Type.String() }, { additionalProperties: false }),
+  Type.Object({ op_id: Type.String(), kind: Type.Literal("append_if_block"), handle: Type.String(),
+    block: Type.String(), condition: Type.String(), then_block: Type.String(), else_block: Type.String() }, { additionalProperties: false }),
+]);
 
 class GatewayBridge {
   private socket?: net.Socket;
@@ -128,4 +149,23 @@ export default function (pi: ExtensionAPI) {
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("validate_mission", { ...params, toolCallId }, 120000));
     }});
+  pi.registerTool({ name: "workspace_begin_function_draft", label: "Begin typed function draft",
+    description: "Open a temporary revision-bound numeric function draft. This does not change committed BASIC. Discover AGE_BY_ID first.",
+    parameters: Type.Object({ expected_revision: Type.Integer(), name: Type.Literal("IS_ADULT"),
+      parameters: Type.Array(Type.Literal("ID"), { minItems: 1, maxItems: 1 }),
+      callee_handle: Type.Literal("age_by_id.function") }, { additionalProperties: false }),
+    async execute(toolCallId, params) { return toolResult(await gateway.call("begin_function_draft", { ...params, toolCallId })); }});
+  pi.registerTool({ name: "workspace_apply_draft_operations", label: "Apply typed draft operations",
+    description: "Apply an ordered atomic batch of flat typed draft operations. Earlier draft-local handles may be referenced by later operations. A failed batch changes neither draft nor Workspace.",
+    parameters: Type.Object({ draft_id: Type.String(), expected_draft_revision: Type.Integer(),
+      operations: Type.Array(DRAFT_OPERATION, { minItems: 1, maxItems: 16 }) }, { additionalProperties: false }),
+    async execute(toolCallId, params) { return toolResult(await gateway.call("apply_draft_operations", { ...params, toolCallId })); }});
+  pi.registerTool({ name: "workspace_inspect_function_draft", label: "Inspect function draft",
+    description: "Inspect the typed draft's revision, handles, ordered statements and pending preview without changing committed BASIC.",
+    parameters: Type.Object({ draft_id: Type.String() }, { additionalProperties: false }),
+    async execute(toolCallId, params) { return toolResult(await gateway.call("inspect_function_draft", { ...params, toolCallId })); }});
+  pi.registerTool({ name: "workspace_preview_function_draft", label: "Preview complete function draft",
+    description: "Resolve the complete draft and ask the existing MissionGateway to validate the whole candidate at the current Workspace and draft revisions. Preview never commits.",
+    parameters: Type.Object({ draft_id: Type.String(), expected_revision: Type.Integer(), expected_draft_revision: Type.Integer() }, { additionalProperties: false }),
+    async execute(toolCallId, params) { return toolResult(await gateway.call("preview_function_draft", { ...params, toolCallId })); }});
 }

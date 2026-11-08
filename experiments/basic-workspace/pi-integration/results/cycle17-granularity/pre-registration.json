@@ -1,0 +1,39 @@
+{
+  "schema": "basic-workspace.semantic-operation-granularity-plan",
+  "version": 1,
+  "registered_before_model_sessions": true,
+  "provider": "sushi",
+  "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+  "pi_version": "1.5.0",
+  "thinking_level": "low",
+  "max_wall_seconds_per_arm": 180,
+  "automatic_retries": 0,
+  "output_token_override": null,
+  "sampling_overrides": null,
+  "workspace_seed": {
+    "revision": 4,
+    "functions": ["AGE_BY_ID", "IS_SENIOR"],
+    "age_by_id": {"101": 25, "205": 55, "900": 53},
+    "unknown_id_result": -1,
+    "independent_workspace_per_arm": true
+  },
+  "common_task": "Add IS_ADULT(ID), returning 1 when AGE_BY_ID(ID) is at least 18 and 0 otherwise, including unknown IDs. Preserve AGE_BY_ID, IS_SENIOR, arrays and existing data.",
+  "common_instructions": "Use only the semantic Workspace tools. First discover the callable function and inspect the live structure. The new function must call the discovered AGE_BY_ID identity. Do not provide BASIC source text. The gateway enforces mission scope and revisions. Stop and report any rejection instead of bypassing it.",
+  "arm_specific_instructions": {
+    "atomic": "Build the complete typed function with the whole-function constructor, preview it, commit only an accepted preview, and validate through MIR interpreter and JIT.",
+    "incremental": "Begin a revision-bound temporary function draft. Create typed numeric expressions with draft-local handles, append result assignments, and assemble an IF with branch blocks using ordered draft operations. Inspect the draft, preview the whole candidate through the MissionGateway, commit only an accepted preview, and validate through MIR interpreter and JIT. Draft operations are temporary; they do not commit BASIC individually."
+  },
+  "success_criteria": [
+    "Genuine model preview accepted and authorized commit",
+    "IS_ADULT calls the discovered AGE_BY_ID function by semantic binding",
+    "Existing functions and data unchanged from the revision-4 seed",
+    "Expected outputs for IDs 101, 205, 900, 999, and 2",
+    "Age-17 and age-18 boundary fixtures pass",
+    "MIR interpreter and JIT agree",
+    "Fresh-workspace portable replay passes structural, binding, and behavioral checks"
+  ],
+  "arm_outputs": {
+    "atomic": "arm-a-atomic",
+    "incremental": "arm-b-incremental"
+  }
+}
