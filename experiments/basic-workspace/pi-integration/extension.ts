@@ -91,12 +91,15 @@ class GatewayBridge {
     await new Promise<void>((resolve, reject) => { sock.once("connect", resolve); sock.once("error", reject); });
   }
 
-  async call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30000): Promise<any> {
+  async call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30000,
+    toolCallId?: string): Promise<any> {
     await this.connect(); const request_id = `pi-${Date.now()}-${++this.serial}`;
+    const transport = toolCallId === undefined ? undefined : { tool_call_id: toolCallId };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(request_id); reject(new Error("gateway request timed out")); }, timeoutMs);
       this.pending.set(request_id, { resolve, reject, timer });
-      this.socket!.write(JSON.stringify({ request_id, method, params }) + "\n", error => {
+      this.socket!.write(JSON.stringify({ request_id, method, params,
+        ...(transport === undefined ? {} : { transport }) }) + "\n", error => {
         if (error) { clearTimeout(timer); this.pending.delete(request_id); reject(error); }
       });
     });
@@ -133,12 +136,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({ name: "workspace_discover_functions", label: "Discover BASIC functions",
     description: "Discover callable functions and signatures in the current revision. Use this before constructing a call.",
     parameters: Type.Object({}), async execute(toolCallId) {
-      return toolResult(await gateway.call("discover_functions", { toolCallId }));
+      return toolResult(await gateway.call("discover_functions", {}, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_inspect_program", label: "Inspect BASIC structure",
     description: "Inspect the current revision's semantic functions, parameters, arrays and call dependencies.",
     parameters: Type.Object({}), async execute(toolCallId) {
-      return toolResult(await gateway.call("inspect_program", { toolCallId }));
+      return toolResult(await gateway.call("inspect_program", {}, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_preview_function", label: "Preview semantic function",
     description: 'Preview one typed numeric function through the mission gateway; preview never commits. Discover functions first. Calls carry their discovered portable handle inside the call expression; the optional top-level callee_handle is retained for compatibility and normally omitted. A result assignment looks like {"kind":"assign","target":{"kind":"result"},"expression":{"kind":"number","value":0}}. A bound call expression looks like {"kind":"call","function_handle":"<discovered-handle>","arguments":[{"kind":"local_ref","name":"<parameter>"}]}. Expressions are numeric literals, local parameter references, or bound calls; IF conditions compare two such expressions. IF branches contain result assignments (no nested IF). Use sequential IF statements where needed. The gateway separately enforces mission-specific scope, signature, and dependency. No source text is accepted.',
@@ -146,44 +149,44 @@ export default function (pi: ExtensionAPI) {
       parameters: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
       body: Type.Array(FUNCTION_STATEMENT, { minItems: 1, maxItems: 64 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
-      return toolResult(await gateway.call("preview_create_function", { ...params, toolCallId }));
+      return toolResult(await gateway.call("preview_create_function", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_preview_semantic_edit", label: "Preview semantic literal edit",
     description: "Preview both authorized numeric literal edits as one candidate. First discover the functions and inspect the gateway-provided typed target paths. A target uses the discovered function_handle plus either a control_path and expression_path for an IF comparison operand, or a discovered statement_handle and empty expression_path for an assignment RHS. Include expected_value preconditions. Preview never changes committed BASIC; commit only the accepted transaction. Mission authorization is checked against the complete candidate.",
     parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
       edits: Type.Array(SEMANTIC_EDIT, { minItems: 2, maxItems: 2 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
-      return toolResult(await gateway.call("preview_semantic_edit", { ...params, toolCallId }));
+      return toolResult(await gateway.call("preview_semantic_edit", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_commit_preview", label: "Commit semantic preview",
     description: "Commit an accepted gateway preview by its transaction ID. Commit rechecks the mission and revision atomically.",
     parameters: Type.Object({ transaction_id: Type.String() }, { additionalProperties: false }),
     async execute(toolCallId, params) {
-      return toolResult(await gateway.call("commit_preview", { ...params, toolCallId }));
+      return toolResult(await gateway.call("commit_preview", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_validate_mission", label: "Validate BASIC mission",
     description: "Run the independent MIR interpreter/JIT oracle and fresh-workspace replay checks at an explicit revision.",
     parameters: Type.Object({ expected_revision: Type.Integer() }, { additionalProperties: false }),
     async execute(toolCallId, params) {
-      return toolResult(await gateway.call("validate_mission", { ...params, toolCallId }, 120000));
+      return toolResult(await gateway.call("validate_mission", params, 120000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_begin_function_draft", label: "Begin typed function draft",
     description: "Open a temporary revision-bound numeric function draft. This does not change committed BASIC. Discover the permitted call target first.",
     parameters: Type.Object({ expected_revision: Type.Integer(), name: Type.String(),
       parameters: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
       callee_handle: Type.String() }, { additionalProperties: false }),
-    async execute(toolCallId, params) { return toolResult(await gateway.call("begin_function_draft", { ...params, toolCallId })); }});
+    async execute(toolCallId, params) { return toolResult(await gateway.call("begin_function_draft", params, 30000, toolCallId)); }});
   pi.registerTool({ name: "workspace_apply_draft_operations", label: "Apply typed draft operations",
     description: "Apply an ordered atomic batch of flat typed draft operations. Earlier draft-local handles may be referenced by later operations. A failed batch changes neither draft nor Workspace.",
     parameters: Type.Object({ draft_id: Type.String(), expected_draft_revision: Type.Integer(),
       operations: Type.Array(DRAFT_OPERATION, { minItems: 1, maxItems: 32 }) }, { additionalProperties: false }),
-    async execute(toolCallId, params) { return toolResult(await gateway.call("apply_draft_operations", { ...params, toolCallId })); }});
+    async execute(toolCallId, params) { return toolResult(await gateway.call("apply_draft_operations", params, 30000, toolCallId)); }});
   pi.registerTool({ name: "workspace_inspect_function_draft", label: "Inspect function draft",
     description: "Inspect the typed draft's revision, handles, ordered statements and pending preview without changing committed BASIC.",
     parameters: Type.Object({ draft_id: Type.String() }, { additionalProperties: false }),
-    async execute(toolCallId, params) { return toolResult(await gateway.call("inspect_function_draft", { ...params, toolCallId })); }});
+    async execute(toolCallId, params) { return toolResult(await gateway.call("inspect_function_draft", params, 30000, toolCallId)); }});
   pi.registerTool({ name: "workspace_preview_function_draft", label: "Preview complete function draft",
     description: "Resolve the complete draft and ask the existing MissionGateway to validate the whole candidate at the current Workspace and draft revisions. Preview never commits.",
     parameters: Type.Object({ draft_id: Type.String(), expected_revision: Type.Integer(), expected_draft_revision: Type.Integer() }, { additionalProperties: false }),
-    async execute(toolCallId, params) { return toolResult(await gateway.call("preview_function_draft", { ...params, toolCallId })); }});
+    async execute(toolCallId, params) { return toolResult(await gateway.call("preview_function_draft", params, 30000, toolCallId)); }});
 }

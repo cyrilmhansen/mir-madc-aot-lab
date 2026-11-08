@@ -18,6 +18,29 @@ class PiLifecycleTests(unittest.TestCase):
             "program_commit":"committed","host_validation":"passed","pi_agent_session":"incomplete_or_unobserved",
             "launcher_process":"timed_out"})
 
+    def test_completion_classifier_accepts_cycle20_mission_oracle_shape(self):
+        # Cycle 20 records mission-specific checks (and replay), rather than
+        # Cycle 19's boundary_oracle object. The common completion contract is
+        # still independently host-owned.
+        validation={"mission_complete":True,"engines_agree":True,"values_match":True,
+            "CLAMP_SCORE_matches_cap50_semantics":True,
+            "IS_PASSING_all_zero_on_test_domain":True,
+            "replay":{"passed":True}}
+        result=MOD.completion_states(committed=True,validation=validation,timed_out=False,
+            exit_code=0,agent_end_seen=True,agent_settled_seen=True,
+            authorization_status="authorized")
+        self.assertEqual(result["semantic_program"],"passed")
+        self.assertEqual(result["host_validation"],"passed")
+        self.assertEqual(result["program_commit"],"committed")
+
+    def test_completion_classifier_rejects_mission_oracle_mismatch(self):
+        validation={"mission_complete":True,"engines_agree":True,"values_match":False,
+            "replay":{"passed":True}}
+        result=MOD.completion_states(committed=True,validation=validation,timed_out=False,
+            exit_code=0,agent_end_seen=True,agent_settled_seen=True)
+        self.assertEqual(result["semantic_program"],"failed")
+        self.assertEqual(result["host_validation"],"failed")
+
     def test_timeout_without_commit_is_not_semantic_failure_claim(self):
         result=MOD.completion_states(committed=False,validation=None,timed_out=True,exit_code=None,
             agent_end_seen=False,agent_settled_seen=False)

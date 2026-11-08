@@ -239,11 +239,11 @@ class Cycle16Gateway:
     def flush_trace(self): self.trace.write(self.output/"history.jsonl")
 
     def record_gateway_timing(self,request:dict[str,Any],elapsed_ms:float):
-        params=request.get("params") or {}; method=request.get("method")
+        params=request.get("params") or {}; transport=request.get("transport") or {}; method=request.get("method")
         tool_methods={"discover_functions","inspect_program","preview_create_function","commit_preview",
             "validate_mission","begin_function_draft","apply_draft_operations","inspect_function_draft","preview_function_draft"}
         self.append_log(self.gateway_timings,{"request_id":request.get("request_id"),
-            "tool_call_id":params.get("toolCallId"),"method":method,"elapsed_ms":round(elapsed_ms,3),
+            "tool_call_id":transport.get("tool_call_id"),"method":method,"elapsed_ms":round(elapsed_ms,3),
             "operation_count":len(params.get("operations",[])) if isinstance(params.get("operations"),list) else None,
             "agent_tool":method in tool_methods})
 
@@ -725,6 +725,12 @@ class Handler(socketserver.StreamRequestHandler):
             try:
                 req=json.loads(raw); rid=req.get("request_id")
                 if not isinstance(rid,str) or not rid:raise ValueError("request_id is required")
+                transport=req.get("transport",{})
+                if not isinstance(transport,dict) or set(transport)-{"tool_call_id"}:
+                    raise ValueError("transport metadata may contain only tool_call_id")
+                call_id=transport.get("tool_call_id")
+                if call_id is not None and (not isinstance(call_id,str) or not call_id or len(call_id)>256):
+                    raise ValueError("transport.tool_call_id must be a non-empty string of at most 256 characters")
                 # Pi may dispatch tool calls concurrently. Keep revision checks,
                 # preview bookkeeping and commits serialized against one Workspace.
                 started=time.perf_counter_ns()

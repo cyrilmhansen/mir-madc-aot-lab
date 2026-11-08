@@ -86,6 +86,9 @@ class Cycle20Gateway:
         self.visual_path = self.output / "visual-events.jsonl"
         self.timing_path = self.output / "gateway-tool-timings.jsonl"
         self.pi_path = self.output / "pi-tool-lifecycle.jsonl"
+        # Use the actual campaign output identity so separate Cycle 20 runs
+        # cannot be mislabeled as the original real-agent-01 session.
+        self.session_id = f"cycle20-{self.output.name}"
         self.executor = MirExecutionService(timeout=20)
         self.constructive_ops = []
         self._reconstruct_baseline()
@@ -93,6 +96,7 @@ class Cycle20Gateway:
     def record_gateway_timing(self, request: dict[str, Any], elapsed_ms: float):
         """Implement the shared Pi bridge instrumentation hook."""
         self._log(self.timing_path, {"request_id": request.get("request_id"),
+            "tool_call_id": (request.get("transport") or {}).get("tool_call_id"),
             "method": request.get("method"), "elapsed_ms": round(elapsed_ms, 3),
             "observed_monotonic_ns": time.monotonic_ns()})
 
@@ -112,7 +116,7 @@ class Cycle20Gateway:
         self.seq += 1
         event.setdefault("presentation_sequence", self.seq)
         event.setdefault("event_id", f"cycle20-{self.seq}-{uuid.uuid4().hex[:8]}")
-        event.setdefault("session_id", "cycle20-real-agent-01")
+        event.setdefault("session_id", self.session_id)
         event.setdefault("mission_id", MISSION_ID)
         self._log(self.visual_path, event)
 
@@ -701,10 +705,14 @@ class Cycle20Gateway:
         if method == "record_pi_event":
             return self.record_pi_event(params)
         if method == "get_status":
+            if params:
+                raise WorkspaceError("UNKNOWN_SEMANTIC_FIELD", "get_status accepts no semantic arguments")
             return {"revision": self.ws.get_revision(self.doc), "committed": self.committed,
                 "function_handles": sorted(h for h in self.aliases if h.endswith(".function")),
                 "discovered": sorted(self.discovered)}
         if method == "discover_functions":
+            if params:
+                raise WorkspaceError("UNKNOWN_SEMANTIC_FIELD", "discover_functions accepts no semantic arguments")
             functions = []
             for item in self.baseline["functions"]:
                 handle = item["handle"]
@@ -720,19 +728,23 @@ class Cycle20Gateway:
                 "dependencies": self.dependencies()})
             return {"revision": self.ws.get_revision(self.doc), "functions": functions}
         if method == "inspect_program":
+            if params:
+                raise WorkspaceError("UNKNOWN_SEMANTIC_FIELD", "inspect_program accepts no semantic arguments")
             self._history("program_inspected", "pi_model_tool", request_id=request_id, revision=self.ws.get_revision(self.doc))
             return self._inspect()
         if method == "preview_semantic_edit":
-            # Pi adds this transport correlation field to every tool payload. It
-            # is metadata, not part of the semantic edit contract.
-            semantic_request = dict(params)
-            semantic_request.pop("toolCallId", None)
-            return self._preview(semantic_request, request_id)
+            return self._preview(params, request_id)
         if method == "commit_preview":
+            if set(params) != {"transaction_id"}:
+                raise WorkspaceError("UNKNOWN_SEMANTIC_FIELD", "commit_preview requires only transaction_id")
             return self._commit(params, request_id)
         if method == "validate_mission":
+            if set(params) != {"expected_revision"}:
+                raise WorkspaceError("UNKNOWN_SEMANTIC_FIELD", "validate_mission requires only expected_revision")
             return self.validate_current(params.get("expected_revision"), actor="pi_tool")
         if method == "host_validate":
+            if set(params) != {"expected_revision"}:
+                raise WorkspaceError("UNKNOWN_SEMANTIC_FIELD", "host_validate requires only expected_revision")
             return self.validate_current(params.get("expected_revision"), actor="host")
         if method == "record_agent_status":
             self._emit({"event_type": "mission_status", "revision": self.ws.get_revision(self.doc),

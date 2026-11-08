@@ -570,8 +570,8 @@ class Cycle19Gateway:
         try:return self._dependencies()
         except WorkspaceError:return []
     def record_gateway_timing(self,request,elapsed_ms):
-        params=request.get("params") or {}; method=request.get("method")
-        self.append_log(self.gateway_timings,{"request_id":request.get("request_id"),"tool_call_id":params.get("toolCallId"),
+        params=request.get("params") or {}; transport=request.get("transport") or {}; method=request.get("method")
+        self.append_log(self.gateway_timings,{"request_id":request.get("request_id"),"tool_call_id":transport.get("tool_call_id"),
             "method":method,"mission_id":self._mission_id(),"phase":self.phase,"elapsed_ms":round(elapsed_ms,3),
             "agent_tool":method in {"discover_functions","inspect_program","preview_create_function","commit_preview","validate_mission"}})
     def flush_trace(self):self.trace.write(self.output/"history.jsonl")

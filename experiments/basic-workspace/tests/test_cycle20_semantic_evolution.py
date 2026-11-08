@@ -46,6 +46,11 @@ class Cycle20SemanticEvolutionTests(unittest.TestCase):
         self.assertEqual(self.gateway.dependencies(), [
             {"caller": "IS_PASSING", "callee": "CLAMP_SCORE"}])
 
+    def test_presentation_session_label_uses_campaign_output_identity(self):
+        self.gateway._emit({"event_type": "selection", "revision": 3})
+        event = json.loads((self.gateway.output / "visual-events.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["session_id"], f"cycle20-{self.gateway.output.name}")
+
     def test_inspection_exposes_both_typed_locations_without_source_search(self):
         discovered = self.discovered()
         targets = discovered["editable_upper_bound_occurrences"]
@@ -70,16 +75,33 @@ class Cycle20SemanticEvolutionTests(unittest.TestCase):
         self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc), before_revision)
         self.assertEqual([(t.uid, t.text) for t in self.gateway.ws.documents[self.gateway.doc].tokens], before_tokens)
 
-    def test_pi_transport_correlation_metadata_is_not_a_semantic_edit_field(self):
+    def test_transport_metadata_leaked_into_semantic_arguments_is_rejected(self):
         self.discovered()
         request = self.request()
         request["toolCallId"] = "fixture-pi-call-17"
         result = self.gateway.handle("preview_semantic_edit", request, "gateway-request-17")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["atomic_edit_count"], 2)
-        self.assertEqual(result["base_revision"], 3)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "INVALID_EDIT_REQUEST")
+        self.assertTrue(result["revision_unchanged"])
+        self.assertFalse(result["authoritative_workspace_changed"])
         self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc), 3)
-        self.assertIn(result["transaction_id"], self.gateway.preview_pending)
+
+    def test_empty_expression_path_is_valid_but_absent_path_is_not(self):
+        self.discovered()
+        valid = self.request()
+        assignment = next(row for row in valid["edits"] if "statement_handle" in row["target"])
+        self.assertEqual(assignment["target"]["expression_path"], [])
+        preview = self.gateway.handle("preview_semantic_edit", valid, "empty-path")
+        self.assertTrue(preview["ok"])
+        self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc), 3)
+
+        absent = self.request()
+        assignment = next(row for row in absent["edits"] if "statement_handle" in row["target"])
+        assignment["target"].pop("expression_path")
+        rejected = self.gateway.handle("preview_semantic_edit", absent, "absent-path")
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "MISSION_EDIT_TARGETS")
+        self.assertEqual(self.gateway.ws.get_revision(self.gateway.doc), 3)
 
     def test_atomic_commit_preserves_ids_and_fresh_replay(self):
         self.discovered()

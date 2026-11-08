@@ -24,9 +24,15 @@ def completion_states(*, committed: bool, validation: dict[str, Any] | None,
                       pending_tool_count: int = 0,
                       authorization_status: str | None = None) -> dict[str, str]:
     """Keep code correctness, gateway/host result, and Pi lifecycle independent."""
+    # Validation profiles have mission-specific oracle fields (for example
+    # ``boundary_oracle`` in Cycle 19 and named predicate checks in Cycle 20).
+    # The common, host-owned completion contract is the explicit mission result,
+    # interpreter/JIT agreement, value matching when reported, and replay when
+    # replay is part of the campaign. Do not require a field belonging to one
+    # earlier mission schema.
     host_ok = bool(validation and validation.get("mission_complete") is True
         and validation.get("engines_agree") is True
-        and (validation.get("boundary_oracle") or {}).get("passed") is True
+        and validation.get("values_match", True) is True
         and (validation.get("replay") or {}).get("passed") is True)
     semantic = "passed" if host_ok else "failed" if validation is not None else "not_validated"
     host = "passed" if host_ok else "failed" if validation is not None else "not_run"
