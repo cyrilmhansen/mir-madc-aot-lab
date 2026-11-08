@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,7 @@ def resolve_config(path: Path = DEFAULT_CONFIG, env: dict[str, str] | None = Non
     try:
         timeout = env_override("BASIC_WS_TIMEOUT_SECONDS", "request_timeout_seconds", float)
         max_tokens = env_override("BASIC_WS_MAX_OUTPUT_TOKENS", "max_output_tokens", int)
+        preflight_tokens = env_override("BASIC_WS_PREFLIGHT_MAX_OUTPUT_TOKENS", "preflight_max_output_tokens", int)
         temperature = env_override("BASIC_WS_TEMPERATURE", "temperature", float)
         top_p = env_override("BASIC_WS_TOP_P", "top_p", float)
         seed = env_override("BASIC_WS_SEED", "seed", int)
@@ -80,6 +82,7 @@ def resolve_config(path: Path = DEFAULT_CONFIG, env: dict[str, str] | None = Non
     try:
         timeout = float(timeout) if timeout is not None else None
         max_tokens = int(max_tokens) if max_tokens is not None else None
+        preflight_tokens = int(preflight_tokens) if preflight_tokens is not None else None
         temperature = float(temperature) if temperature is not None else None
         top_p = float(top_p) if top_p is not None else None
         seed = int(seed) if seed is not None else None
@@ -87,12 +90,15 @@ def resolve_config(path: Path = DEFAULT_CONFIG, env: dict[str, str] | None = Non
         raise ProviderConfigError("sampling or timeout configuration has an invalid type") from None
     timeout = 60.0 if timeout is None else timeout
     max_tokens = 1200 if max_tokens is None else max_tokens
+    preflight_tokens = min(max_tokens, 1400) if preflight_tokens is None else preflight_tokens
     temperature = 0.0 if temperature is None else temperature
     top_p = 1.0 if top_p is None else top_p
     if timeout <= 0 or timeout > 600:
         raise ProviderConfigError("request_timeout_seconds must be in (0, 600]")
     if max_tokens < 1 or max_tokens > 32768:
         raise ProviderConfigError("max_output_tokens must be in [1, 32768]")
+    if preflight_tokens < 1 or preflight_tokens > 32768:
+        raise ProviderConfigError("preflight_max_output_tokens must be in [1, 32768]")
     if not 0 <= temperature <= 2 or not 0 < top_p <= 1:
         raise ProviderConfigError("temperature or top_p is outside its supported range")
     if think is not None and not isinstance(think, bool):
@@ -107,6 +113,7 @@ def resolve_config(path: Path = DEFAULT_CONFIG, env: dict[str, str] | None = Non
     return {"endpoint_url": endpoint, "model": model, "api_key": api_key or None,
             "api_key_configured": bool(api_key), "api_key_env": key_env,
             "request_timeout_seconds": timeout, "max_output_tokens": max_tokens,
+            "preflight_max_output_tokens": preflight_tokens,
             "temperature": temperature, "top_p": top_p, "seed": seed,
             "think": think,
             "config_path": str(path)}
@@ -131,64 +138,147 @@ def _models_url(endpoint: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
-def run_preflight(config: dict[str, Any], probe_timeout: float = 45.0) -> dict[str, Any]:
-    """Check model listing and one bounded required tool call; never retry."""
-    result: dict[str, Any] = {"schema": "basic-workspace.provider-preflight", "version": 1,
-                              "provider": safe_metadata(config), "configured_timeout_seconds": config["request_timeout_seconds"],
-                              "probe_output_token_limit": 128, "stages": []}
+def _usage(response: dict[str, Any]) -> dict[str, int | None]:
+    usage = response.get("usage") or {}
+    details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    return {"prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "cached_prompt_tokens": details.get("cached_tokens"),
+            "reasoning_tokens": completion_details.get("reasoning_tokens")}
+
+
+def _tool_call_valid(response: dict[str, Any]) -> tuple[bool, str, str | None]:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False, "invalid_tool_call_response", "missing_choice"
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return False, "invalid_tool_call_response", choice.get("finish_reason")
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+        return False, "invalid_tool_call_response", choice.get("finish_reason")
+    function = calls[0].get("function")
+    if not isinstance(function, dict) or function.get("name") != "preflight_ok":
+        return False, "invalid_tool_call_response", choice.get("finish_reason")
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return False, "invalid_tool_call_response", choice.get("finish_reason")
+    if not isinstance(arguments, dict) or set(arguments) != {"ok"} or arguments["ok"] is not True:
+        return False, "invalid_tool_call_response", choice.get("finish_reason")
+    return True, "verified_compatible", choice.get("finish_reason")
+
+
+def _probe_tool_call(config: dict[str, Any], timeout: float, tool_choice: str,
+                     endpoint_factory: Any) -> dict[str, Any]:
+    from experiment.llm_runner import schema
+    probe_config = dict(config)
+    probe_config["request_timeout_seconds"] = timeout
+    probe_config["max_output_tokens"] = config.get("preflight_max_output_tokens",
+                                                    min(config.get("max_output_tokens", 1400), 1400))
+    endpoint = endpoint_factory(probe_config)
+    tools = [schema("preflight_ok", "Return the required boolean confirmation.",
+                    {"ok": {"type": "boolean"}}, ["ok"])]
+    messages = [{"role": "system", "content": "For this protocol check, call preflight_ok exactly once with ok=true."},
+                {"role": "user", "content": "Use the preflight_ok tool now."}]
     started = time.monotonic()
     try:
-        with urlopen(Request(_models_url(config["endpoint_url"]), method="GET"),
-                     timeout=min(probe_timeout, config["request_timeout_seconds"])) as response:
-            body = json.loads(response.read(2 * 1024 * 1024 + 1))
+        response, _ = endpoint.complete(messages, tools, tool_choice=tool_choice)
+        valid, classification, finish_reason = _tool_call_valid(response)
+        if not valid and finish_reason == "length":
+            classification = "output_limit_exhausted"
+        return {"ok": valid, "classification": classification,
+                "tool_choice": tool_choice, "finish_reason": finish_reason,
+                "usage": _usage(response),
+                "request_bytes": getattr(endpoint, "last_request_bytes", None),
+                "response_bytes": getattr(endpoint, "last_response_bytes", None),
+                "latency_ms": getattr(endpoint, "last_elapsed_ms", round((time.monotonic()-started)*1000, 1))}
+    except TimeoutError:
+        classification = "request_timed_out"
+    except URLError:
+        classification = "provider_unavailable"
+    except RuntimeError as exc:
+        message = str(exc)
+        match = re.search(r"HTTP (\d{3})", message)
+        http_status = int(match.group(1)) if match else None
+        if http_status in (400, 422):
+            classification = "invalid_tool_call_response"
+        elif http_status is not None and http_status >= 500 or "endpoint unavailable" in message:
+            classification = "provider_unavailable"
+        else:
+            classification = "invalid_tool_call_response"
+    except (ValueError, TypeError, KeyError, IndexError):
+        classification = "invalid_tool_call_response"
+    return {"ok": False, "classification": classification,
+            "tool_choice": tool_choice, "finish_reason": None, "usage": None,
+            "http_status": locals().get("http_status"),
+            "request_bytes": getattr(locals().get("endpoint"), "last_request_bytes", None),
+            "response_bytes": getattr(locals().get("endpoint"), "last_response_bytes", None),
+            "latency_ms": getattr(locals().get("endpoint"), "last_elapsed_ms",
+                                   round((time.monotonic()-started)*1000, 1))}
+
+
+def run_preflight(config: dict[str, Any], probe_timeout: float | None = None,
+                  diagnose_required: bool = False, endpoint_factory: Any = None) -> dict[str, Any]:
+    """Check model listing, then match the agent runner's auto-tool request.
+
+    A second, deliberately different ``tool_choice=required`` request is sent
+    only when requested and the compatibility response was complete but invalid.
+    Timeouts and output truncation never trigger a retry.
+    """
+    from experiment.provider_config import make_chat_endpoint
+    endpoint_factory = endpoint_factory or make_chat_endpoint
+    timeout = config["request_timeout_seconds"] if probe_timeout is None else float(probe_timeout)
+    if timeout <= 0 or timeout > 600:
+        raise ProviderConfigError("probe timeout override must be in (0, 600]")
+    result: dict[str, Any] = {"schema": "basic-workspace.provider-preflight", "version": 2,
+                              "provider": safe_metadata(config),
+                              "configured_timeout_seconds": config["request_timeout_seconds"],
+                              "probe_timeout_seconds": timeout,
+                              "probe_output_token_limit": config.get("preflight_max_output_tokens",
+                                  min(config.get("max_output_tokens", 1400), 1400)), "stages": []}
+    started = time.monotonic()
+    try:
+        with urlopen(Request(_models_url(config["endpoint_url"]), method="GET"), timeout=timeout) as response:
+            raw_models = response.read(2 * 1024 * 1024 + 1)
+        if len(raw_models) > 2 * 1024 * 1024:
+            raise ValueError("model listing exceeded response limit")
+        body = json.loads(raw_models)
         available = [item.get("id") for item in body.get("data", []) if isinstance(item, dict)]
         matched = config["model"] in available
         result["stages"].append({"name": "model_listing", "ok": matched,
                                  "http_status": 200, "available_model_count": len(available),
                                  "requested_model_available": matched})
         if not matched:
-            result.update(status="failed", failure_stage="model_listing", elapsed_ms=round((time.monotonic()-started)*1000, 1))
+            result.update(status="model_unavailable", elapsed_ms=round((time.monotonic()-started)*1000, 1))
             return result
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError, TypeError, AttributeError) as exc:
+        classification = "request_timed_out" if isinstance(exc, TimeoutError) else "provider_unavailable"
         result["stages"].append({"name": "model_listing", "ok": False,
+                                 "classification": classification,
                                  "error_type": type(exc).__name__,
                                  "http_status": getattr(exc, "code", None)})
-        result.update(status="failed", failure_stage="model_listing", elapsed_ms=round((time.monotonic()-started)*1000, 1))
+        result.update(status=classification, elapsed_ms=round((time.monotonic()-started)*1000, 1))
         return result
 
-    payload = {"model": config["model"], "messages": [
-        {"role": "system", "content": "Call the required tool. Do not explain."},
-        {"role": "user", "content": "Call preflight_ok with ok=true."}],
-        "tools": [{"type": "function", "function": {"name": "preflight_ok",
-            "description": "Confirms tool calling is available", "parameters": {
-                "type": "object", "properties": {"ok": {"type": "boolean"}},
-                "required": ["ok"], "additionalProperties": False}}}],
-        "tool_choice": "required", "temperature": 0, "max_tokens": 128}
-    headers = {"Content-Type": "application/json"}
-    if config.get("api_key"):
-        headers["Authorization"] = "Bearer " + config["api_key"]
-    request_bytes = len(json.dumps(payload, separators=(",", ":")).encode())
-    probe_started = time.monotonic()
-    try:
-        request = Request(config["endpoint_url"], data=json.dumps(payload).encode(), headers=headers, method="POST")
-        with urlopen(request, timeout=min(probe_timeout, config["request_timeout_seconds"])) as response:
-            raw = response.read(1024 * 1024 + 1)
-            data = json.loads(raw)
-            choice = data.get("choices", [{}])[0]
-            calls = choice.get("message", {}).get("tool_calls", [])
-        valid = bool(calls) and calls[0].get("function", {}).get("name") == "preflight_ok"
-        result["stages"].append({"name": "tool_call", "ok": valid, "http_status": response.status,
-            "tool_call_received": bool(calls), "finish_reason": choice.get("finish_reason"),
-            "request_bytes": request_bytes, "response_bytes": len(raw),
-            "elapsed_ms": round((time.monotonic()-probe_started)*1000, 1), "usage": data.get("usage")})
-        result["status"] = "ok" if valid else "failed"
-        if not valid:
-            result["failure_stage"] = "tool_call"
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError, IndexError, KeyError) as exc:
-        result["stages"].append({"name": "tool_call", "ok": False,
-            "error_type": type(exc).__name__, "http_status": getattr(exc, "code", None),
-            "elapsed_ms": round((time.monotonic()-probe_started)*1000, 1), "request_bytes": request_bytes})
-        result.update(status="failed", failure_stage="tool_call")
+    compatibility = _probe_tool_call(config, timeout, "auto", endpoint_factory)
+    result["stages"].append({"name": "compatibility_probe", **compatibility})
+    result["status"] = compatibility["classification"]
+    if compatibility["ok"]:
+        result["status"] = "verified_compatible"
+    elif (diagnose_required and compatibility["classification"] == "invalid_tool_call_response"
+          and compatibility.get("finish_reason") != "length"):
+        diagnostic = _probe_tool_call(config, timeout, "required", endpoint_factory)
+        if diagnostic["classification"] == "invalid_tool_call_response":
+            # HTTP 400/422 on only the optional diagnostic is a provider rejection
+            # of that option, not a failure of the working auto-tool protocol.
+            if diagnostic.get("http_status") in (400, 422):
+                diagnostic["classification"] = "optional_tool_choice_required_unsupported"
+        result["stages"].append({"name": "required_option_diagnostic", **diagnostic})
     result["elapsed_ms"] = round((time.monotonic()-started)*1000, 1)
     return result
 

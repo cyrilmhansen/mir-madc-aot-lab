@@ -1,0 +1,122 @@
+{
+  "schema": "basic-workspace.execution-profile",
+  "version": 1,
+  "profile_id": "basic-workspace.numeric-composition.v1",
+  "name": "BASIC Workspace numeric composition and bounded control v1",
+  "implementation": {
+    "workspace_model": "canonical lossless tokens with derived semantic indexes",
+    "projection": "revision-bound numeric projection",
+    "execution_transport": "BWM1-BWM5 supported by worker; campaign uses direct structured projection",
+    "host": "Linux x86-64 native",
+    "historical_bimi_compatibility": "not asserted"
+  },
+  "guaranteed": {
+    "numeric_type": "IEEE-754 binary64 double at the MIR ABI boundary; arguments and returned results must be finite",
+    "arithmetic": [
+      "unary +",
+      "unary -",
+      "+",
+      "-",
+      "*",
+      "/"
+    ],
+    "numeric_comparison_result": {
+      "true": 1.0,
+      "false": 0.0
+    },
+    "condition_truth": "zero is false; any nonzero numeric value is true",
+    "execution_engines": [
+      "interp",
+      "jit"
+    ],
+    "runtime_capabilities": [
+      "native MIR worker",
+      "pinned MIR runtime library",
+      "revision-bound Workspace projection",
+      "finite numeric argument/result boundary"
+    ],
+    "function_calls": "same projected module only; numeric functions; maximum six arguments",
+    "local_arrays": {
+      "dimensions": 1,
+      "lower_bound": 0,
+      "upper_bound_inclusive": true,
+      "max_capacity": 256,
+      "max_total_elements_per_function": 4096,
+      "initial_value": 0.0,
+      "index_conversion": "truncate toward zero, then check bounds",
+      "lifetime": "function invocation"
+    },
+    "module_arrays": {
+      "type": "numeric only",
+      "dimensions": 1,
+      "lower_bound": 0,
+      "upper_bound_inclusive": true,
+      "max_capacity": 256,
+      "initial_value": "MIR module data zero-initialized; optional designated MIR initializer runs once per persistent worker instance",
+      "lifetime": "persistent worker process / execution instance"
+    },
+    "bounded_loops": {
+      "bounds": "finite constants",
+      "end_inclusive": true,
+      "positive_and_negative_steps": true,
+      "zero_step": "rejected",
+      "max_iterations": 10000,
+      "max_nesting_depth": 16
+    },
+    "execution_errors": [
+      "structured projection/worker errors",
+      "ARRAY_BOUNDS",
+      "LOOP_LIMIT",
+      "EXECUTION_TIMEOUT",
+      "persistent worker death invalidates instance"
+    ],
+    "program_revision": "execution projection binds to requested committed revision; edits do not hot-reload existing persistent instances"
+  },
+  "implementation_dependent": {
+    "arithmetic_rounding": "MIR/native host implementation of double operations; exact bitwise reproducibility across CPU/toolchain is not promised",
+    "division_by_zero": "native double operation may produce a non-finite value; non-finite result is rejected by the host execution API",
+    "persistent_worker_address_lowering": "validated on native x86-64 only",
+    "source_rendering": "diagnostic/export representation; it is not used by the compiler path"
+  },
+  "strings": {
+    "encoding": "UTF-8",
+    "maximum_literal_bytes": 4096,
+    "maximum_serialized_literal_storage_per_execution": "256 KiB including terminators",
+    "embedded_nul": "rejected",
+    "empty_string": "supported as a zero-length value",
+    "invalid_utf8": "rejected at the Python/UTF-8 encoding boundary",
+    "supported_in_fresh_worker": [
+      "string literals",
+      "string locals",
+      "fixed one-dimensional string arrays",
+      "string-valued functions",
+      "length-aware copied result"
+    ],
+    "persistent_string_state": "unsupported",
+    "string_operations": "general concatenation and broad builtin coverage unsupported"
+  },
+  "unsupported_or_undefined": [
+    "general BASIC compatibility",
+    "dynamic loop bounds",
+    "GOTO/FOR interactions",
+    "unbounded loops",
+    "arbitrary native imports",
+    "file/network I/O",
+    "persistent mutable strings",
+    "state migration",
+    "hot code replacement",
+    "cross-instance shared mutable state"
+  ],
+  "campaign_requirements": {
+    "functions": [
+      "AGE_BY_ID(ID)",
+      "IS_SENIOR(ID)",
+      "IS_ADULT(ID)"
+    ],
+    "state_revision_bound": true,
+    "execution_engines": [
+      "interp",
+      "jit"
+    ]
+  }
+}

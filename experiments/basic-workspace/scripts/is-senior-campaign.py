@@ -89,17 +89,22 @@ def statement_ids(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def aliases_for_senior(raw: dict[str, Any], base_aliases: dict[str, str]) -> dict[str, str]:
+    return aliases_for_new_function(raw, base_aliases, "IS_SENIOR", "is_senior.function")
+
+
+def aliases_for_new_function(raw: dict[str, Any], base_aliases: dict[str, str],
+                             name: str, function_handle: str) -> dict[str, str]:
     aliases = dict(base_aliases)
-    rows = [x for x in raw["functions"] if x["name"].casefold() == "is_senior"]
+    rows = [x for x in raw["functions"] if x["name"].casefold() == name.casefold()]
     if len(rows) != 1:
-        raise WorkspaceError("MISSION_FUNCTION_COUNT", "Candidate must define exactly one IS_SENIOR function")
+        raise WorkspaceError("MISSION_FUNCTION_COUNT", f"Candidate must define exactly one {name} function")
     row = rows[0]
     if len(row["parameter_ids"]) != 1 or row["local_ids"] or row["arrays"]:
-        raise WorkspaceError("MISSION_SIGNATURE", "IS_SENIOR must have one numeric parameter and no local arrays/locals")
-    aliases["is_senior.function"] = row["symbol_id"]
-    aliases["is_senior.parameter.id"] = row["parameter_ids"][0]
+        raise WorkspaceError("MISSION_SIGNATURE", f"{name} must have one numeric parameter and no local arrays/locals")
+    aliases[function_handle] = row["symbol_id"]
+    aliases[f"{function_handle.rsplit('.', 1)[0]}.parameter.id"] = row["parameter_ids"][0]
     for index, sid in enumerate(statement_ids(row["statements"])):
-        aliases[f"is_senior.statement.{index}"] = sid
+        aliases[f"{function_handle.rsplit('.', 1)[0]}.statement.{index}"] = sid
     return aliases
 
 
@@ -129,12 +134,16 @@ class SeniorMissionGateway:
     """One-operation functional mission boundary, not a reusable policy engine."""
     def __init__(self, workspace: Workspace, document_id: str, aliases: dict[str, str],
                  base_snapshot: dict[str, Any], mission: dict[str, Any], trace: Any,
-                 phase: str = "agent"):
+                 phase: str = "agent", function_name: str = "IS_SENIOR",
+                 function_handle: str = "is_senior.function"):
         self.workspace, self.document_id = workspace, document_id
         self.aliases = dict(aliases)
         self.base_aliases = dict(aliases)
         self.base_snapshot = copy.deepcopy(base_snapshot)
         self.mission, self.trace, self.phase = mission, trace, phase
+        self.function_name, self.function_handle = function_name, function_handle
+        self.parameter_handle = f"{function_handle.rsplit('.', 1)[0]}.parameter.id"
+        self.mission_id = mission.get("mission_id", MISSION_ID)
         self.discovered_handles: set[str] = set()
         self.pending: dict[str, dict[str, Any]] = {}
         self.committed = False
@@ -174,9 +183,9 @@ class SeniorMissionGateway:
         if callee_handle != "age_by_id.function" or callee_handle not in self.discovered_handles:
             raise WorkspaceError("UNKNOWN_PORTABLE_FUNCTION", "Select the discovered AGE_BY_ID function handle")
         if not isinstance(request, dict) or set(request) != {"name", "parameters", "body"}:
-            raise WorkspaceError("MISSION_OPERATION_FORBIDDEN", "Mission permits only one typed IS_SENIOR constructor")
-        if request["name"].casefold() != "is_senior" or request["parameters"] != ["ID"]:
-            raise WorkspaceError("MISSION_SIGNATURE", "Mission requires one new numeric function IS_SENIOR(ID)")
+            raise WorkspaceError("MISSION_OPERATION_FORBIDDEN", f"Mission permits one typed {self.function_name} constructor")
+        if request["name"].casefold() != self.function_name.casefold() or request["parameters"] != ["ID"]:
+            raise WorkspaceError("MISSION_SIGNATURE", f"Mission requires one new numeric function {self.function_name}(ID)")
         if not isinstance(request["body"], list) or not request["body"] or len(request["body"]) > 64:
             raise WorkspaceError("MISSION_BODY", "Function body must be a bounded typed statement list")
         calls: list[dict[str, Any]] = []
@@ -226,7 +235,7 @@ class SeniorMissionGateway:
                     raise WorkspaceError("MISSION_BODY", "Only assignments and structured IF blocks are permitted")
         check_body(request["body"])
         if not calls:
-            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", "IS_SENIOR must call the discovered AGE_BY_ID")
+            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", f"{self.function_name} must call the discovered AGE_BY_ID")
         resolved_body = resolve_function_handles(request["body"], self.aliases, self.discovered_handles)
         return {"operation": "create_numeric_function", "name": request["name"],
                 "parameters": request["parameters"], "body": resolved_body}, "age_by_id.function"
@@ -236,36 +245,37 @@ class SeniorMissionGateway:
         operation, _ = self._preflight(request, expected_revision, callee_handle)
         candidate = self.workspace.preview_transaction_semantics(self.document_id, expected_revision, [operation])
         raw = candidate["candidate_semantics"]
-        if len(raw["functions"]) != 2 or sum(x["name"].casefold() == "is_senior" for x in raw["functions"]) != 1:
-            raise WorkspaceError("MISSION_FUNCTION_COUNT", "Candidate must contain only AGE_BY_ID and one IS_SENIOR")
-        candidate_aliases = aliases_for_senior(raw, self.base_aliases)
+        if (len(raw["functions"]) != len(self.base_snapshot["functions"]) + 1 or
+                sum(x["name"].casefold() == self.function_name.casefold() for x in raw["functions"]) != 1):
+            raise WorkspaceError("MISSION_FUNCTION_COUNT", f"Candidate must add exactly one {self.function_name} function")
+        candidate_aliases = aliases_for_new_function(raw, self.base_aliases,
+                                                      self.function_name, self.function_handle)
         normalized = normalized_state(raw, candidate_aliases)
-        before_age = find_function(self.base_snapshot, "age_by_id.function")
-        after_age = find_function(normalized, "age_by_id.function")
-        if before_age != after_age:
-            raise WorkspaceError("MISSION_EXISTING_FUNCTION_CHANGED", "AGE_BY_ID or its data/control flow changed")
-        senior = find_function(normalized, "is_senior.function")
-        if senior["parameters"] != ["is_senior.parameter.id"] or senior["arrays"] or senior["locals"]:
-            raise WorkspaceError("MISSION_SIGNATURE", "Unexpected IS_SENIOR parameters, locals or arrays")
-        calls = [x for x in expression_references(senior["statements"], "call")
+        for existing in self.base_snapshot["functions"]:
+            if find_function(self.base_snapshot, existing["handle"]) != find_function(normalized, existing["handle"]):
+                raise WorkspaceError("MISSION_EXISTING_FUNCTION_CHANGED", f"Existing function {existing['name']} changed")
+        added = find_function(normalized, self.function_handle)
+        if added["parameters"] != [self.parameter_handle] or added["arrays"] or added["locals"]:
+            raise WorkspaceError("MISSION_SIGNATURE", f"Unexpected {self.function_name} parameters, locals or arrays")
+        calls = [x for x in expression_references(added["statements"], "call")
                  if x.get("value") == "age_by_id.function"]
         if not calls:
-            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", "Typed candidate does not bind a call to AGE_BY_ID")
+            raise WorkspaceError("MISSION_DEPENDENCY_REQUIRED", f"Typed {self.function_name} candidate does not bind a call to AGE_BY_ID")
         return operation, normalized, candidate_aliases
 
     def reject_operation(self, operation: dict[str, Any], expected_revision: int) -> dict[str, Any]:
         txid = "tx_" + uuid.uuid4().hex
         self.trace.emit("operation_proposed", phase="controls", actor="scripted_control",
-                        mission_id=MISSION_ID, transaction_id=txid, base_revision=expected_revision,
+                        mission_id=self.mission_id, transaction_id=txid, base_revision=expected_revision,
                         operation_envelope={"operation": operation.get("operation"), "arguments": operation,
-                                            "state": "proposed", "mission_id": MISSION_ID})
+                                            "state": "proposed", "mission_id": self.mission_id})
         current = self.workspace.get_revision(self.document_id)
         code = "STALE_REVISION" if expected_revision != current else "MISSION_OPERATION_FORBIDDEN"
         result = {"ok": False, "reliable": True, "code": code,
-                  "message": "Only the mission-scoped IS_SENIOR constructor is authorized.",
+                  "message": f"Only the mission-scoped {self.function_name} constructor is authorized.",
                   "revision": current, "transaction_id": txid}
         self.trace.emit("transaction_rejected", phase="controls", actor="scripted_control",
-                        mission_id=MISSION_ID, transaction_id=txid, operation=operation.get("operation"),
+                        mission_id=self.mission_id, transaction_id=txid, operation=operation.get("operation"),
                         base_revision=expected_revision, resulting_revision=current,
                         code=code, message=result["message"], authoritative_state_unchanged=True)
         return result
@@ -274,9 +284,9 @@ class SeniorMissionGateway:
                 callee_handle: str) -> dict[str, Any]:
         txid = "tx_" + uuid.uuid4().hex
         self.trace.emit("operation_proposed", phase=self.phase, actor="llm_tool" if self.phase == "agent" else self.phase,
-                        mission_id=MISSION_ID, transaction_id=txid, base_revision=expected_revision,
+                        mission_id=self.mission_id, transaction_id=txid, base_revision=expected_revision,
                         operation_envelope={"schema": "basic-workspace.semantic-operation", "version": 1,
-                            "operation": "create_numeric_function", "mission_id": MISSION_ID,
+                            "operation": "create_numeric_function", "mission_id": self.mission_id,
                             "base_revision": expected_revision, "arguments": request,
                             "execution_profile": PROFILE_ID, "state": "proposed"})
         try:
@@ -288,25 +298,25 @@ class SeniorMissionGateway:
                               "candidate_aliases": candidate_aliases, "callee_handle": callee_handle}
         preview = self.workspace.preview_transaction(self.document_id, expected_revision, [operation], include_diff=True)
         self.trace.emit("preview_accepted", phase=self.phase, actor="mission_gateway",
-                        mission_id=MISSION_ID, transaction_id=txid, base_revision=expected_revision,
+                        mission_id=self.mission_id, transaction_id=txid, base_revision=expected_revision,
                         resulting_revision=preview["expected_result_revision"],
-                        created_function="is_senior.function", calls="age_by_id.function",
+                        created_function=self.function_handle, calls="age_by_id.function",
                         proposed_diff=preview.get("diff", ""), candidate_semantic_snapshot=candidate,
                         validation=preview["diagnostics"],
                         operation_envelope={"state": "validated", "transaction_id": txid,
-                            "mission_id": MISSION_ID, "operation": "create_numeric_function",
+                            "mission_id": self.mission_id, "operation": "create_numeric_function",
                             "base_revision": expected_revision,
                             "expected_result_revision": preview["expected_result_revision"]})
         return {"ok": True, "transaction_id": txid, "base_revision": expected_revision,
                 "expected_result_revision": preview["expected_result_revision"],
-                "new_function_handle": "is_senior.function", "bound_callee_handle": "age_by_id.function",
-                "candidate_function_count": 2, "diagnostics": preview["diagnostics"],
+                "new_function_handle": self.function_handle, "bound_callee_handle": "age_by_id.function",
+                "candidate_function_count": len(candidate["functions"]), "diagnostics": preview["diagnostics"],
                 "candidate_is_preview_only": True}
 
     def _reject(self, txid: str, revision: int, code: str, message: str) -> dict[str, Any]:
         current = self.workspace.get_revision(self.document_id)
         self.trace.emit("transaction_rejected", phase=self.phase, actor="mission_gateway",
-                        mission_id=MISSION_ID, transaction_id=txid, base_revision=revision,
+                        mission_id=self.mission_id, transaction_id=txid, base_revision=revision,
                         resulting_revision=current, code=code, message=message,
                         authoritative_state_unchanged=True)
         return {"ok": False, "reliable": True, "code": code, "message": message,
@@ -316,7 +326,7 @@ class SeniorMissionGateway:
         pending = self.pending.get(txid)
         if pending is None:
             return self._reject(txid, self.workspace.get_revision(self.document_id),
-                                "PREVIEW_NOT_FOUND", "No accepted IS_SENIOR preview exists")
+                                "PREVIEW_NOT_FOUND", f"No accepted {self.function_name} preview exists")
         try:
             operation, candidate, candidate_aliases = self._candidate(
                 pending["request"], pending["revision"], pending["callee_handle"])
@@ -328,7 +338,8 @@ class SeniorMissionGateway:
         except WorkspaceError as exc:
             return self._reject(txid, pending["revision"], exc.code, exc.message)
         raw = projection_semantics(build_projection(self.workspace, self.document_id, result["revision"]))
-        actual_aliases = aliases_for_senior(raw, self.base_aliases)
+        actual_aliases = aliases_for_new_function(raw, self.base_aliases,
+                                                   self.function_name, self.function_handle)
         actual = normalized_state(raw, actual_aliases)
         if actual != candidate:
             raise RuntimeError("Atomic commit projection differs from authorized preview")
@@ -338,14 +349,14 @@ class SeniorMissionGateway:
         self.committed_request = copy.deepcopy(pending["request"])
         source = self.workspace.render_document(self.document_id)
         self.trace.emit("transaction_committed", phase=self.phase, actor="mission_gateway",
-                        mission_id=MISSION_ID, transaction_id=txid, operation="create_numeric_function",
+                        mission_id=self.mission_id, transaction_id=txid, operation="create_numeric_function",
                         base_revision=pending["revision"], resulting_revision=result["revision"],
                         alias_bindings=actual_aliases, semantic_snapshot=actual,
                         program_snapshot=source, created_entities=result["created_entities"],
                         created_statements=result["created_statements"],
                         bound_call="age_by_id.function")
         return {"ok": True, "committed": True, "revision": result["revision"],
-                "function_handle": "is_senior.function", "function_id": actual_aliases["is_senior.function"],
+                "function_handle": self.function_handle, "function_id": actual_aliases[self.function_handle],
                 "callee_handle": "age_by_id.function"}
 
 
@@ -583,7 +594,7 @@ BODY_SCHEMA = {"type": "object", "properties": {
 }, "required": ["kind"], "additionalProperties": False}
 
 
-def agent_tools() -> list[dict[str, Any]]:
+def agent_tools(function_name: str = "IS_SENIOR", threshold: float = 50.0) -> list[dict[str, Any]]:
     integer, string = {"type": "integer"}, {"type": "string"}
     return [
         tool_schema("discover_functions", "Discover callable functions and signatures. Use the returned portable handle in typed calls.", {}, []),
@@ -594,15 +605,16 @@ def agent_tools() -> list[dict[str, Any]]:
             "body": {"type": "array", "items": BODY_SCHEMA, "maxItems": 64}},
             ["expected_revision", "callee_handle", "name", "parameters", "body"]),
         tool_schema("commit_function", "Commit only a previously accepted constructor preview; authorization and expected revision are rechecked.", {"transaction_id": string}, ["transaction_id"]),
-        tool_schema("validate_mission", "Execute AGE_BY_ID and IS_SENIOR at the specified committed revision using MIR interpreter and JIT. Returns independent expected values, observed values, boundary-fixture status and mission-complete status.", {"expected_revision": integer}, ["expected_revision"]),
+        tool_schema("validate_mission", f"Execute AGE_BY_ID and {function_name} at the specified committed revision using MIR interpreter and JIT. Return observed values, engine agreement and phase-oracle status.", {"expected_revision": integer}, ["expected_revision"]),
     ]
 
 
 class AgentTools:
     def __init__(self, workspace: Workspace, document_id: str,
-                 gateway: SeniorMissionGateway, trace: Any):
+                 gateway: SeniorMissionGateway, trace: Any, validator: Any = None):
         self.workspace, self.document_id = workspace, document_id
         self.gateway, self.trace = gateway, trace
+        self.validator = validator
 
     def dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         revision = self.workspace.get_revision(self.document_id)
@@ -628,8 +640,9 @@ class AgentTools:
             return self.gateway.commit(args.get("transaction_id"))
         if name == "validate_mission":
             started = time.perf_counter()
-            result = validate_mission(self.workspace, self.document_id, self.gateway,
-                                      args.get("expected_revision"))
+            result = (self.validator(args.get("expected_revision")) if self.validator else
+                      validate_mission(self.workspace, self.document_id, self.gateway,
+                                       args.get("expected_revision")))
             self.trace.emit("program_validated", phase="agent", actor="host",
                             validation=result, revision=revision, passed=result.get("mission_complete", False),
                             elapsed_ms=round((time.perf_counter() - started) * 1000, 3))
@@ -639,27 +652,33 @@ class AgentTools:
 
 def run_model_session(endpoint: ChatEndpoint, workspace: Workspace, document_id: str,
                       gateway: SeniorMissionGateway, trace: Any,
-                      max_turns: int = 7, max_calls: int = 12) -> dict[str, Any]:
-    tools = agent_tools()
+                      max_turns: int = 7, max_calls: int = 12,
+                      function_name: str = "IS_SENIOR", threshold: float = 50.0,
+                      validator: Any = None,
+                      recovery_checkpoint: dict[str, Any] | None = None) -> dict[str, Any]:
+    tools = agent_tools(function_name, threshold)
     schema_bytes = len(json.dumps(tools, ensure_ascii=False, separators=(",", ":")).encode())
-    bridge = AgentTools(workspace, document_id, gateway, trace)
+    bridge = AgentTools(workspace, document_id, gateway, trace, validator)
     revision = workspace.get_revision(document_id)
     messages = [{"role": "system", "content": (
         "You are extending an in-memory BASIC program using semantic tools only. "
-        "Discover the existing numeric function and construct IS_SENIOR as a new function that calls it. "
+        f"Discover the existing numeric function and construct {function_name} as a new function that calls it. "
         "Use the portable function handle returned by discovery in your call expression. "
         "Preview before committing, then validate the whole mission. Do not invent opaque IDs or claim success from a partial check.")},
         {"role": "user", "content": (
-        "Add IS_SENIOR(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least 50, otherwise 0. "
+        f"Add {function_name}(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least {threshold:g}, otherwise 0. "
         "Preserve AGE_BY_ID and its data/control flow exactly. Unknown IDs must return 0. "
         f"The program is at revision {revision}. Discover the callable function and its signature first. "
-        "Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text.")}]
+        "Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text." +
+        ("\n\nVerified recovery checkpoint (facts, not identity tokens):\n" + json.dumps(recovery_checkpoint, ensure_ascii=False, separators=(",", ":")) if recovery_checkpoint else ""))}]
     transcript: list[dict[str, Any]] = []
     total_calls = 0
     final_answer = None
     status = "running"
     trace.emit("agent_session_started", phase="agent", actor="real_llm", model=endpoint.model,
-               initial_revision=revision, tool_schema_bytes=schema_bytes)
+               initial_revision=revision, tool_schema_bytes=schema_bytes,
+               context_reset=bool(recovery_checkpoint),
+               checkpoint_schema=recovery_checkpoint.get("schema") if recovery_checkpoint else None)
     for turn in range(max_turns):
         request_messages = copy.deepcopy(messages)
         trace.emit("model_request", phase="agent", actor="real_llm", turn=turn + 1,

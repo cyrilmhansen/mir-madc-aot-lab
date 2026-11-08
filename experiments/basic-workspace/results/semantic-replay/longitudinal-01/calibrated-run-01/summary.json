@@ -1,0 +1,332 @@
+{
+  "schema": "basic-workspace.longitudinal-campaign-summary",
+  "version": 1,
+  "campaign_kind": "real_llm",
+  "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+  "missions_committed": 2,
+  "context_reset": "completed; fresh model conversation used checkpoint only",
+  "checkpoint_status": "verified before resume",
+  "dependencies": [],
+  "functions": [],
+  "mission_1": {
+    "model_session": {
+      "status": "completed",
+      "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+      "endpoint_metadata": {
+        "scheme": "http",
+        "host_class": "private",
+        "api_path": "chat/completions"
+      },
+      "request_configuration": {
+        "temperature": 0.0,
+        "max_output_tokens": 1400,
+        "timeout_seconds": 60.0,
+        "seed": null,
+        "think": null,
+        "max_turns": 7,
+        "max_tool_calls": 12
+      },
+      "turns": 5,
+      "tool_calls": 5,
+      "tool_schema_bytes": 3159,
+      "request_bytes": 50975,
+      "response_bytes": 7709,
+      "inference_ms": 31738.276,
+      "prompt_tokens": 13235,
+      "completion_tokens": 1295,
+      "cached_prompt_tokens": 10294,
+      "final_answer": "Mission complete. Summary of what was done and verified:\n\n**Construction (revision 2 → 3)**\n- Discovered `AGE_BY_ID(WANTED)` (handle `age_by_id.function`) — it scans `PERSON_ID`/`PERSON_AGE` (101→25, 205→42, 900→53) and defaults the result to −1 for unknown IDs.\n- Added `IS_SENIOR(ID)` as a typed numeric function with no BASIC source text:\n  1. `result = 0` (default, covering unknown IDs since −1 ≥ 50 is false)\n  2. Structured `IF` with a bound call: `IF AGE_BY_ID(ID) >= 50 THEN result = 1`\n- Preview passed with 0 errors/warnings, then committed as `is_senior.function` at **revision 3**.\n\n**Validation at revision 3 (interp + JIT, against the independent host oracle)**\n- `AGE_BY_ID` unchanged: 101→25, 205→42, 900→53, unknown→−1 (`base_function_unchanged: true`, `age_by_id_behavior_unchanged: true`)\n- `IS_SENIOR`: 101→0, 205→0, 900→1, unknown IDs (999, 2)→0\n- Engines agree; callee binding verified (`is_senior.function → age_by_id.function` call edge)\n- Boundary oracle on an isolated fixture: age 49→senior 0, age 50→senior 1 (inclusive `>=` confirmed)\n- `mission_complete: true`, no diagnostics."
+    },
+    "committed": true,
+    "validation": {
+      "schema": "basic-workspace.validation-observation",
+      "version": 1,
+      "reliable": true,
+      "phase": "post-create",
+      "requested_revision": 3,
+      "workspace_revision": 3,
+      "executed_revision": 3,
+      "observed_results": {
+        "interp": {
+          "101": {
+            "age": 25.0,
+            "senior": 0.0
+          },
+          "205": {
+            "age": 42.0,
+            "senior": 0.0
+          },
+          "900": {
+            "age": 53.0,
+            "senior": 1.0
+          },
+          "999": {
+            "age": -1.0,
+            "senior": 0.0
+          },
+          "2": {
+            "age": -1.0,
+            "senior": 0.0
+          }
+        },
+        "jit": {
+          "101": {
+            "age": 25.0,
+            "senior": 0.0
+          },
+          "205": {
+            "age": 42.0,
+            "senior": 0.0
+          },
+          "900": {
+            "age": 53.0,
+            "senior": 1.0
+          },
+          "999": {
+            "age": -1.0,
+            "senior": 0.0
+          },
+          "2": {
+            "age": -1.0,
+            "senior": 0.0
+          }
+        }
+      },
+      "expected_results": {
+        "101": {
+          "age": 25.0,
+          "senior": 0.0
+        },
+        "205": {
+          "age": 42.0,
+          "senior": 0.0
+        },
+        "900": {
+          "age": 53.0,
+          "senior": 1.0
+        },
+        "999": {
+          "age": -1.0,
+          "senior": 0.0
+        },
+        "2": {
+          "age": -1.0,
+          "senior": 0.0
+        }
+      },
+      "expectation_source": "independent host-owned mission oracle",
+      "per_engine_matches": {
+        "interp": true,
+        "jit": true
+      },
+      "engines_agree": true,
+      "base_function_unchanged": true,
+      "callee_binding_verified": true,
+      "boundary_oracle": {
+        "cases": {
+          "49": {
+            "revision": 4,
+            "observed": {
+              "interp": {
+                "age_205": 49.0,
+                "senior_205": 0.0,
+                "senior_unknown": 0.0
+              },
+              "jit": {
+                "age_205": 49.0,
+                "senior_205": 0.0,
+                "senior_unknown": 0.0
+              }
+            },
+            "expected": {
+              "age_205": 49.0,
+              "senior_205": 0.0,
+              "senior_unknown": 0.0
+            },
+            "engines_agree": true,
+            "matches": true
+          },
+          "50": {
+            "revision": 4,
+            "observed": {
+              "interp": {
+                "age_205": 50.0,
+                "senior_205": 1.0,
+                "senior_unknown": 0.0
+              },
+              "jit": {
+                "age_205": 50.0,
+                "senior_205": 1.0,
+                "senior_unknown": 0.0
+              }
+            },
+            "expected": {
+              "age_205": 50.0,
+              "senior_205": 1.0,
+              "senior_unknown": 0.0
+            },
+            "engines_agree": true,
+            "matches": true
+          }
+        },
+        "passed": true,
+        "fixture_isolated_from_mission_workspace": true
+      },
+      "mission_complete": true,
+      "diagnostics": [],
+      "call_edges": [
+        {
+          "caller": "is_senior.function",
+          "callee": "age_by_id.function"
+        }
+      ],
+      "age_by_id_behavior_unchanged": true
+    }
+  },
+  "mission_2": {
+    "model_session": {
+      "status": "completed",
+      "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+      "endpoint_metadata": {
+        "scheme": "http",
+        "host_class": "private",
+        "api_path": "chat/completions"
+      },
+      "request_configuration": {
+        "temperature": 0.0,
+        "max_output_tokens": 1400,
+        "timeout_seconds": 60.0,
+        "seed": null,
+        "think": null
+      },
+      "turns": 5,
+      "tool_calls": 6,
+      "tool_schema_bytes": 2239,
+      "request_bytes": 44746,
+      "response_bytes": 5962,
+      "inference_ms": 24360.599,
+      "prompt_tokens": 14411,
+      "completion_tokens": 842,
+      "cached_prompt_tokens": 10249,
+      "final_answer": "Mission complete. Summary of what was done:\n\n1. **Discovery**: Inspected the `AGE_BY_ID` function and found parallel arrays `PERSON_ID` and `PERSON_AGE`. Entity ID **205** is at index 1 (`PERSON_ID(1)`), so the authorized assignment was `PERSON_AGE(1) = 42` — statement `stmt_0f6ea6c718064e3cacb4a6928044d55a` (handle `people.age.205`).\n2. **Preview**: Against revision 3, changing that literal to 55. The gateway accepted with a semantic change set of exactly `people.age.205.expression: 42 -> 55.0` — no other effects.\n3. **Commit**: Transaction `tx_9459344192b44fab82b7bf79a2418d6e` committed → **revision 4**.\n4. **Validation**: `run_lookup_checks` on revision 4 (reliable, executed revision matches): both the interpreter and JIT engines agree with the independent oracle — `AGE_BY_ID(205) = 55`, while `101 → 25`, `900 → 53`, and unknown IDs (`999`, `2`) still return `-1`. `mission_complete: true`.\n\nThe statement inspection confirms only the single age literal changed; entity IDs, other ages, the function interface, control flow, and all unrelated statements are untouched."
+    },
+    "committed": true,
+    "observed": {
+      "interp": {
+        "101": {
+          "age": 25.0,
+          "senior": 0.0
+        },
+        "205": {
+          "age": 55.0,
+          "senior": 1.0
+        },
+        "900": {
+          "age": 53.0,
+          "senior": 1.0
+        },
+        "999": {
+          "age": -1.0,
+          "senior": 0.0
+        },
+        "2": {
+          "age": -1.0,
+          "senior": 0.0
+        }
+      },
+      "jit": {
+        "101": {
+          "age": 25.0,
+          "senior": 0.0
+        },
+        "205": {
+          "age": 55.0,
+          "senior": 1.0
+        },
+        "900": {
+          "age": 53.0,
+          "senior": 1.0
+        },
+        "999": {
+          "age": -1.0,
+          "senior": 0.0
+        },
+        "2": {
+          "age": -1.0,
+          "senior": 0.0
+        }
+      }
+    },
+    "expected": {
+      "101": {
+        "age": 25.0,
+        "senior": 0.0
+      },
+      "205": {
+        "age": 55.0,
+        "senior": 1.0
+      },
+      "900": {
+        "age": 53.0,
+        "senior": 1.0
+      },
+      "999": {
+        "age": -1.0,
+        "senior": 0.0
+      },
+      "2": {
+        "age": -1.0,
+        "senior": 0.0
+      }
+    },
+    "passed": true
+  },
+  "mission_3": {
+    "model_session": {
+      "status": "tool_call_limit",
+      "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+      "endpoint_metadata": {
+        "scheme": "http",
+        "host_class": "private",
+        "api_path": "chat/completions"
+      },
+      "request_configuration": {
+        "temperature": 0.0,
+        "max_output_tokens": 1400,
+        "timeout_seconds": 60.0,
+        "seed": null,
+        "think": null,
+        "max_turns": 7,
+        "max_tool_calls": 12
+      },
+      "turns": 7,
+      "tool_calls": 13,
+      "tool_schema_bytes": 3158,
+      "request_bytes": 167269,
+      "response_bytes": 33366,
+      "inference_ms": 146794.824,
+      "prompt_tokens": 40863,
+      "completion_tokens": 7024,
+      "cached_prompt_tokens": 36361,
+      "final_answer": null
+    },
+    "committed": false,
+    "validation": {
+      "mission_complete": false,
+      "executed_revision": null,
+      "diagnostics": [
+        "No model commit"
+      ]
+    },
+    "boundary_oracle": {
+      "passed": false,
+      "reason": "IS_ADULT was not committed"
+    },
+    "passed": false
+  },
+  "final_status": "mission_3_or_replay_failed",
+  "elapsed_ms": 203173.402,
+  "seed_construction_ms": 4.25,
+  "checkpoint_bytes": 4282,
+  "checkpoint_estimated_tokens": 773
+}

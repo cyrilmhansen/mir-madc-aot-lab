@@ -1,0 +1,1184 @@
+{
+  "metadata": {
+    "status": "completed",
+    "model": "Qwen3.8-Flash-Next-Sushi-STQ-2.75bpw",
+    "endpoint_metadata": {
+      "scheme": "http",
+      "host_class": "private",
+      "api_path": "chat/completions"
+    },
+    "request_configuration": {
+      "temperature": 0.0,
+      "max_output_tokens": 1400,
+      "timeout_seconds": 60.0,
+      "seed": null,
+      "think": null,
+      "max_turns": 7,
+      "max_tool_calls": 12
+    },
+    "turns": 5,
+    "tool_calls": 5,
+    "tool_schema_bytes": 3159,
+    "request_bytes": 50975,
+    "response_bytes": 7709,
+    "inference_ms": 31738.276,
+    "prompt_tokens": 13235,
+    "completion_tokens": 1295,
+    "cached_prompt_tokens": 10294,
+    "final_answer": "Mission complete. Summary of what was done and verified:\n\n**Construction (revision 2 → 3)**\n- Discovered `AGE_BY_ID(WANTED)` (handle `age_by_id.function`) — it scans `PERSON_ID`/`PERSON_AGE` (101→25, 205→42, 900→53) and defaults the result to −1 for unknown IDs.\n- Added `IS_SENIOR(ID)` as a typed numeric function with no BASIC source text:\n  1. `result = 0` (default, covering unknown IDs since −1 ≥ 50 is false)\n  2. Structured `IF` with a bound call: `IF AGE_BY_ID(ID) >= 50 THEN result = 1`\n- Preview passed with 0 errors/warnings, then committed as `is_senior.function` at **revision 3**.\n\n**Validation at revision 3 (interp + JIT, against the independent host oracle)**\n- `AGE_BY_ID` unchanged: 101→25, 205→42, 900→53, unknown→−1 (`base_function_unchanged: true`, `age_by_id_behavior_unchanged: true`)\n- `IS_SENIOR`: 101→0, 205→0, 900→1, unknown IDs (999, 2)→0\n- Engines agree; callee binding verified (`is_senior.function → age_by_id.function` call edge)\n- Boundary oracle on an isolated fixture: age 49→senior 0, age 50→senior 1 (inclusive `>=` confirmed)\n- `mission_complete: true`, no diagnostics."
+  },
+  "tool_schemas": [
+    {
+      "type": "function",
+      "function": {
+        "name": "discover_functions",
+        "description": "Discover callable functions and signatures. Use the returned portable handle in typed calls.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_program",
+        "description": "Inspect the current revision, function structure, arrays and existing typed control flow without returning source text.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "preview_create_function",
+        "description": "Preview one new numeric function. The typed body accepts result assignments and nested IF blocks only; calls must use the discovered portable function handle. Existing functions/data are compared against the full candidate projection.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer"
+            },
+            "callee_handle": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "parameters": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 1
+            },
+            "body": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "assign",
+                      "if"
+                    ]
+                  },
+                  "target": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "result"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "expression": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "number",
+                          "local_ref",
+                          "binary",
+                          "call"
+                        ]
+                      },
+                      "value": {
+                        "type": "number"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "operator": {
+                        "type": "string",
+                        "enum": [
+                          "+",
+                          "-",
+                          "*",
+                          "/",
+                          "=",
+                          "<>",
+                          "<",
+                          "<=",
+                          ">",
+                          ">="
+                        ]
+                      },
+                      "left": {
+                        "type": "object"
+                      },
+                      "right": {
+                        "type": "object"
+                      },
+                      "function_handle": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "condition": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "number",
+                          "local_ref",
+                          "binary",
+                          "call"
+                        ]
+                      },
+                      "value": {
+                        "type": "number"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "operator": {
+                        "type": "string",
+                        "enum": [
+                          "+",
+                          "-",
+                          "*",
+                          "/",
+                          "=",
+                          "<>",
+                          "<",
+                          "<=",
+                          ">",
+                          ">="
+                        ]
+                      },
+                      "left": {
+                        "type": "object"
+                      },
+                      "right": {
+                        "type": "object"
+                      },
+                      "function_handle": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "then": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "else": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 64
+            }
+          },
+          "required": [
+            "expected_revision",
+            "callee_handle",
+            "name",
+            "parameters",
+            "body"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "commit_function",
+        "description": "Commit only a previously accepted constructor preview; authorization and expected revision are rechecked.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "transaction_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "transaction_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "validate_mission",
+        "description": "Execute AGE_BY_ID and IS_SENIOR at the specified committed revision using MIR interpreter and JIT. Return observed values, engine agreement and phase-oracle status.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expected_revision": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "expected_revision"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "transcript": [
+    {
+      "turn": 1,
+      "request_messages": [
+        {
+          "role": "system",
+          "content": "You are extending an in-memory BASIC program using semantic tools only. Discover the existing numeric function and construct IS_SENIOR as a new function that calls it. Use the portable function handle returned by discovery in your call expression. Preview before committing, then validate the whole mission. Do not invent opaque IDs or claim success from a partial check."
+        },
+        {
+          "role": "user",
+          "content": "Add IS_SENIOR(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least 50, otherwise 0. Preserve AGE_BY_ID and its data/control flow exactly. Unknown IDs must return 0. The program is at revision 2. Discover the callable function and its signature first. Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text."
+        }
+      ],
+      "request_bytes": 4382,
+      "response_bytes": 916,
+      "elapsed_ms": 4829.998,
+      "usage": {
+        "prompt_tokens": 1227,
+        "completion_tokens": 44,
+        "total_tokens": 1271,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 12
+        }
+      },
+      "assistant_content": null,
+      "tool_calls": [
+        {
+          "id": "call_1794111065619_0",
+          "name": "discover_functions",
+          "arguments": {},
+          "result": {
+            "revision": 2,
+            "functions": [
+              {
+                "handle": "age_by_id.function",
+                "symbol_id": "sym_5f051f2543a0425a830356ce80ce9e9a",
+                "name": "AGE_BY_ID",
+                "parameter_count": 1,
+                "parameter_names": [
+                  "WANTED"
+                ],
+                "return_type": "numeric"
+              }
+            ]
+          },
+          "response_bytes": 203,
+          "tool_elapsed_ms": 0.0492
+        },
+        {
+          "id": "call_1794111065619_1",
+          "name": "inspect_program",
+          "arguments": {},
+          "result": {
+            "revision": 2,
+            "structure": {
+              "functions": [
+                {
+                  "handle": "age_by_id.function",
+                  "name": "AGE_BY_ID",
+                  "parameters": [
+                    "age_by_id.parameter.wanted"
+                  ],
+                  "locals": [
+                    "age_by_id.loop.i"
+                  ],
+                  "local_types": [
+                    "numeric"
+                  ],
+                  "return_type": "numeric",
+                  "arrays": [
+                    {
+                      "handle": "people.id",
+                      "name": "PERSON_ID",
+                      "lower_bound": 0,
+                      "upper_bound": 2,
+                      "element_type": "numeric",
+                      "shared": false
+                    },
+                    {
+                      "handle": "people.age",
+                      "name": "PERSON_AGE",
+                      "lower_bound": 0,
+                      "upper_bound": 2,
+                      "element_type": "numeric",
+                      "shared": false
+                    }
+                  ],
+                  "statements": [
+                    {
+                      "kind": "array_assignment",
+                      "statement_handle": "people.id.101",
+                      "target_handle": "people.id",
+                      "target_is_result": false,
+                      "target_index": {
+                        "kind": "number",
+                        "value": 0.0,
+                        "children": []
+                      },
+                      "expression": {
+                        "kind": "number",
+                        "value": 101.0,
+                        "children": []
+                      }
+                    },
+                    {
+                      "kind": "array_assignment",
+                      "statement_handle": "people.id.205",
+                      "target_handle": "people.id",
+                      "target_is_result": false,
+                      "target_index": {
+                        "kind": "number",
+                        "value": 1.0,
+                        "children": []
+                      },
+                      "expression": {
+                        "kind": "number",
+                        "value": 205.0,
+                        "children": []
+                      }
+                    },
+                    {
+                      "kind": "array_assignment",
+                      "statement_handle": "people.id.900",
+                      "target_handle": "people.id",
+                      "target_is_result": false,
+                      "target_index": {
+                        "kind": "number",
+                        "value": 2.0,
+                        "children": []
+                      },
+                      "expression": {
+                        "kind": "number",
+                        "value": 900.0,
+                        "children": []
+                      }
+                    },
+                    {
+                      "kind": "array_assignment",
+                      "statement_handle": "people.age.101",
+                      "target_handle": "people.age",
+                      "target_is_result": false,
+                      "target_index": {
+                        "kind": "number",
+                        "value": 0.0,
+                        "children": []
+                      },
+                      "expression": {
+                        "kind": "number",
+                        "value": 25.0,
+                        "children": []
+                      }
+                    },
+                    {
+                      "kind": "array_assignment",
+                      "statement_handle": "people.age.205",
+                      "target_handle": "people.age",
+                      "target_is_result": false,
+                      "target_index": {
+                        "kind": "number",
+                        "value": 1.0,
+                        "children": []
+                      },
+                      "expression": {
+                        "kind": "number",
+                        "value": 42.0,
+                        "children": []
+                      }
+                    },
+                    {
+                      "kind": "array_assignment",
+                      "statement_handle": "people.age.900",
+                      "target_handle": "people.age",
+                      "target_is_result": false,
+                      "target_index": {
+                        "kind": "number",
+                        "value": 2.0,
+                        "children": []
+                      },
+                      "expression": {
+                        "kind": "number",
+                        "value": 53.0,
+                        "children": []
+                      }
+                    },
+                    {
+                      "kind": "assignment",
+                      "statement_handle": "age_by_id.default",
+                      "target_handle": "age_by_id.function",
+                      "target_is_result": true,
+                      "target_index": null,
+                      "expression": {
+                        "kind": "unary_minus",
+                        "value": null,
+                        "children": [
+                          {
+                            "kind": "number",
+                            "value": 1.0,
+                            "children": []
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "kind": "for",
+                      "variable_handle": "age_by_id.loop.i",
+                      "start": 0.0,
+                      "end": 2.0,
+                      "step": 1.0,
+                      "iteration_limit": 3,
+                      "body": [
+                        {
+                          "kind": "if",
+                          "condition": {
+                            "kind": "compare",
+                            "value": "=",
+                            "children": [
+                              {
+                                "kind": "array_element",
+                                "value": "people.id",
+                                "children": [
+                                  {
+                                    "kind": "variable",
+                                    "value": "age_by_id.loop.i",
+                                    "children": []
+                                  }
+                                ]
+                              },
+                              {
+                                "kind": "variable",
+                                "value": "age_by_id.parameter.wanted",
+                                "children": []
+                              }
+                            ]
+                          },
+                          "then": [
+                            {
+                              "kind": "assignment",
+                              "statement_handle": "age_by_id.match_result",
+                              "target_handle": "age_by_id.function",
+                              "target_is_result": true,
+                              "target_index": null,
+                              "expression": {
+                                "kind": "array_element",
+                                "value": "people.age",
+                                "children": [
+                                  {
+                                    "kind": "variable",
+                                    "value": "age_by_id.loop.i",
+                                    "children": []
+                                  }
+                                ]
+                              }
+                            }
+                          ],
+                          "else": []
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "assignment",
+                      "statement_handle": "age_by_id.implicit_return",
+                      "target_handle": "age_by_id.function",
+                      "target_is_result": true,
+                      "target_index": null,
+                      "expression": {
+                        "kind": "result",
+                        "value": null,
+                        "children": []
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "response_bytes": 3009,
+          "tool_elapsed_ms": 0.336
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "request_messages": [
+        {
+          "role": "system",
+          "content": "You are extending an in-memory BASIC program using semantic tools only. Discover the existing numeric function and construct IS_SENIOR as a new function that calls it. Use the portable function handle returned by discovery in your call expression. Preview before committing, then validate the whole mission. Do not invent opaque IDs or claim success from a partial check."
+        },
+        {
+          "role": "user",
+          "content": "Add IS_SENIOR(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least 50, otherwise 0. Preserve AGE_BY_ID and its data/control flow exactly. Unknown IDs must return 0. The program is at revision 2. Discover the callable function and its signature first. Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text."
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "reasoning_content": "Let's start by discovering the feature and examining the program.",
+          "tool_calls": [
+            {
+              "id": "call_1794111065619_0",
+              "type": "function",
+              "function": {
+                "name": "discover_functions",
+                "arguments": "{}"
+              }
+            },
+            {
+              "id": "call_1794111065619_1",
+              "type": "function",
+              "function": {
+                "name": "inspect_program",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_0",
+          "content": "{\"revision\":2,\"functions\":[{\"handle\":\"age_by_id.function\",\"symbol_id\":\"sym_5f051f2543a0425a830356ce80ce9e9a\",\"name\":\"AGE_BY_ID\",\"parameter_count\":1,\"parameter_names\":[\"WANTED\"],\"return_type\":\"numeric\"}]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_1",
+          "content": "{\"revision\":2,\"structure\":{\"functions\":[{\"handle\":\"age_by_id.function\",\"name\":\"AGE_BY_ID\",\"parameters\":[\"age_by_id.parameter.wanted\"],\"locals\":[\"age_by_id.loop.i\"],\"local_types\":[\"numeric\"],\"return_type\":\"numeric\",\"arrays\":[{\"handle\":\"people.id\",\"name\":\"PERSON_ID\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false},{\"handle\":\"people.age\",\"name\":\"PERSON_AGE\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false}],\"statements\":[{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.101\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":101.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.205\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":205.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.900\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":900.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.101\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":25.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.205\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":42.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.900\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":53.0,\"children\":[]}},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.default\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"unary_minus\",\"value\":null,\"children\":[{\"kind\":\"number\",\"value\":1.0,\"children\":[]}]}},{\"kind\":\"for\",\"variable_handle\":\"age_by_id.loop.i\",\"start\":0.0,\"end\":2.0,\"step\":1.0,\"iteration_limit\":3,\"body\":[{\"kind\":\"if\",\"condition\":{\"kind\":\"compare\",\"value\":\"=\",\"children\":[{\"kind\":\"array_element\",\"value\":\"people.id\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]},{\"kind\":\"variable\",\"value\":\"age_by_id.parameter.wanted\",\"children\":[]}]},\"then\":[{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.match_result\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"array_element\",\"value\":\"people.age\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]}}],\"else\":[]}]},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.implicit_return\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"result\",\"value\":null,\"children\":[]}}]}]}}"
+        }
+      ],
+      "request_bytes": 8579,
+      "response_bytes": 3015,
+      "elapsed_ms": 13614.245,
+      "usage": {
+        "prompt_tokens": 2129,
+        "completion_tokens": 692,
+        "total_tokens": 2821,
+        "prompt_tokens_details": {
+          "cached_tokens": 1271
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 383
+        }
+      },
+      "assistant_content": "The program is at revision 2, and `AGE_BY_ID` (handle `age_by_id.function`, 1 parameter) returns the age when found, and -1 when the ID is unknown. Therefore, the condition `AGE_BY_ID(ID) >= 50` naturally returns false for unknown IDs → 0. Now I'll construct the typed body for `IS_SENIOR` and preview it:",
+      "tool_calls": [
+        {
+          "id": "call_1794111079233_0",
+          "name": "preview_create_function",
+          "arguments": {
+            "expected_revision": 2,
+            "callee_handle": "age_by_id.function",
+            "name": "IS_SENIOR",
+            "parameters": [
+              "ID"
+            ],
+            "body": [
+              {
+                "kind": "assign",
+                "target": {
+                  "kind": "result"
+                },
+                "expression": {
+                  "kind": "number",
+                  "value": 0
+                }
+              },
+              {
+                "kind": "if",
+                "condition": {
+                  "kind": "binary",
+                  "operator": ">=",
+                  "left": {
+                    "kind": "call",
+                    "function_handle": "age_by_id.function",
+                    "arguments": [
+                      {
+                        "kind": "local_ref",
+                        "name": "ID"
+                      }
+                    ]
+                  },
+                  "right": {
+                    "kind": "number",
+                    "value": 50
+                  }
+                },
+                "then": [
+                  {
+                    "kind": "assign",
+                    "target": {
+                      "kind": "result"
+                    },
+                    "expression": {
+                      "kind": "number",
+                      "value": 1
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "result": {
+            "ok": true,
+            "transaction_id": "tx_16aff1ffef694859b5dd2fb5be3d3acc",
+            "base_revision": 2,
+            "expected_result_revision": 3,
+            "new_function_handle": "is_senior.function",
+            "bound_callee_handle": "age_by_id.function",
+            "candidate_function_count": 2,
+            "diagnostics": {
+              "error_count": 0,
+              "warning_count": 0,
+              "new": []
+            },
+            "candidate_is_preview_only": true
+          },
+          "response_bytes": 320,
+          "tool_elapsed_ms": 4.9727
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "request_messages": [
+        {
+          "role": "system",
+          "content": "You are extending an in-memory BASIC program using semantic tools only. Discover the existing numeric function and construct IS_SENIOR as a new function that calls it. Use the portable function handle returned by discovery in your call expression. Preview before committing, then validate the whole mission. Do not invent opaque IDs or claim success from a partial check."
+        },
+        {
+          "role": "user",
+          "content": "Add IS_SENIOR(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least 50, otherwise 0. Preserve AGE_BY_ID and its data/control flow exactly. Unknown IDs must return 0. The program is at revision 2. Discover the callable function and its signature first. Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text."
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "reasoning_content": "Let's start by discovering the feature and examining the program.",
+          "tool_calls": [
+            {
+              "id": "call_1794111065619_0",
+              "type": "function",
+              "function": {
+                "name": "discover_functions",
+                "arguments": "{}"
+              }
+            },
+            {
+              "id": "call_1794111065619_1",
+              "type": "function",
+              "function": {
+                "name": "inspect_program",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_0",
+          "content": "{\"revision\":2,\"functions\":[{\"handle\":\"age_by_id.function\",\"symbol_id\":\"sym_5f051f2543a0425a830356ce80ce9e9a\",\"name\":\"AGE_BY_ID\",\"parameter_count\":1,\"parameter_names\":[\"WANTED\"],\"return_type\":\"numeric\"}]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_1",
+          "content": "{\"revision\":2,\"structure\":{\"functions\":[{\"handle\":\"age_by_id.function\",\"name\":\"AGE_BY_ID\",\"parameters\":[\"age_by_id.parameter.wanted\"],\"locals\":[\"age_by_id.loop.i\"],\"local_types\":[\"numeric\"],\"return_type\":\"numeric\",\"arrays\":[{\"handle\":\"people.id\",\"name\":\"PERSON_ID\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false},{\"handle\":\"people.age\",\"name\":\"PERSON_AGE\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false}],\"statements\":[{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.101\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":101.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.205\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":205.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.900\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":900.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.101\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":25.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.205\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":42.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.900\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":53.0,\"children\":[]}},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.default\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"unary_minus\",\"value\":null,\"children\":[{\"kind\":\"number\",\"value\":1.0,\"children\":[]}]}},{\"kind\":\"for\",\"variable_handle\":\"age_by_id.loop.i\",\"start\":0.0,\"end\":2.0,\"step\":1.0,\"iteration_limit\":3,\"body\":[{\"kind\":\"if\",\"condition\":{\"kind\":\"compare\",\"value\":\"=\",\"children\":[{\"kind\":\"array_element\",\"value\":\"people.id\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]},{\"kind\":\"variable\",\"value\":\"age_by_id.parameter.wanted\",\"children\":[]}]},\"then\":[{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.match_result\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"array_element\",\"value\":\"people.age\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]}}],\"else\":[]}]},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.implicit_return\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"result\",\"value\":null,\"children\":[]}}]}]}}"
+        },
+        {
+          "role": "assistant",
+          "content": "The program is at revision 2, and `AGE_BY_ID` (handle `age_by_id.function`, 1 parameter) returns the age when found, and -1 when the ID is unknown. Therefore, the condition `AGE_BY_ID(ID) >= 50` naturally returns false for unknown IDs → 0. Now I'll construct the typed body for `IS_SENIOR` and preview it:",
+          "reasoning_content": "AGE_BY_ID(ID) returns the age when found, and -1 when not found. Data: ID 101→25, 205→42, 900→53.\n\nIS_SENIOR(ID): returns 1 if AGE_BY_ID(ID) >= 50, otherwise 0. Unknown IDs return 0 — since AGE_BY_ID returns -1 for unknown IDs, -1 >= 50 is false → 0. Good.\n\nBody: assign 0 to the result; IF call(AGE_BY_ID, [param WANTED]) >= 50 THEN assign 1 to the result.\n\nWait — the schema for the body statement: kind is \"assign\" or \"if\". Assign has target (kind: result) and expression. If has condition and then (and else). Expression kinds: number, local_ref, binary, call. Binary has operator, left, right. Call has function_handle and arguments.\n\nParameters: maxItems is 1, so [\"ID\"]. Local references: parameters should be referenceable by name. The call argument would be local_ref {kind:\"local_ref\", name:\"ID\"}.\n\nLet me preview:\n\nbody:\n1. {kind:\"assign\", target:{kind:\"result\"}, expression:{kind:\"number\", value:0}}\n2. {kind:\"if\", condition:{kind:\"binary\", operator:\">=\", left:{kind:\"call\", function_handle:\"age_by_id.function\", arguments:[{kind:\"local_ref\", name:\"ID\"}]}, right:{kind:\"number\", value:50}}, then:[{kind:\"assign\", target:{kind:\"result\"}, expression:{kind:\"number\", value:1}}]}\n\nexpected_revision: 2. callee_handle: \"age_by_id.function\". name: \"IS_SENIOR\", parameters:[\"ID\"].",
+          "tool_calls": [
+            {
+              "id": "call_1794111079233_0",
+              "type": "function",
+              "function": {
+                "name": "preview_create_function",
+                "arguments": "{\"expected_revision\":2,\"callee_handle\":\"age_by_id.function\",\"name\":\"IS_SENIOR\",\"parameters\":[\"ID\"],\"body\":[{\"kind\":\"assign\",\"target\":{\"kind\":\"result\"},\"expression\":{\"kind\":\"number\",\"value\":0}},{\"kind\":\"if\",\"condition\":{\"kind\":\"binary\",\"operator\":\">=\",\"left\":{\"kind\":\"call\",\"function_handle\":\"age_by_id.function\",\"arguments\":[{\"kind\":\"local_ref\",\"name\":\"ID\"}]},\"right\":{\"kind\":\"number\",\"value\":50}},\"then\":[{\"kind\":\"assign\",\"target\":{\"kind\":\"result\"},\"expression\":{\"kind\":\"number\",\"value\":1}}]}]}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111079233_0",
+          "content": "{\"ok\":true,\"transaction_id\":\"tx_16aff1ffef694859b5dd2fb5be3d3acc\",\"base_revision\":2,\"expected_result_revision\":3,\"new_function_handle\":\"is_senior.function\",\"bound_callee_handle\":\"age_by_id.function\",\"candidate_function_count\":2,\"diagnostics\":{\"error_count\":0,\"warning_count\":0,\"new\":[]},\"candidate_is_preview_only\":true}"
+        }
+      ],
+      "request_bytes": 11454,
+      "response_bytes": 944,
+      "elapsed_ms": 2528.323,
+      "usage": {
+        "prompt_tokens": 2932,
+        "completion_tokens": 99,
+        "total_tokens": 3031,
+        "prompt_tokens_details": {
+          "cached_tokens": 2821
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 35
+        }
+      },
+      "assistant_content": "Preview accepted with zero diagnostics. Committing:",
+      "tool_calls": [
+        {
+          "id": "call_1794111081767_0",
+          "name": "commit_function",
+          "arguments": {
+            "transaction_id": "tx_16aff1ffef694859b5dd2fb5be3d3acc"
+          },
+          "result": {
+            "ok": true,
+            "committed": true,
+            "revision": 3,
+            "function_handle": "is_senior.function",
+            "function_id": "sym_b84f49f2c7dd4bf199ab1ffb94f89e6f",
+            "callee_handle": "age_by_id.function"
+          },
+          "response_bytes": 170,
+          "tool_elapsed_ms": 5.0309
+        }
+      ]
+    },
+    {
+      "turn": 4,
+      "request_messages": [
+        {
+          "role": "system",
+          "content": "You are extending an in-memory BASIC program using semantic tools only. Discover the existing numeric function and construct IS_SENIOR as a new function that calls it. Use the portable function handle returned by discovery in your call expression. Preview before committing, then validate the whole mission. Do not invent opaque IDs or claim success from a partial check."
+        },
+        {
+          "role": "user",
+          "content": "Add IS_SENIOR(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least 50, otherwise 0. Preserve AGE_BY_ID and its data/control flow exactly. Unknown IDs must return 0. The program is at revision 2. Discover the callable function and its signature first. Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text."
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "reasoning_content": "Let's start by discovering the feature and examining the program.",
+          "tool_calls": [
+            {
+              "id": "call_1794111065619_0",
+              "type": "function",
+              "function": {
+                "name": "discover_functions",
+                "arguments": "{}"
+              }
+            },
+            {
+              "id": "call_1794111065619_1",
+              "type": "function",
+              "function": {
+                "name": "inspect_program",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_0",
+          "content": "{\"revision\":2,\"functions\":[{\"handle\":\"age_by_id.function\",\"symbol_id\":\"sym_5f051f2543a0425a830356ce80ce9e9a\",\"name\":\"AGE_BY_ID\",\"parameter_count\":1,\"parameter_names\":[\"WANTED\"],\"return_type\":\"numeric\"}]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_1",
+          "content": "{\"revision\":2,\"structure\":{\"functions\":[{\"handle\":\"age_by_id.function\",\"name\":\"AGE_BY_ID\",\"parameters\":[\"age_by_id.parameter.wanted\"],\"locals\":[\"age_by_id.loop.i\"],\"local_types\":[\"numeric\"],\"return_type\":\"numeric\",\"arrays\":[{\"handle\":\"people.id\",\"name\":\"PERSON_ID\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false},{\"handle\":\"people.age\",\"name\":\"PERSON_AGE\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false}],\"statements\":[{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.101\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":101.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.205\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":205.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.900\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":900.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.101\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":25.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.205\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":42.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.900\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":53.0,\"children\":[]}},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.default\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"unary_minus\",\"value\":null,\"children\":[{\"kind\":\"number\",\"value\":1.0,\"children\":[]}]}},{\"kind\":\"for\",\"variable_handle\":\"age_by_id.loop.i\",\"start\":0.0,\"end\":2.0,\"step\":1.0,\"iteration_limit\":3,\"body\":[{\"kind\":\"if\",\"condition\":{\"kind\":\"compare\",\"value\":\"=\",\"children\":[{\"kind\":\"array_element\",\"value\":\"people.id\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]},{\"kind\":\"variable\",\"value\":\"age_by_id.parameter.wanted\",\"children\":[]}]},\"then\":[{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.match_result\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"array_element\",\"value\":\"people.age\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]}}],\"else\":[]}]},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.implicit_return\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"result\",\"value\":null,\"children\":[]}}]}]}}"
+        },
+        {
+          "role": "assistant",
+          "content": "The program is at revision 2, and `AGE_BY_ID` (handle `age_by_id.function`, 1 parameter) returns the age when found, and -1 when the ID is unknown. Therefore, the condition `AGE_BY_ID(ID) >= 50` naturally returns false for unknown IDs → 0. Now I'll construct the typed body for `IS_SENIOR` and preview it:",
+          "reasoning_content": "AGE_BY_ID(ID) returns the age when found, and -1 when not found. Data: ID 101→25, 205→42, 900→53.\n\nIS_SENIOR(ID): returns 1 if AGE_BY_ID(ID) >= 50, otherwise 0. Unknown IDs return 0 — since AGE_BY_ID returns -1 for unknown IDs, -1 >= 50 is false → 0. Good.\n\nBody: assign 0 to the result; IF call(AGE_BY_ID, [param WANTED]) >= 50 THEN assign 1 to the result.\n\nWait — the schema for the body statement: kind is \"assign\" or \"if\". Assign has target (kind: result) and expression. If has condition and then (and else). Expression kinds: number, local_ref, binary, call. Binary has operator, left, right. Call has function_handle and arguments.\n\nParameters: maxItems is 1, so [\"ID\"]. Local references: parameters should be referenceable by name. The call argument would be local_ref {kind:\"local_ref\", name:\"ID\"}.\n\nLet me preview:\n\nbody:\n1. {kind:\"assign\", target:{kind:\"result\"}, expression:{kind:\"number\", value:0}}\n2. {kind:\"if\", condition:{kind:\"binary\", operator:\">=\", left:{kind:\"call\", function_handle:\"age_by_id.function\", arguments:[{kind:\"local_ref\", name:\"ID\"}]}, right:{kind:\"number\", value:50}}, then:[{kind:\"assign\", target:{kind:\"result\"}, expression:{kind:\"number\", value:1}}]}\n\nexpected_revision: 2. callee_handle: \"age_by_id.function\". name: \"IS_SENIOR\", parameters:[\"ID\"].",
+          "tool_calls": [
+            {
+              "id": "call_1794111079233_0",
+              "type": "function",
+              "function": {
+                "name": "preview_create_function",
+                "arguments": "{\"expected_revision\":2,\"callee_handle\":\"age_by_id.function\",\"name\":\"IS_SENIOR\",\"parameters\":[\"ID\"],\"body\":[{\"kind\":\"assign\",\"target\":{\"kind\":\"result\"},\"expression\":{\"kind\":\"number\",\"value\":0}},{\"kind\":\"if\",\"condition\":{\"kind\":\"binary\",\"operator\":\">=\",\"left\":{\"kind\":\"call\",\"function_handle\":\"age_by_id.function\",\"arguments\":[{\"kind\":\"local_ref\",\"name\":\"ID\"}]},\"right\":{\"kind\":\"number\",\"value\":50}},\"then\":[{\"kind\":\"assign\",\"target\":{\"kind\":\"result\"},\"expression\":{\"kind\":\"number\",\"value\":1}}]}]}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111079233_0",
+          "content": "{\"ok\":true,\"transaction_id\":\"tx_16aff1ffef694859b5dd2fb5be3d3acc\",\"base_revision\":2,\"expected_result_revision\":3,\"new_function_handle\":\"is_senior.function\",\"bound_callee_handle\":\"age_by_id.function\",\"candidate_function_count\":2,\"diagnostics\":{\"error_count\":0,\"warning_count\":0,\"new\":[]},\"candidate_is_preview_only\":true}"
+        },
+        {
+          "role": "assistant",
+          "content": "Preview accepted with zero diagnostics. Committing:",
+          "reasoning_content": "The preview was approved. I'll commit transaction tx_16aff1ffef694859b5dd2fb5be3d3acc.",
+          "tool_calls": [
+            {
+              "id": "call_1794111081767_0",
+              "type": "function",
+              "function": {
+                "name": "commit_function",
+                "arguments": "{\"transaction_id\":\"tx_16aff1ffef694859b5dd2fb5be3d3acc\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111081767_0",
+          "content": "{\"ok\":true,\"committed\":true,\"revision\":3,\"function_handle\":\"is_senior.function\",\"function_id\":\"sym_b84f49f2c7dd4bf199ab1ffb94f89e6f\",\"callee_handle\":\"age_by_id.function\"}"
+        }
+      ],
+      "request_bytes": 12101,
+      "response_bytes": 957,
+      "elapsed_ms": 1944.317,
+      "usage": {
+        "prompt_tokens": 3109,
+        "completion_tokens": 62,
+        "total_tokens": 3171,
+        "prompt_tokens_details": {
+          "cached_tokens": 3031
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 31
+        }
+      },
+      "assistant_content": null,
+      "tool_calls": [
+        {
+          "id": "call_1794111083717_0",
+          "name": "validate_mission",
+          "arguments": {
+            "expected_revision": 3
+          },
+          "result": {
+            "schema": "basic-workspace.validation-observation",
+            "version": 1,
+            "reliable": true,
+            "phase": "post-create",
+            "requested_revision": 3,
+            "workspace_revision": 3,
+            "executed_revision": 3,
+            "observed_results": {
+              "interp": {
+                "101": {
+                  "age": 25.0,
+                  "senior": 0.0
+                },
+                "205": {
+                  "age": 42.0,
+                  "senior": 0.0
+                },
+                "900": {
+                  "age": 53.0,
+                  "senior": 1.0
+                },
+                "999": {
+                  "age": -1.0,
+                  "senior": 0.0
+                },
+                "2": {
+                  "age": -1.0,
+                  "senior": 0.0
+                }
+              },
+              "jit": {
+                "101": {
+                  "age": 25.0,
+                  "senior": 0.0
+                },
+                "205": {
+                  "age": 42.0,
+                  "senior": 0.0
+                },
+                "900": {
+                  "age": 53.0,
+                  "senior": 1.0
+                },
+                "999": {
+                  "age": -1.0,
+                  "senior": 0.0
+                },
+                "2": {
+                  "age": -1.0,
+                  "senior": 0.0
+                }
+              }
+            },
+            "expected_results": {
+              "101": {
+                "age": 25.0,
+                "senior": 0.0
+              },
+              "205": {
+                "age": 42.0,
+                "senior": 0.0
+              },
+              "900": {
+                "age": 53.0,
+                "senior": 1.0
+              },
+              "999": {
+                "age": -1.0,
+                "senior": 0.0
+              },
+              "2": {
+                "age": -1.0,
+                "senior": 0.0
+              }
+            },
+            "expectation_source": "independent host-owned mission oracle",
+            "per_engine_matches": {
+              "interp": true,
+              "jit": true
+            },
+            "engines_agree": true,
+            "base_function_unchanged": true,
+            "callee_binding_verified": true,
+            "boundary_oracle": {
+              "cases": {
+                "49": {
+                  "revision": 4,
+                  "observed": {
+                    "interp": {
+                      "age_205": 49.0,
+                      "senior_205": 0.0,
+                      "senior_unknown": 0.0
+                    },
+                    "jit": {
+                      "age_205": 49.0,
+                      "senior_205": 0.0,
+                      "senior_unknown": 0.0
+                    }
+                  },
+                  "expected": {
+                    "age_205": 49.0,
+                    "senior_205": 0.0,
+                    "senior_unknown": 0.0
+                  },
+                  "engines_agree": true,
+                  "matches": true
+                },
+                "50": {
+                  "revision": 4,
+                  "observed": {
+                    "interp": {
+                      "age_205": 50.0,
+                      "senior_205": 1.0,
+                      "senior_unknown": 0.0
+                    },
+                    "jit": {
+                      "age_205": 50.0,
+                      "senior_205": 1.0,
+                      "senior_unknown": 0.0
+                    }
+                  },
+                  "expected": {
+                    "age_205": 50.0,
+                    "senior_205": 1.0,
+                    "senior_unknown": 0.0
+                  },
+                  "engines_agree": true,
+                  "matches": true
+                }
+              },
+              "passed": true,
+              "fixture_isolated_from_mission_workspace": true
+            },
+            "mission_complete": true,
+            "diagnostics": [],
+            "call_edges": [
+              {
+                "caller": "is_senior.function",
+                "callee": "age_by_id.function"
+              }
+            ],
+            "age_by_id_behavior_unchanged": true
+          },
+          "response_bytes": 1661,
+          "tool_elapsed_ms": 67.5978
+        }
+      ]
+    },
+    {
+      "turn": 5,
+      "request_messages": [
+        {
+          "role": "system",
+          "content": "You are extending an in-memory BASIC program using semantic tools only. Discover the existing numeric function and construct IS_SENIOR as a new function that calls it. Use the portable function handle returned by discovery in your call expression. Preview before committing, then validate the whole mission. Do not invent opaque IDs or claim success from a partial check."
+        },
+        {
+          "role": "user",
+          "content": "Add IS_SENIOR(ID): it should return 1 when the existing AGE_BY_ID(ID) result is at least 50, otherwise 0. Preserve AGE_BY_ID and its data/control flow exactly. Unknown IDs must return 0. The program is at revision 2. Discover the callable function and its signature first. Construct a typed numeric function body with result assignments, structured IF and a bound function call; no BASIC source text."
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "reasoning_content": "Let's start by discovering the feature and examining the program.",
+          "tool_calls": [
+            {
+              "id": "call_1794111065619_0",
+              "type": "function",
+              "function": {
+                "name": "discover_functions",
+                "arguments": "{}"
+              }
+            },
+            {
+              "id": "call_1794111065619_1",
+              "type": "function",
+              "function": {
+                "name": "inspect_program",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_0",
+          "content": "{\"revision\":2,\"functions\":[{\"handle\":\"age_by_id.function\",\"symbol_id\":\"sym_5f051f2543a0425a830356ce80ce9e9a\",\"name\":\"AGE_BY_ID\",\"parameter_count\":1,\"parameter_names\":[\"WANTED\"],\"return_type\":\"numeric\"}]}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111065619_1",
+          "content": "{\"revision\":2,\"structure\":{\"functions\":[{\"handle\":\"age_by_id.function\",\"name\":\"AGE_BY_ID\",\"parameters\":[\"age_by_id.parameter.wanted\"],\"locals\":[\"age_by_id.loop.i\"],\"local_types\":[\"numeric\"],\"return_type\":\"numeric\",\"arrays\":[{\"handle\":\"people.id\",\"name\":\"PERSON_ID\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false},{\"handle\":\"people.age\",\"name\":\"PERSON_AGE\",\"lower_bound\":0,\"upper_bound\":2,\"element_type\":\"numeric\",\"shared\":false}],\"statements\":[{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.101\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":101.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.205\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":205.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.id.900\",\"target_handle\":\"people.id\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":900.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.101\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":0.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":25.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.205\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":1.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":42.0,\"children\":[]}},{\"kind\":\"array_assignment\",\"statement_handle\":\"people.age.900\",\"target_handle\":\"people.age\",\"target_is_result\":false,\"target_index\":{\"kind\":\"number\",\"value\":2.0,\"children\":[]},\"expression\":{\"kind\":\"number\",\"value\":53.0,\"children\":[]}},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.default\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"unary_minus\",\"value\":null,\"children\":[{\"kind\":\"number\",\"value\":1.0,\"children\":[]}]}},{\"kind\":\"for\",\"variable_handle\":\"age_by_id.loop.i\",\"start\":0.0,\"end\":2.0,\"step\":1.0,\"iteration_limit\":3,\"body\":[{\"kind\":\"if\",\"condition\":{\"kind\":\"compare\",\"value\":\"=\",\"children\":[{\"kind\":\"array_element\",\"value\":\"people.id\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]},{\"kind\":\"variable\",\"value\":\"age_by_id.parameter.wanted\",\"children\":[]}]},\"then\":[{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.match_result\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"array_element\",\"value\":\"people.age\",\"children\":[{\"kind\":\"variable\",\"value\":\"age_by_id.loop.i\",\"children\":[]}]}}],\"else\":[]}]},{\"kind\":\"assignment\",\"statement_handle\":\"age_by_id.implicit_return\",\"target_handle\":\"age_by_id.function\",\"target_is_result\":true,\"target_index\":null,\"expression\":{\"kind\":\"result\",\"value\":null,\"children\":[]}}]}]}}"
+        },
+        {
+          "role": "assistant",
+          "content": "The program is at revision 2, and `AGE_BY_ID` (handle `age_by_id.function`, 1 parameter) returns the age when found, and -1 when the ID is unknown. Therefore, the condition `AGE_BY_ID(ID) >= 50` naturally returns false for unknown IDs → 0. Now I'll construct the typed body for `IS_SENIOR` and preview it:",
+          "reasoning_content": "AGE_BY_ID(ID) returns the age when found, and -1 when not found. Data: ID 101→25, 205→42, 900→53.\n\nIS_SENIOR(ID): returns 1 if AGE_BY_ID(ID) >= 50, otherwise 0. Unknown IDs return 0 — since AGE_BY_ID returns -1 for unknown IDs, -1 >= 50 is false → 0. Good.\n\nBody: assign 0 to the result; IF call(AGE_BY_ID, [param WANTED]) >= 50 THEN assign 1 to the result.\n\nWait — the schema for the body statement: kind is \"assign\" or \"if\". Assign has target (kind: result) and expression. If has condition and then (and else). Expression kinds: number, local_ref, binary, call. Binary has operator, left, right. Call has function_handle and arguments.\n\nParameters: maxItems is 1, so [\"ID\"]. Local references: parameters should be referenceable by name. The call argument would be local_ref {kind:\"local_ref\", name:\"ID\"}.\n\nLet me preview:\n\nbody:\n1. {kind:\"assign\", target:{kind:\"result\"}, expression:{kind:\"number\", value:0}}\n2. {kind:\"if\", condition:{kind:\"binary\", operator:\">=\", left:{kind:\"call\", function_handle:\"age_by_id.function\", arguments:[{kind:\"local_ref\", name:\"ID\"}]}, right:{kind:\"number\", value:50}}, then:[{kind:\"assign\", target:{kind:\"result\"}, expression:{kind:\"number\", value:1}}]}\n\nexpected_revision: 2. callee_handle: \"age_by_id.function\". name: \"IS_SENIOR\", parameters:[\"ID\"].",
+          "tool_calls": [
+            {
+              "id": "call_1794111079233_0",
+              "type": "function",
+              "function": {
+                "name": "preview_create_function",
+                "arguments": "{\"expected_revision\":2,\"callee_handle\":\"age_by_id.function\",\"name\":\"IS_SENIOR\",\"parameters\":[\"ID\"],\"body\":[{\"kind\":\"assign\",\"target\":{\"kind\":\"result\"},\"expression\":{\"kind\":\"number\",\"value\":0}},{\"kind\":\"if\",\"condition\":{\"kind\":\"binary\",\"operator\":\">=\",\"left\":{\"kind\":\"call\",\"function_handle\":\"age_by_id.function\",\"arguments\":[{\"kind\":\"local_ref\",\"name\":\"ID\"}]},\"right\":{\"kind\":\"number\",\"value\":50}},\"then\":[{\"kind\":\"assign\",\"target\":{\"kind\":\"result\"},\"expression\":{\"kind\":\"number\",\"value\":1}}]}]}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111079233_0",
+          "content": "{\"ok\":true,\"transaction_id\":\"tx_16aff1ffef694859b5dd2fb5be3d3acc\",\"base_revision\":2,\"expected_result_revision\":3,\"new_function_handle\":\"is_senior.function\",\"bound_callee_handle\":\"age_by_id.function\",\"candidate_function_count\":2,\"diagnostics\":{\"error_count\":0,\"warning_count\":0,\"new\":[]},\"candidate_is_preview_only\":true}"
+        },
+        {
+          "role": "assistant",
+          "content": "Preview accepted with zero diagnostics. Committing:",
+          "reasoning_content": "The preview was approved. I'll commit transaction tx_16aff1ffef694859b5dd2fb5be3d3acc.",
+          "tool_calls": [
+            {
+              "id": "call_1794111081767_0",
+              "type": "function",
+              "function": {
+                "name": "commit_function",
+                "arguments": "{\"transaction_id\":\"tx_16aff1ffef694859b5dd2fb5be3d3acc\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111081767_0",
+          "content": "{\"ok\":true,\"committed\":true,\"revision\":3,\"function_handle\":\"is_senior.function\",\"function_id\":\"sym_b84f49f2c7dd4bf199ab1ffb94f89e6f\",\"callee_handle\":\"age_by_id.function\"}"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "reasoning_content": "Currently verifying the entire mission at revision 3 — running both functions through the MIR interpreter and JIT, and checking the consistency between engines and the phase oracle:",
+          "tool_calls": [
+            {
+              "id": "call_1794111083717_0",
+              "type": "function",
+              "function": {
+                "name": "validate_mission",
+                "arguments": "{\"expected_revision\":3}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1794111083717_0",
+          "content": "{\"schema\":\"basic-workspace.validation-observation\",\"version\":1,\"reliable\":true,\"phase\":\"post-create\",\"requested_revision\":3,\"workspace_revision\":3,\"executed_revision\":3,\"observed_results\":{\"interp\":{\"101\":{\"age\":25.0,\"senior\":0.0},\"205\":{\"age\":42.0,\"senior\":0.0},\"900\":{\"age\":53.0,\"senior\":1.0},\"999\":{\"age\":-1.0,\"senior\":0.0},\"2\":{\"age\":-1.0,\"senior\":0.0}},\"jit\":{\"101\":{\"age\":25.0,\"senior\":0.0},\"205\":{\"age\":42.0,\"senior\":0.0},\"900\":{\"age\":53.0,\"senior\":1.0},\"999\":{\"age\":-1.0,\"senior\":0.0},\"2\":{\"age\":-1.0,\"senior\":0.0}}},\"expected_results\":{\"101\":{\"age\":25.0,\"senior\":0.0},\"205\":{\"age\":42.0,\"senior\":0.0},\"900\":{\"age\":53.0,\"senior\":1.0},\"999\":{\"age\":-1.0,\"senior\":0.0},\"2\":{\"age\":-1.0,\"senior\":0.0}},\"expectation_source\":\"independent host-owned mission oracle\",\"per_engine_matches\":{\"interp\":true,\"jit\":true},\"engines_agree\":true,\"base_function_unchanged\":true,\"callee_binding_verified\":true,\"boundary_oracle\":{\"cases\":{\"49\":{\"revision\":4,\"observed\":{\"interp\":{\"age_205\":49.0,\"senior_205\":0.0,\"senior_unknown\":0.0},\"jit\":{\"age_205\":49.0,\"senior_205\":0.0,\"senior_unknown\":0.0}},\"expected\":{\"age_205\":49.0,\"senior_205\":0.0,\"senior_unknown\":0.0},\"engines_agree\":true,\"matches\":true},\"50\":{\"revision\":4,\"observed\":{\"interp\":{\"age_205\":50.0,\"senior_205\":1.0,\"senior_unknown\":0.0},\"jit\":{\"age_205\":50.0,\"senior_205\":1.0,\"senior_unknown\":0.0}},\"expected\":{\"age_205\":50.0,\"senior_205\":1.0,\"senior_unknown\":0.0},\"engines_agree\":true,\"matches\":true}},\"passed\":true,\"fixture_isolated_from_mission_workspace\":true},\"mission_complete\":true,\"diagnostics\":[],\"call_edges\":[{\"caller\":\"is_senior.function\",\"callee\":\"age_by_id.function\"}],\"age_by_id_behavior_unchanged\":true}"
+        }
+      ],
+      "request_bytes": 14459,
+      "response_bytes": 1877,
+      "elapsed_ms": 8821.393,
+      "usage": {
+        "prompt_tokens": 3838,
+        "completion_tokens": 398,
+        "total_tokens": 4236,
+        "prompt_tokens_details": {
+          "cached_tokens": 3171
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 14
+        }
+      },
+      "assistant_content": "Mission complete. Summary of what was done and verified:\n\n**Construction (revision 2 → 3)**\n- Discovered `AGE_BY_ID(WANTED)` (handle `age_by_id.function`) — it scans `PERSON_ID`/`PERSON_AGE` (101→25, 205→42, 900→53) and defaults the result to −1 for unknown IDs.\n- Added `IS_SENIOR(ID)` as a typed numeric function with no BASIC source text:\n  1. `result = 0` (default, covering unknown IDs since −1 ≥ 50 is false)\n  2. Structured `IF` with a bound call: `IF AGE_BY_ID(ID) >= 50 THEN result = 1`\n- Preview passed with 0 errors/warnings, then committed as `is_senior.function` at **revision 3**.\n\n**Validation at revision 3 (interp + JIT, against the independent host oracle)**\n- `AGE_BY_ID` unchanged: 101→25, 205→42, 900→53, unknown→−1 (`base_function_unchanged: true`, `age_by_id_behavior_unchanged: true`)\n- `IS_SENIOR`: 101→0, 205→0, 900→1, unknown IDs (999, 2)→0\n- Engines agree; callee binding verified (`is_senior.function → age_by_id.function` call edge)\n- Boundary oracle on an isolated fixture: age 49→senior 0, age 50→senior 1 (inclusive `>=` confirmed)\n- `mission_complete: true`, no diagnostics.",
+      "tool_calls": [],
+      "final_answer": "Mission complete. Summary of what was done and verified:\n\n**Construction (revision 2 → 3)**\n- Discovered `AGE_BY_ID(WANTED)` (handle `age_by_id.function`) — it scans `PERSON_ID`/`PERSON_AGE` (101→25, 205→42, 900→53) and defaults the result to −1 for unknown IDs.\n- Added `IS_SENIOR(ID)` as a typed numeric function with no BASIC source text:\n  1. `result = 0` (default, covering unknown IDs since −1 ≥ 50 is false)\n  2. Structured `IF` with a bound call: `IF AGE_BY_ID(ID) >= 50 THEN result = 1`\n- Preview passed with 0 errors/warnings, then committed as `is_senior.function` at **revision 3**.\n\n**Validation at revision 3 (interp + JIT, against the independent host oracle)**\n- `AGE_BY_ID` unchanged: 101→25, 205→42, 900→53, unknown→−1 (`base_function_unchanged: true`, `age_by_id_behavior_unchanged: true`)\n- `IS_SENIOR`: 101→0, 205→0, 900→1, unknown IDs (999, 2)→0\n- Engines agree; callee binding verified (`is_senior.function → age_by_id.function` call edge)\n- Boundary oracle on an isolated fixture: age 49→senior 0, age 50→senior 1 (inclusive `>=` confirmed)\n- `mission_complete: true`, no diagnostics."
+    }
+  ]
+}

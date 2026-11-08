@@ -1,0 +1,60 @@
+{
+  "schema": "basic-workspace.mission-contract",
+  "version": 1,
+  "mission_id": "mission.compose-age-by-id.is-senior.v1",
+  "objective": "Add a numeric IS_SENIOR(ID) that returns 1 when AGE_BY_ID(ID) is at least 50, otherwise 0, without changing existing functions or data.",
+  "base_document_revision": 2,
+  "execution_profile": "basic-workspace.numeric-composition.v1",
+  "enforcement": {
+    "allowed_operations": [
+      "create_numeric_function"
+    ],
+    "allowed_function": {
+      "name": "IS_SENIOR",
+      "parameter_count": 1,
+      "parameter_type": "numeric",
+      "return_type": "numeric"
+    },
+    "required_dependency_handle": "age_by_id.function",
+    "candidate_checks": [
+      "AGE_BY_ID normalized typed projection unchanged",
+      "exactly one new numeric function",
+      "real call binding to discovered AGE_BY_ID",
+      "no new arrays or unrelated functions",
+      "typed assignment/IF subset only"
+    ],
+    "functional_oracle_separate": true,
+    "forbidden_operations": [
+      "edit or delete AGE_BY_ID",
+      "modify PERSON_ID or PERSON_AGE",
+      "rename existing symbols",
+      "replace document",
+      "create unrelated function",
+      "unsupported operation"
+    ]
+  },
+  "functional_goal": {
+    "threshold": 50,
+    "age_by_id": {
+      "101": 25.0,
+      "205": 42.0,
+      "900": 53.0,
+      "999": -1.0,
+      "2": -1.0
+    },
+    "is_senior": {
+      "101": 0.0,
+      "205": 0.0,
+      "900": 1.0,
+      "999": 0.0,
+      "2": 0.0
+    }
+  },
+  "required_post_edit_validations": [
+    "MIR interp",
+    "MIR jit",
+    "independent 49/50 boundary fixtures",
+    "unknown IDs return zero"
+  ],
+  "trust_boundary": "Only requests routed through this campaign gateway are restricted. Direct Workspace, shell or filesystem access is outside this policy boundary."
+}

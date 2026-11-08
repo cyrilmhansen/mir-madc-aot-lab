@@ -175,10 +175,15 @@ class ChatEndpoint:
         self.last_response_bytes = 0
         self.last_elapsed_ms = 0.0
 
-    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> tuple[dict[str, Any], float]:
+    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                 tool_choice: str = "auto") -> tuple[dict[str, Any], float]:
         payload: dict[str, Any] = {"model": self.model, "messages": messages,
-            "tools": tools, "tool_choice": "auto", "temperature": self.temperature,
-            "top_p": self.top_p, "max_tokens": self.max_output_tokens}
+            "tools": tools, "tool_choice": tool_choice, "temperature": self.temperature,
+            "max_tokens": self.max_output_tokens}
+        # Match the long-standing working request by omitting default-valued
+        # optional sampling fields. Providers differ in optional parameter support.
+        if self.top_p != 1.0:
+            payload["top_p"] = self.top_p
         if self.seed is not None:
             payload["seed"] = self.seed
         if self.think is not None:

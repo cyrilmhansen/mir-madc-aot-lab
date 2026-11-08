@@ -735,11 +735,11 @@ def run_model_session(endpoint: ChatEndpoint, workspace: Workspace, document_id:
     revision = workspace.get_revision(document_id)
     messages: list[dict[str, Any]] = [{"role": "system", "content": (
         "You are editing one in-memory BASIC program through mission-scoped semantic tools. "
-        "Discover the correct age assignment by logical entity ID, preview an edit to 47, "
+        f"Discover the correct age assignment by logical entity ID, preview an edit to {gateway.mission['functional_goal']['new_age']:g}, "
         "commit only after an accepted preview, then validate. The target statement ID is not provided. "
         "Only these tools exist; do not claim success without a committed revision and validation.")},
         {"role": "user", "content": (
-            "Mission: update the age of the person whose logical ID is 205 from 42 to 47. "
+            f"Mission: update the age of the person whose logical ID is 205 from 42 to {gateway.mission['functional_goal']['new_age']:g}. "
             "Do not modify entity IDs, other ages, function interfaces, control flow or unrelated statements. "
             f"Current document revision is {revision}. The gateway permits only a finite age literal in [0,130] "
             "for the authorized assignment. Use discovery tools; do not guess opaque IDs.")}]
@@ -846,9 +846,9 @@ def run_model_session(endpoint: ChatEndpoint, workspace: Workspace, document_id:
     return final
 
 
-def make_mission() -> dict[str, Any]:
+def make_mission(new_age: float = 47.0) -> dict[str, Any]:
     return {"schema": "basic-workspace.mission-contract", "version": 1, "mission_id": MISSION_ID,
-            "objective": "Update the age of the person whose logical ID is 205 from 42 to 47, without modifying entity IDs, other ages, function interfaces, control flow or unrelated statements.",
+            "objective": f"Update the age of the person whose logical ID is 205 from 42 to {new_age:g}, without modifying entity IDs, other ages, function interfaces, control flow or unrelated statements.",
             "base_document_revision": 1, "execution_profile": PROFILE_ID,
             "enforcement": {"allowed_operations": ["edit_assignment_expression"],
                 "allowed_target_handle": "people.age.205", "numeric_literal_range": {"minimum": 0, "maximum": 130},
@@ -858,9 +858,9 @@ def make_mission() -> dict[str, Any]:
                 "commit_checks": ["mission id", "execution profile", "expected current revision", "discovered target identity",
                     "range check", "candidate projection semantic diff", "same checks repeated immediately before atomic commit"],
                 "forbidden_operations": ["rename_symbol", "edit any other assignment", "edit condition or loop bounds", "arbitrary source replacement"]},
-            "functional_goal": {"logical_id": 205, "old_age": 42, "new_age": 47},
+            "functional_goal": {"logical_id": 205, "old_age": 42, "new_age": float(new_age)},
             "required_invariants": ["PERSON_ID unchanged", "ages for 101 and 900 unchanged", "function signature and nested control flow unchanged"],
-            "required_post_edit_validations": [{"engine": e, "function_handle": "age_by_id.function", "arguments": [205], "expected": 47.0} for e in ("interp", "jit")],
+            "required_post_edit_validations": [{"engine": e, "function_handle": "age_by_id.function", "arguments": [205], "expected": float(new_age)} for e in ("interp", "jit")],
             "advisory_preferences": ["Use the smallest semantic edit."],
             "human_approval": {"required_for": [], "approval_token_supported": False},
             "trust_boundary": "Enforced only through the tools exposed by this campaign gateway; unrestricted Workspace, process, shell, filesystem or direct model access is outside this boundary."}

@@ -80,10 +80,15 @@ Run the bounded model-listing and tool-call check before a campaign:
 python3 experiments/basic-workspace/scripts/provider-preflight.py
 ```
 
-It makes one model-list request and one required-tool chat request, with a
-128-token cap and no automatic retries. A failed or timed-out preflight is not
-a model campaign. `BASIC_WS_PROVIDER_CONFIG` can point at another local JSON
-file. The age-edit and function-composition campaigns share this resolver.
+It makes one model-list request and one tool-call request using the agent
+runner's `tool_choice=auto` format. The output cap defaults to the lesser of
+1,400 and the configured completion cap; timeout defaults to the provider
+timeout. `--probe-timeout 90` is an explicit bounded override for a cold local
+server. It does not retry a timeout or truncation. `--diagnose-required` allows
+one separate `tool_choice=required` request only after a complete auto-mode
+response without a valid tool call. `BASIC_WS_PROVIDER_CONFIG` can point at
+another local JSON file. The age-edit and function-composition campaigns share
+this resolver.
 
 The service uses JSON-RPC 2.0 with one JSON object per stdin/stdout line. This
 simple framing is suitable for agent subprocess pipes and permits streaming
