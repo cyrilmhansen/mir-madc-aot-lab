@@ -5,9 +5,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const COMMON_TOOLS = ["workspace_discover_functions", "workspace_inspect_program",
   "workspace_commit_preview", "workspace_validate_mission"];
 const ATOMIC_TOOLS = [...COMMON_TOOLS, "workspace_preview_function"];
+const SEMANTIC_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_semantic_edit"];
 const DRAFT_TOOLS = [...COMMON_TOOLS, "workspace_begin_function_draft", "workspace_apply_draft_operations",
   "workspace_inspect_function_draft", "workspace_preview_function_draft"];
-const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS : ATOMIC_TOOLS;
+const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS :
+  process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit" ? SEMANTIC_EDIT_TOOLS : ATOMIC_TOOLS;
 const MAX_RESPONSE = 1024 * 1024;
 
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
@@ -30,6 +32,15 @@ const IF_STATEMENT = Type.Object({ kind: Type.Literal("if"), condition: IF_CONDI
   then: Type.Array(RESULT_ASSIGN, { maxItems: 64 }), else: Type.Optional(Type.Array(RESULT_ASSIGN, { maxItems: 64 })) },
   { additionalProperties: false });
 const FUNCTION_STATEMENT = Type.Union([RESULT_ASSIGN, IF_STATEMENT]);
+const CONTROL_STEP = Type.Object({ block: Type.Union([Type.Literal("body"), Type.Literal("then"), Type.Literal("else")]),
+  index: Type.Integer() }, { additionalProperties: false });
+const IF_CONDITION_TARGET = Type.Object({ function_handle: Type.String(),
+  control_path: Type.Array(CONTROL_STEP, { minItems: 1, maxItems: 8 }),
+  expression_path: Type.Array(Type.Integer(), { minItems: 1, maxItems: 1 }) }, { additionalProperties: false });
+const ASSIGNMENT_TARGET = Type.Object({ function_handle: Type.String(), statement_handle: Type.String(),
+  expression_path: Type.Array(Type.Integer(), { maxItems: 0 }) }, { additionalProperties: false });
+const SEMANTIC_EDIT = Type.Object({ target: Type.Union([IF_CONDITION_TARGET, ASSIGNMENT_TARGET]),
+  expected_value: Type.Number(), replacement_value: Type.Number() }, { additionalProperties: false });
 
 // Flat discriminated operations reference draft-local handles. Expression trees
 // are assembled from nodes rather than recursively repeated in every request.
@@ -136,6 +147,13 @@ export default function (pi: ExtensionAPI) {
       body: Type.Array(FUNCTION_STATEMENT, { minItems: 1, maxItems: 64 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_create_function", { ...params, toolCallId }));
+    }});
+  pi.registerTool({ name: "workspace_preview_semantic_edit", label: "Preview semantic literal edit",
+    description: "Preview both authorized numeric literal edits as one candidate. First discover the functions and inspect the gateway-provided typed target paths. A target uses the discovered function_handle plus either a control_path and expression_path for an IF comparison operand, or a discovered statement_handle and empty expression_path for an assignment RHS. Include expected_value preconditions. Preview never changes committed BASIC; commit only the accepted transaction. Mission authorization is checked against the complete candidate.",
+    parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
+      edits: Type.Array(SEMANTIC_EDIT, { minItems: 2, maxItems: 2 }) }, { additionalProperties: false }),
+    async execute(toolCallId, params) {
+      return toolResult(await gateway.call("preview_semantic_edit", { ...params, toolCallId }));
     }});
   pi.registerTool({ name: "workspace_commit_preview", label: "Commit semantic preview",
     description: "Commit an accepted gateway preview by its transaction ID. Commit rechecks the mission and revision atomically.",

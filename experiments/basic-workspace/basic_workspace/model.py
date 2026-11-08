@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import copy
 import difflib
+import math
 import re
 import uuid
 from typing import Any
@@ -1353,6 +1354,161 @@ class Workspace:
         self._recolumn(doc)
         return generated, expected_refs
 
+    def _edit_numeric_literal_at_path(self, doc: Document, operation: dict[str, Any]) -> str | None:
+        """Replace one numeric leaf selected through the typed projection.
+
+        This deliberately small primitive supports an assignment RHS root or
+        the right operand of a simple IF comparison. It preserves the selected
+        literal token UID and all declaration/statement anchors.
+        """
+        from .projection import (Assignment, ForLoop, IfBlock, _ExpressionParser,
+                                 _statements, build_projection_from_document)
+
+        allowed = {"operation", "function_id", "target_kind", "statement_id", "control_path",
+                   "expression_path", "expected_value", "replacement_value"}
+        if set(operation) - allowed:
+            raise WorkspaceError("INVALID_LITERAL_EDIT", "Numeric literal edit contains unsupported fields")
+        function_id = operation.get("function_id")
+        function_row = doc.symbols.get(function_id)
+        if function_row is None or function_row.kind != "function" or function_row.name.endswith("$"):
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Literal edit function identity is not a numeric function")
+        expected = operation.get("expected_value")
+        replacement = operation.get("replacement_value")
+        for value, label in ((expected, "expected_value"), (replacement, "replacement_value")):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise WorkspaceError("INVALID_LITERAL_EDIT", f"{label} must be a finite number")
+        expression_path = operation.get("expression_path")
+        if not isinstance(expression_path, list) or any(isinstance(i, bool) or not isinstance(i, int) for i in expression_path):
+            raise WorkspaceError("INVALID_LITERAL_PATH", "expression_path must be an array of child indexes")
+
+        projection = build_projection_from_document(self, doc, doc.revision)
+        function = next((row for row in projection.functions if row.symbol_id == function_id), None)
+        if function is None:
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Numeric function is missing from the typed projection")
+        target_kind = operation.get("target_kind")
+        target_node: Any = None
+        expression = None
+        statement_id: str | None = None
+        if target_kind == "assignment_rhs":
+            statement_id = operation.get("statement_id")
+            if not isinstance(statement_id, str) or operation.get("control_path") is not None or expression_path:
+                raise WorkspaceError("INVALID_LITERAL_PATH", "Assignment RHS edits require a statement_id and an empty expression_path")
+
+            def find_assignment(items):
+                for item in items:
+                    if isinstance(item, Assignment) and item.statement_id == statement_id:
+                        return item
+                    if isinstance(item, (IfBlock, ForLoop)):
+                        for children in ((item.then_body, item.else_body) if isinstance(item, IfBlock) else (item.body,)):
+                            found = find_assignment(children)
+                            if found is not None:
+                                return found
+                return None
+
+            target_node = find_assignment(function.statements)
+            if target_node is None or target_node.target_symbol_id != function_id:
+                raise WorkspaceError("STATEMENT_NOT_FOUND", "Assignment identity is not a result assignment in the selected function")
+            expression = target_node.expression
+        elif target_kind == "if_condition_rhs":
+            if operation.get("statement_id") is not None or expression_path != [1]:
+                raise WorkspaceError("INVALID_LITERAL_PATH", "IF comparison edit requires control_path and expression_path [1]")
+            path = operation.get("control_path")
+            if not isinstance(path, list) or not path:
+                raise WorkspaceError("INVALID_LITERAL_PATH", "IF condition edit requires a nonempty control_path")
+            block = function.statements
+            target_node = None
+            for step_index, step in enumerate(path):
+                if not isinstance(step, dict) or set(step) != {"block", "index"}:
+                    raise WorkspaceError("INVALID_LITERAL_PATH", "Each control_path step requires block and index")
+                block_name, index = step["block"], step["index"]
+                if block_name not in ("body", "then", "else") or isinstance(index, bool) or not isinstance(index, int):
+                    raise WorkspaceError("INVALID_LITERAL_PATH", "Unsupported control_path block or index")
+                if not 0 <= index < len(block):
+                    raise WorkspaceError("INVALID_LITERAL_PATH", "control_path index is outside the selected block")
+                target_node = block[index]
+                if step_index + 1 < len(path):
+                    next_step = path[step_index + 1]
+                    next_block = next_step.get("block") if isinstance(next_step, dict) else None
+                    if isinstance(target_node, IfBlock):
+                        if next_block == "then": block = target_node.then_body
+                        elif next_block == "else": block = target_node.else_body
+                        else: raise WorkspaceError("INVALID_LITERAL_PATH", "IF children use then or else blocks")
+                    elif isinstance(target_node, ForLoop) and next_block == "body":
+                        block = target_node.body
+                    else:
+                        raise WorkspaceError("INVALID_LITERAL_PATH", "Intermediate control_path item has no child block")
+            if not isinstance(target_node, IfBlock):
+                raise WorkspaceError("INVALID_LITERAL_PATH", "The selected control-flow node is not an IF")
+            expression = target_node.condition
+            if expression.kind != "compare" or len(expression.children) != 2:
+                raise WorkspaceError("INVALID_LITERAL_PATH", "Only a two-operand comparison IF condition is editable")
+        else:
+            raise WorkspaceError("INVALID_LITERAL_EDIT", "target_kind must be assignment_rhs or if_condition_rhs")
+
+        selected = expression
+        for child_index in expression_path:
+            if not 0 <= child_index < len(selected.children):
+                raise WorkspaceError("INVALID_LITERAL_PATH", "expression_path does not resolve in the typed expression")
+            selected = selected.children[child_index]
+        if selected.kind != "number" or float(selected.value) != float(expected):
+            raise WorkspaceError("EXPECTED_LITERAL_MISMATCH", "Selected typed expression is not the expected numeric literal",
+                                 {"expected": float(expected), "actual_kind": selected.kind, "actual_value": selected.value})
+
+        doc_token_index = {token.uid: i for i, token in enumerate(doc.tokens)}
+        literal_token: Token | None = None
+        if target_kind == "assignment_rhs":
+            row = doc.statements.get(statement_id)
+            if row is None or row["containing_function_id"] != function_id:
+                raise WorkspaceError("STATEMENT_NOT_FOUND", "Assignment identity is not owned by the selected function")
+            start, end, _ = self._assignment_rhs_bounds(doc, row["anchor_token_id"])
+            rhs = [doc.tokens[i] for i in range(start, end) if doc.tokens[i].kind != "WS"]
+            if len(rhs) != 1 or rhs[0].kind != "NUMBER" or float(rhs[0].text) != float(expected):
+                raise WorkspaceError("EXPECTED_LITERAL_MISMATCH", "Assignment RHS token does not match the selected typed literal")
+            literal_token = rhs[0]
+        else:
+            rows = [tokens for tokens in _statements(doc) if tokens and tokens[0].line == target_node.line]
+            if len(rows) != 1 or rows[0][0].text.upper() != "IF" or rows[0][-1].text.upper() != "THEN":
+                raise WorkspaceError("AMBIGUOUS_LITERAL_TARGET", "Could not uniquely resolve the selected IF condition tokens")
+            condition_tokens = rows[0][1:-1]
+            parsed = _ExpressionParser(doc, tuple(condition_tokens), function).parse_all()
+            if parsed != expression:
+                raise WorkspaceError("LITERAL_PATH_MISMATCH", "Canonical IF tokens do not match the selected projected expression")
+            # This bounded operation edits only the right operand [1] of a
+            # top-level numeric comparison. Strip harmless enclosing parens,
+            # then require one numeric token on the right.
+            rhs = list(condition_tokens)
+            while len(rhs) >= 2 and rhs[0].text == "(" and rhs[-1].text == ")":
+                depth = 0
+                closes_at_end = False
+                for i, token in enumerate(rhs):
+                    if token.text == "(": depth += 1
+                    elif token.text == ")":
+                        depth -= 1
+                        if depth == 0:
+                            closes_at_end = i == len(rhs) - 1
+                            break
+                if not closes_at_end: break
+                rhs = rhs[1:-1]
+            depth = 0
+            operators = []
+            for i, token in enumerate(rhs):
+                if token.text == "(": depth += 1
+                elif token.text == ")": depth -= 1
+                elif depth == 0 and token.kind == "OP" and token.text in ("=", "<>", "<", "<=", ">", ">="):
+                    operators.append(i)
+            if len(operators) != 1:
+                raise WorkspaceError("AMBIGUOUS_LITERAL_TARGET", "IF comparison does not have one top-level comparison operator")
+            rhs_operand = [token for token in rhs[operators[0] + 1:] if token.kind != "WS"]
+            if len(rhs_operand) != 1 or rhs_operand[0].kind != "NUMBER" or float(rhs_operand[0].text) != float(expected):
+                raise WorkspaceError("LITERAL_PATH_MISMATCH", "IF comparison right operand does not match the selected literal path")
+            literal_token = rhs_operand[0]
+
+        if literal_token is None or literal_token.uid not in doc_token_index:
+            raise WorkspaceError("LITERAL_TOKEN_NOT_FOUND", "Resolved numeric literal token is missing")
+        literal_token.text = format(float(replacement), ".15g")
+        self._recolumn(doc)
+        return statement_id
+
     def _prepare_transaction(self, document_id: str, expected_revision: int,
                              operations: list[dict[str, Any]], include_diff: bool = False) -> tuple[Document, dict[str, Any]]:
         current = self._doc(document_id)
@@ -1403,6 +1559,10 @@ class Workspace:
                 self._index(candidate)
                 self._verify_expression_bindings(candidate, generated, expected_refs)
                 continue
+            elif kind == "edit_numeric_literal_at_path":
+                statement_id = self._edit_numeric_literal_at_path(candidate, operation)
+                if statement_id is not None:
+                    touched_statements.add(statement_id)
             elif kind == "insert_numeric_assignment":
                 expression_tokens, expected_refs, target_token = self._insert_assignment_tokens(
                     candidate, operation.get("function_id"), operation.get("target"),
@@ -1431,6 +1591,7 @@ class Workspace:
         candidate.revision = current.revision + 1
         if any(operation.get("operation") in ("create_numeric_function", "create_string_function",
                                                 "edit_assignment_expression",
+                                                "edit_numeric_literal_at_path",
                                                 "insert_numeric_assignment")
                for operation in operations):
             from .projection import build_projection_from_document
