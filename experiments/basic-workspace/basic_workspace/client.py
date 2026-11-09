@@ -393,6 +393,13 @@ class WorkspaceClient:
                     for item in statement.get(branch, []):
                         if isinstance(item, dict):
                             self._validate_expression_symbols(item.get("expression"))
+            if op.get("operation") == "edit_typed_if_condition":
+                if op.get("function_id") not in self._known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "Discover the function before editing its IF condition")
+                if op.get("anchor_statement_id") not in self._known_statements:
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the result-assignment anchor first")
+                self._validate_expression_symbols(op.get("expected_condition"))
+                self._validate_expression_symbols(op.get("condition"))
             if "expression" in op:
                 self._validate_expression_symbols(op["expression"],
                     allow_local_ref=op.get("operation") == "create_numeric_function")

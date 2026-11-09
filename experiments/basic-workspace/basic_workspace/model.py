@@ -1620,6 +1620,96 @@ class Workspace:
         self._recolumn(doc)
         return statement_id
 
+    def _edit_typed_if_condition_tokens(self, doc: Document, operation: dict[str, Any]) -> str:
+        """Replace one existing IF condition through the shared typed parser.
+
+        The IF has no standalone identity, so a structural path selects it and
+        a discovered result-assignment identity inside its direct branch anchors
+        that selection. Only condition tokens are replaced; branch tokens and
+        statement identities remain canonical and stable.
+        """
+        from .projection import Assignment, ForLoop, IfBlock, build_projection_from_document
+        from .typed_expr import expression_tokens, parse_request
+
+        allowed = {"operation", "function_id", "control_path", "anchor_statement_id",
+                   "expected_condition", "condition"}
+        if not isinstance(operation, dict) or set(operation) != allowed:
+            raise WorkspaceError("INVALID_IF_CONDITION_EDIT", "Conditional edit requires exactly the typed target and preconditions")
+        function_id = operation.get("function_id")
+        symbol = doc.symbols.get(function_id)
+        if symbol is None or symbol.kind != "function" or symbol.name.endswith("$"):
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Condition edit target must be an existing numeric function")
+        path = operation.get("control_path")
+        if (not isinstance(path, list) or not path or len(path) > 8
+                or any(not isinstance(step, dict) or set(step) != {"block", "index"}
+                       or step.get("block") not in ("body", "then", "else")
+                       or isinstance(step.get("index"), bool) or not isinstance(step.get("index"), int)
+                       for step in path)):
+            raise WorkspaceError("INVALID_IF_PATH", "control_path must select one IF through bounded body/then/else indexes")
+        projection = build_projection_from_document(self, doc, doc.revision)
+        function = next((row for row in projection.functions if row.symbol_id == function_id), None)
+        if function is None:
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Condition edit target is absent from the typed projection")
+        block: Any = function.statements
+        selected: Any = None
+        for n, step in enumerate(path):
+            index = step["index"]
+            if not 0 <= index < len(block):
+                raise WorkspaceError("INVALID_IF_PATH", "control_path index is outside the selected statement block")
+            selected = block[index]
+            if n + 1 < len(path):
+                child = path[n + 1]["block"]
+                if isinstance(selected, IfBlock) and child in ("then", "else"):
+                    block = selected.then_body if child == "then" else selected.else_body
+                elif isinstance(selected, ForLoop) and child == "body":
+                    block = selected.body
+                else:
+                    raise WorkspaceError("INVALID_IF_PATH", "Path does not descend through a matching control block")
+        if not isinstance(selected, IfBlock):
+            raise WorkspaceError("INVALID_IF_PATH", "Selected semantic path is not an IF condition")
+        anchor_id = operation.get("anchor_statement_id")
+        anchor = doc.statements.get(anchor_id)
+        if (anchor is None or anchor.get("containing_function_id") != function_id
+                or anchor.get("kind") != "assignment" or anchor.get("target_symbol_id") != function_id):
+            raise WorkspaceError("INVALID_IF_ANCHOR", "Anchor must be a result assignment in the selected function")
+        direct = [item for branch in (selected.then_body, selected.else_body)
+                  for item in branch if isinstance(item, Assignment)]
+        if sum(item.statement_id == anchor_id for item in direct) != 1:
+            raise WorkspaceError("INVALID_IF_ANCHOR", "Anchor does not uniquely identify a direct assignment in the selected IF")
+
+        params, symbols = self._expression_context(doc)
+        scope = function.scope_id
+        old_expr, _ = parse_request(operation["expected_condition"], symbols, scope, function_id, params)
+        new_expr, new_refs = parse_request(operation["condition"], symbols, scope, function_id, params)
+        if old_expr.kind != "compare" or new_expr.kind != "compare":
+            raise WorkspaceError("INVALID_IF_CONDITION", "Expected and replacement conditions must be numeric comparisons")
+        if selected.condition != old_expr:
+            raise WorkspaceError("EXPECTED_IF_CONDITION_MISMATCH", "Selected IF condition differs from expected_condition")
+        parts, emitted_refs = expression_tokens(new_expr, symbols)
+        if emitted_refs != new_refs:
+            raise WorkspaceError("INTERNAL_BINDING_ERROR", "Condition serializer changed its semantic references")
+
+        # Resolve by projection line established from the typed path, never by
+        # searching for a matching expression or identifier in rendered text.
+        line_tokens = [(i, token) for i, token in enumerate(doc.tokens) if token.line == selected.line and token.kind != "NEWLINE"]
+        significant = [(i, token) for i, token in line_tokens if token.kind not in ("WS", "COMMENT")]
+        if len(significant) < 3 or significant[0][1].text.upper() != "IF" or significant[-1][1].text.upper() != "THEN":
+            raise WorkspaceError("IF_TOKEN_MAPPING_FAILED", "Selected IF projection line has no unique canonical IF/THEN token boundary")
+        if sum(token.text.upper() == "IF" for _, token in significant) != 1 or sum(token.text.upper() == "THEN" for _, token in significant) != 1:
+            raise WorkspaceError("IF_TOKEN_MAPPING_AMBIGUOUS", "Selected IF line contains ambiguous IF/THEN markers")
+        start, end = significant[1][0], significant[-2][0]
+        if start > end:
+            raise WorkspaceError("IF_TOKEN_MAPPING_FAILED", "Selected IF has no condition token span")
+        generated = self._new_tokens(parts)
+        doc.tokens[start:end + 1] = generated
+        self._recolumn(doc)
+        self._index(doc)
+        actual_refs = tuple(doc.token_symbol.get(token.uid) for token in generated if token.kind == "IDENT")
+        if actual_refs != new_refs:
+            raise WorkspaceError("BINDING_MISMATCH", "Replacement condition resolved to different semantic identities",
+                                 {"expected": list(new_refs), "actual": list(actual_refs)})
+        return anchor_id
+
     def _prepare_transaction(self, document_id: str, expected_revision: int,
                              operations: list[dict[str, Any]], include_diff: bool = False) -> tuple[Document, dict[str, Any]]:
         current = self._doc(document_id)
@@ -1701,6 +1791,10 @@ class Workspace:
                     operation.get("before_statement_id"), operation.get("statement"))
                 self._index(candidate)
                 continue
+            elif kind == "edit_typed_if_condition":
+                touched_statements.add(self._edit_typed_if_condition_tokens(candidate, operation))
+                self._index(candidate)
+                continue
             else:
                 raise WorkspaceError("UNSUPPORTED_OPERATION", f"Unsupported semantic operation: {kind}")
             self._index(candidate)
@@ -1711,7 +1805,8 @@ class Workspace:
         if any(operation.get("operation") in ("create_numeric_function", "create_string_function",
                                                 "edit_assignment_expression",
                                                 "edit_numeric_literal_at_path",
-                                                "insert_numeric_assignment", "insert_typed_if_block")
+                                                "insert_numeric_assignment", "insert_typed_if_block",
+                                                "edit_typed_if_condition")
                for operation in operations):
             from .projection import build_projection_from_document
             build_projection_from_document(self, candidate, candidate.revision)
@@ -1875,6 +1970,15 @@ class Workspace:
             "operation": "insert_typed_if_block", "function_id": function_id,
             "before_statement_id": before_statement_id, "statement": statement})
 
+    def edit_typed_if_condition(self, document_id: str, function_id: str,
+                                control_path: list[dict[str, Any]], anchor_statement_id: str,
+                                expected_condition: Any, condition: Any,
+                                expected_revision: int) -> dict[str, Any]:
+        return self._transaction(document_id, expected_revision, {
+            "operation": "edit_typed_if_condition", "function_id": function_id,
+            "control_path": control_path, "anchor_statement_id": anchor_statement_id,
+            "expected_condition": expected_condition, "condition": condition})
+
     def _rename(self, d: Document, symbol_id: str, new_name: str) -> None:
         s = d.symbols.get(symbol_id)
         if not s:
@@ -2013,6 +2117,7 @@ class Workspace:
             "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "insert_typed_if_block": lambda: self.insert_typed_if_block(params["document_id"], params["function_id"], params["before_statement_id"], params["statement"], params["expected_revision"]),
+            "edit_typed_if_condition": lambda: self.edit_typed_if_condition(params["document_id"], params["function_id"], params["control_path"], params["anchor_statement_id"], params["expected_condition"], params["condition"], params["expected_revision"]),
             "render_document": lambda: self.render_document(params["document_id"]),
             "get_diagnostics": lambda: self.get_diagnostics(params["document_id"]),
             "get_revision": lambda: self.get_revision(params["document_id"]),

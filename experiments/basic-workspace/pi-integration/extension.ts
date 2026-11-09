@@ -8,12 +8,14 @@ const ATOMIC_TOOLS = [...COMMON_TOOLS, "workspace_preview_function"];
 const SEMANTIC_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_semantic_edit"];
 const STRUCTURAL_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_structural_edit"];
 const RENAME_TOOLS = [...COMMON_TOOLS, "workspace_preview_rename"];
+const CONDITIONAL_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_conditional_edit"];
 const DRAFT_TOOLS = [...COMMON_TOOLS, "workspace_begin_function_draft", "workspace_apply_draft_operations",
   "workspace_inspect_function_draft", "workspace_preview_function_draft"];
 const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit" ? SEMANTIC_EDIT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "structural_edit" ? STRUCTURAL_EDIT_TOOLS :
-  process.env.BASIC_WS_AUTHORING_MODE === "rename" ? RENAME_TOOLS : ATOMIC_TOOLS;
+  process.env.BASIC_WS_AUTHORING_MODE === "rename" ? RENAME_TOOLS :
+  process.env.BASIC_WS_AUTHORING_MODE === "conditional_edit" ? CONDITIONAL_EDIT_TOOLS : ATOMIC_TOOLS;
 const MAX_RESPONSE = 1024 * 1024;
 
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
@@ -38,6 +40,7 @@ const IF_STATEMENT = Type.Object({ kind: Type.Literal("if"), condition: IF_CONDI
 const FUNCTION_STATEMENT = Type.Union([RESULT_ASSIGN, IF_STATEMENT]);
 const CONTROL_STEP = Type.Object({ block: Type.Union([Type.Literal("body"), Type.Literal("then"), Type.Literal("else")]),
   index: Type.Integer() }, { additionalProperties: false });
+const CONTROL_PATH = Type.Array(CONTROL_STEP, { minItems: 1, maxItems: 8 });
 const IF_CONDITION_TARGET = Type.Object({ function_handle: Type.String(),
   control_path: Type.Array(CONTROL_STEP, { minItems: 1, maxItems: 8 }),
   expression_path: Type.Array(Type.Integer(), { minItems: 1, maxItems: 1 }) }, { additionalProperties: false });
@@ -168,6 +171,14 @@ export default function (pi: ExtensionAPI) {
       before_statement_handle: Type.String(), statement: IF_STATEMENT }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_structural_edit", params, 30000, toolCallId));
+    }});
+  pi.registerTool({ name: "workspace_preview_conditional_edit", label: "Preview typed IF condition edit",
+    description: 'Replace only one existing IF condition in a discovered numeric function. Select it with the inspected control_path and a discovered result-assignment anchor_statement_handle directly inside that IF. Include the exact inspected expected_condition and one typed numeric comparison as condition. A bound call has shape {"kind":"call","function_handle":"<discovered-handle>","arguments":[{"kind":"local_ref","name":"<parameter>"}]}; comparisons use {"kind":"binary","operator":"=","left":<typed expression>,"right":<typed expression>}. The preview preserves branches and committed BASIC; the host contract authorizes the target and dependency.',
+    parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
+      control_path: CONTROL_PATH, anchor_statement_handle: Type.String(),
+      expected_condition: IF_CONDITION, condition: IF_CONDITION }, { additionalProperties: false }),
+    async execute(toolCallId, params) {
+      return toolResult(await gateway.call("preview_conditional_edit", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_preview_rename", label: "Preview semantic rename",
     description: "Preview a revision-checked rename of a discovered function identity. Supply its stable function_handle, expected current source name, and proposed new source name. The gateway resolves all declaration and bound-reference tokens by identity, authorizes the mission, and previews atomically; source text is never searched or replaced. Commit only an accepted preview.",
