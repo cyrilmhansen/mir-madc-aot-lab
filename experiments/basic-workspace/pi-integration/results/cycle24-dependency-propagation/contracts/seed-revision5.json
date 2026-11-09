@@ -1,0 +1,85 @@
+{
+  "schema": "basic-workspace.numeric-literal-maintenance-contract",
+  "version": 1,
+  "mission_id": "cycle24.seed-reconstruction.v1",
+  "objective": "Host-only reconstruction of the verified Cycle 21 revision-5 baseline.",
+  "base_document_revision": 5,
+  "execution_profile_id": "basic-workspace.numeric-composition.v1",
+  "allowed_function_handles": [
+    "is_passing.function"
+  ],
+  "authorized_targets": [
+    {
+      "target": {
+        "function_handle": "is_passing.function",
+        "control_path": [
+          {
+            "block": "body",
+            "index": 0
+          }
+        ],
+        "expression_path": [
+          1
+        ]
+      },
+      "expected_original_value": 40,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          45
+        ]
+      },
+      "label": "IS_PASSING threshold location for revision-6 maintenance"
+    }
+  ],
+  "minimum_edits": 1,
+  "maximum_edits": 1,
+  "unchanged_function_handles": [
+    "clamp_score.function"
+  ],
+  "required_dependency_edges": [
+    {
+      "caller_handle": "is_passing.function",
+      "callee_handle": "clamp_score.function"
+    }
+  ],
+  "revision_increment": 1,
+  "validation": {
+    "inputs": [
+      -100,
+      -1,
+      0,
+      19,
+      20,
+      39,
+      40,
+      44,
+      45,
+      50,
+      100,
+      200
+    ],
+    "functions": [
+      {
+        "function_handle": "clamp_score.function",
+        "result_key": "clamp_score",
+        "oracle": {
+          "kind": "clamp",
+          "minimum": 0,
+          "maximum": 50
+        }
+      },
+      {
+        "function_handle": "is_passing.function",
+        "result_key": "is_passing",
+        "oracle": {
+          "kind": "threshold_call",
+          "callee_handle": "clamp_score.function",
+          "threshold": 45,
+          "true_value": 1,
+          "false_value": 0
+        }
+      }
+    ]
+  }
+}

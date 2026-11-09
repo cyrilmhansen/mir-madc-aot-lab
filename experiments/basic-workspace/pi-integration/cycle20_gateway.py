@@ -172,15 +172,20 @@ class Cycle20Gateway:
             if not isinstance(oracle, dict) or set(oracle) != {"function_handle", "result_key", "oracle"}:
                 raise WorkspaceError("MISSION_CONTRACT_INVALID", "Each function oracle requires a handle, result key, and supported oracle")
             spec = oracle["oracle"]
-            if not isinstance(spec, dict) or spec.get("kind") not in {"clamp", "threshold_call"}:
-                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Only clamp and threshold_call host oracles are supported")
+            if not isinstance(spec, dict) or spec.get("kind") not in {"clamp", "threshold_call", "score_class_call"}:
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Only clamp, threshold_call, and score_class_call host oracles are supported")
             expected_fields = ({"kind", "minimum", "maximum"} if spec["kind"] == "clamp" else
-                {"kind", "callee_handle", "threshold", "true_value", "false_value"})
+                {"kind", "callee_handle", "threshold", "true_value", "false_value"} if spec["kind"] == "threshold_call" else
+                {"kind", "clamp_handle", "passing_handle", "cutoff", "passing_value", "below_value", "middle_value", "high_value"})
             if set(spec) != expected_fields:
                 raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Oracle declaration contains missing or unsupported fields")
-            if spec["kind"] == "threshold_call" and not isinstance(spec["callee_handle"], str):
-                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "threshold_call requires a portable callee handle")
-            numeric_fields = ("minimum", "maximum") if spec["kind"] == "clamp" else ("threshold", "true_value", "false_value")
+            handle_fields = (("callee_handle",) if spec["kind"] == "threshold_call" else
+                ("clamp_handle", "passing_handle") if spec["kind"] == "score_class_call" else ())
+            if any(not isinstance(spec[field], str) or not spec[field] for field in handle_fields):
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", f"{spec['kind']} requires portable function handles")
+            numeric_fields = (("minimum", "maximum") if spec["kind"] == "clamp" else
+                ("threshold", "true_value", "false_value") if spec["kind"] == "threshold_call" else
+                ("cutoff", "passing_value", "below_value", "middle_value", "high_value"))
             for field in numeric_fields:
                 value = spec[field]
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -199,6 +204,17 @@ class Cycle20Gateway:
         spec = row["oracle"]
         if spec["kind"] == "clamp":
             return min(float(spec["maximum"]), max(float(spec["minimum"]), float(argument)))
+        if spec["kind"] == "score_class_call":
+            active.add(function_handle)
+            clamped = self._oracle_value(spec["clamp_handle"], argument, active)
+            if clamped < float(spec["cutoff"]):
+                result = float(spec["below_value"])
+                active.remove(function_handle)
+                return result
+            passing = self._oracle_value(spec["passing_handle"], argument, active)
+            result = float(spec["high_value"] if passing == float(spec["passing_value"]) else spec["middle_value"])
+            active.remove(function_handle)
+            return result
         active.add(function_handle)
         observed = self._oracle_value(spec["callee_handle"], argument, active)
         active.remove(function_handle)
@@ -570,7 +586,9 @@ class Cycle20Gateway:
             for value in self.contract["validation"]["inputs"]} for engine in ("interp", "jit")}
 
     def _dependency_edges(self, state):
-        return sorted(_call_edges(state), key=lambda edge: (edge["caller"], edge["callee"]))
+        # A semantic dependency is a graph edge, not a count of call sites.
+        return [{"caller": caller, "callee": callee}
+            for caller, callee in sorted({(edge["caller"], edge["callee"]) for edge in _call_edges(state)})]
 
     def dependencies(self):
         names = {fn["handle"]: fn["name"] for fn in self.baseline["functions"]}
