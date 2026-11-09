@@ -1,0 +1,6 @@
+# Migration notes
+
+- Cycle 19 replaced its `preview_pending` map and inline preview/apply lifecycle with `SemanticTransactionKernel`. `_candidate` and all function/dependency authorization are unchanged. The kernel's metadata carries the request, candidate alias map, and resolved callee handle. The gateway still verifies alias-key stability and the committed semantic projection, then writes the same constructive operation and event shapes.
+- Cycle 20 now returns authorized operations, candidate and impact from `_authorize_candidate`; it no longer performs the Workspace display preview there. The shared kernel supplies the preview diff and repeats `_authorize_candidate` at commit. Workspace candidate semantics and disposable MIR-oracle checks remain mission-owned. Literal identity and dependency assertions still run before commit; post-commit projection and alias checks remain in the gateway.
+- The Pi extension/JSONL transport remains operation-family-specific (`preview_create_function` vs `preview_semantic_edit`) and unchanged in its trust boundary. The existing Cycle 20B TypeScript probe now has an `atomic_create` mode for deterministic constructor-path dispatch; its default/edit mode remains unchanged.
+- `draft_protocol.py` was not changed.

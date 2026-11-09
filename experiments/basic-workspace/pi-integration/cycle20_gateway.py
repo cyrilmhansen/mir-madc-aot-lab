@@ -25,6 +25,7 @@ from basic_workspace.projection import build_projection, projection_semantics
 from basic_workspace.mir_execution import MirExecutionService
 from pi_lifecycle import completion_states
 from gateway import Server
+from transaction_kernel import SemanticTransactionKernel
 
 
 def _load_senior():
@@ -97,7 +98,7 @@ class Cycle20Gateway:
         self.doc = self.ws.create_empty_document(f"memory://{self.mission_id}/reconstructed.bas")["document_id"]
         self.aliases: dict[str, str] = {}
         self.discovered: set[str] = set()
-        self.preview_pending: dict[str, dict[str, Any]] = {}
+        self.transactions = SemanticTransactionKernel(self.ws, self.doc)
         self.committed = False
         self.seq = 0
         self.pi_seen: set[str] = set()
@@ -706,7 +707,6 @@ class Cycle20Gateway:
             for row in self.contract["required_dependency_edges"]], key=lambda row: (row["caller"], row["callee"]))
         if before_edges != after_edges or after_edges != required_edges:
             raise WorkspaceError("MISSION_DEPENDENCY_CHANGED", "Required semantic function dependencies must remain unchanged")
-        preview = self.ws.preview_transaction(self.doc, request["expected_revision"], operations, include_diff=True)
         candidate_ws = copy.deepcopy(self.ws)
         before_tokens = {token.uid: token.text for token in self.ws.documents[self.doc].tokens}
         applied = candidate_ws.apply_transaction(self.doc, request["expected_revision"], operations)
@@ -726,12 +726,12 @@ class Cycle20Gateway:
             "dependency_edges_unchanged": True, "before_observations": self.baseline_observed,
             "candidate_observations": after, "changed_literal_token_ids": changed_token_ids,
             "scope_note": "Behavioral impact is measured on the contract input corpus, not proven for all numeric inputs."}
-        return operations, candidate, preview, impact
+        return operations, candidate, impact
 
     def _preview(self, params, rid):
         revision = self.ws.get_revision(self.doc)
         try:
-            operations, candidate, preview, impact = self._authorize_candidate(params)
+            operations, candidate, impact = self._authorize_candidate(params)
         except WorkspaceError as exc:
             result = {"ok": False, "code": exc.code, "message": str(exc), "revision": revision,
                 "revision_unchanged": True, "authoritative_workspace_changed": False}
@@ -741,9 +741,9 @@ class Cycle20Gateway:
                 "provenance": "MissionGateway rejected semantic edit proposal", "title": "Edit proposal rejected",
                 "description": str(exc), "outcome": result})
             return result
-        txid = "tx_" + uuid.uuid4().hex
-        self.preview_pending[txid] = {"request": copy.deepcopy(params), "candidate": candidate,
-            "operations": operations, "base_revision": revision, "impact": impact}
+        txid, preview = self.transactions.preview(operation_kind="edit_numeric_literals",
+            base_revision=revision, operations=operations, candidate=candidate,
+            metadata={"request": params, "impact": impact})
         self._history("operation_proposed", "pi_model_tool", request_id=rid, transaction_id=txid,
             base_revision=revision, operation="edit_numeric_literals", arguments=params)
         self._history("preview_accepted", "mission_gateway", transaction_id=txid, base_revision=revision,
@@ -766,19 +766,18 @@ class Cycle20Gateway:
     def _commit(self, params, rid):
         revision = self.ws.get_revision(self.doc)
         txid = params.get("transaction_id")
-        pending = self.preview_pending.get(txid)
+        pending = self.transactions.get(txid) if isinstance(txid, str) else None
         if pending is None:
             return {"ok": False, "committed": False, "code": "PREVIEW_NOT_FOUND", "revision": revision,
                 "authoritative_workspace_changed": False}
-        if pending["base_revision"] != revision:
-            return {"ok": False, "committed": False, "code": "STALE_REVISION", "revision": revision,
-                "authoritative_workspace_changed": False}
         try:
-            operations, candidate, _preview, impact = self._authorize_candidate(pending["request"])
-            if candidate != pending["candidate"] or operations != pending["operations"]:
-                raise WorkspaceError("PREVIEW_CANDIDATE_CHANGED", "Candidate changed since accepted preview")
+            def revalidate(record, base_revision):
+                operations, candidate, impact = self._authorize_candidate(record["metadata"]["request"])
+                return operations, candidate, {"impact": impact}
+            receipt = self.transactions.commit(txid, revalidate)
+            operations, candidate, impact = receipt.operations, receipt.candidate, receipt.metadata["impact"]
             before_aliases = dict(self.aliases)
-            applied = self.ws.apply_transaction(self.doc, revision, operations)
+            applied = receipt.applied
             committed = self._normalized(applied["revision"])
             if committed != candidate:
                 raise RuntimeError("Post-commit integrity error: committed projection differs from prevalidated candidate")
@@ -791,7 +790,8 @@ class Cycle20Gateway:
             return {"ok": False, "committed": False, "code": exc.code, "message": str(exc),
                 "revision": revision, "authoritative_workspace_changed": False}
         self.constructive_ops.append({"operation": "edit_numeric_literals", "mission_id": self.mission_id,
-            "function_handle": pending["request"]["function_handle"], "edits": pending["request"]["edits"]})
+            "function_handle": pending["metadata"]["request"]["function_handle"],
+            "edits": pending["metadata"]["request"]["edits"]})
         self.write_json(self.output / "constructive-operations.json", {
             "schema": "basic-workspace.constructive-metafile", "version": 1,
             "execution_profile_id": PROFILE_ID,
@@ -806,19 +806,20 @@ class Cycle20Gateway:
             base_revision=revision, resulting_revision=applied["revision"], operation="edit_numeric_literals",
             changed_token_ids=changed_token_ids, affected_statement_ids=applied["affected_statement_ids"],
             alias_bindings=self.aliases, semantic_snapshot=committed, impact=impact)
-        changed_handles = sorted({edit["target"]["function_handle"] for edit in pending["request"]["edits"]})
+        request = pending["metadata"]["request"]
+        changed_handles = sorted({edit["target"]["function_handle"] for edit in request["edits"]})
         names = {fn["handle"]: fn["name"] for fn in self.baseline["functions"]}
         self._emit({"event_type": "commit", "revision": applied["revision"], "snapshot": code,
             "provenance": "Workspace atomic semantic transaction · genuine Pi commit request",
             "title": f"{', '.join(names.get(handle, handle) for handle in changed_handles)} edit committed",
             "description": f"{len(changed_token_ids)} authorized numeric literal(s) changed in one revision-checked transaction; unaffected functions and required bindings remain unchanged.",
-            "focus": {"handles": changed_handles + [edit["target"].get("statement_handle") for edit in pending["request"]["edits"] if edit["target"].get("statement_handle")],
-                "mapping": "verified_function_boundary", "semantic_paths": [row["target"] for row in pending["request"]["edits"]]},
+            "focus": {"handles": changed_handles + [edit["target"].get("statement_handle") for edit in request["edits"] if edit["target"].get("statement_handle")],
+                "mapping": "verified_function_boundary", "semantic_paths": [row["target"] for row in request["edits"]]},
             "impact": impact, "dependencies": self.dependencies(),
             "outcome": {"committed": True, "workspace_revision": applied["revision"],
-                "atomic_edit_count": len(pending["request"]["edits"]), "changed_token_ids": changed_token_ids}})
+                "atomic_edit_count": len(request["edits"]), "changed_token_ids": changed_token_ids}})
         return {"ok": True, "committed": True, "revision": applied["revision"],
-            "atomic_edit_count": len(pending["request"]["edits"]), "preserved_semantic_identities": len(self.aliases),
+            "atomic_edit_count": len(request["edits"]), "preserved_semantic_identities": len(self.aliases),
             "changed_token_ids": changed_token_ids}
 
     def _run_full_replay(self):

@@ -14,6 +14,7 @@ from basic_workspace.projection import build_projection, projection_semantics
 from basic_workspace.mir_execution import MirExecutionService
 from pi_lifecycle import completion_states
 from gateway import Cycle16Gateway, Server
+from transaction_kernel import SemanticTransactionKernel
 
 spec=importlib.util.spec_from_file_location("cycle19_senior",ROOT/"scripts/is-senior-campaign.py")
 senior=importlib.util.module_from_spec(spec); assert spec and spec.loader; sys.modules[spec.name]=senior; spec.loader.exec_module(senior)
@@ -27,7 +28,7 @@ class Cycle19Gateway:
         self.output=output; output.mkdir(parents=True,exist_ok=True)
         self.ws=Workspace(); self.doc=self.ws.create_empty_document("memory://cycle19/empty.bas")["document_id"]
         self.aliases:dict[str,str]={}; self.trace=age.Trace(); self.lock=threading.RLock()
-        self.revision=self.ws.get_revision(self.doc); self.phase=1; self.preview_pending={}; self.dispatched={}
+        self.revision=self.ws.get_revision(self.doc); self.phase=1; self.transactions=SemanticTransactionKernel(self.ws,self.doc); self.dispatched={}
         self.resume_verification=None
         self.pi_seen=set(); self.presentation_seq=0; self.committed_operations=[]; self.completed_missions=[]
         self.last_validation=None; self.session_id="cycle19-mission-1"
@@ -226,7 +227,7 @@ class Cycle19Gateway:
 
         self.revision=2; self.base_snapshot=normalized; self.base_aliases=dict(self.aliases)
         self.phase=2; self.current_contract=self.mission_specs[2]; self.mission_title="Mission 2 · IS_PASSING"
-        self.session_id="cycle19b-mission-2"; self.discovered=set(); self.preview_pending={}; self.committed=False
+        self.session_id="cycle19b-mission-2"; self.discovered=set(); self.transactions.clear(); self.committed=False
         self.last_validation=None; self.committed_operations=[item]
         self.write_json("checkpoint.json",checkpoint)
         self.write_json("reconstruction-verification.json",{"schema":"basic-workspace.cycle19b-reconstruction","version":1,
@@ -305,7 +306,7 @@ class Cycle19Gateway:
         if checkpoint.get("document_id")!=self.doc:
             return {"ok":False,"code":"CHECKPOINT_DOCUMENT_MISMATCH","revision":current,"workspace_changed":False}
         self.phase=2; self.current_contract=self.mission_specs[2]; self.mission_title="Mission 2 · IS_PASSING"
-        self.base_snapshot=normalized; self.base_aliases=dict(self.aliases); self.discovered=set(); self.preview_pending={}; self.committed=False
+        self.base_snapshot=normalized; self.base_aliases=dict(self.aliases); self.discovered=set(); self.transactions.clear(); self.committed=False
         self.last_validation=None
         self.session_id="cycle19-mission-2"
         self.trace.emit("mission_started",phase="host",actor="host_orchestrator",mission_id=self._mission_id(),
@@ -484,10 +485,9 @@ class Cycle19Gateway:
                 "session_id":self.session_id,"mission_id":self.mission_title,"provenance":"MissionContract denied candidate",
                 "source_event_ref":rid,"title":"Candidate rejected","description":str(exc),"preview":{"status":"rejected","diagnostic":result}})
             self.flush_trace(); return result
-        preview=self.ws.preview_transaction(self.doc,p["expected_revision"],[operation],include_diff=True)
-        txid="tx_"+uuid.uuid4().hex
-        self.preview_pending[txid]={"request":request,"operation":operation,"base_revision":revision,
-            "candidate":candidate,"candidate_aliases":candidate_aliases,"callee_handle":effective_callee}
+        txid,preview=self.transactions.preview(operation_kind="create_numeric_function",
+            base_revision=p["expected_revision"],operations=[operation],candidate=candidate,
+            metadata={"request":request,"candidate_aliases":candidate_aliases,"callee_handle":effective_callee})
         self.dispatched[txid]=rid
         self.trace.emit("operation_proposed",phase=f"mission-{self.phase}",actor="pi_model_tool",mission_id=self._mission_id(),
             transaction_id=txid,base_revision=revision,operation="create_numeric_function",arguments=request)
@@ -507,14 +507,20 @@ class Cycle19Gateway:
             "portable_handle":self.current_contract["handle"],"bound_callee_handle":effective_callee,
             "diagnostics":preview["diagnostics"],"candidate_is_preview_only":True}
     def _commit(self,p,rid):
-        txid=p.get("transaction_id"); pending=self.preview_pending.get(txid); current=self.ws.get_revision(self.doc)
+        txid=p.get("transaction_id"); current=self.ws.get_revision(self.doc)
+        pending=self.transactions.get(txid) if isinstance(txid,str) else None
         if pending is None:return {"ok":False,"committed":False,"code":"PREVIEW_NOT_FOUND","revision":current,"authoritative_workspace_changed":False}
-        if pending["base_revision"]!=current:return {"ok":False,"committed":False,"code":"STALE_REVISION","revision":current,"authoritative_workspace_changed":False}
         try:
-            op,candidate,candidate_aliases=self._candidate(pending["request"],pending["base_revision"],pending["callee_handle"])
-            if candidate!=pending["candidate"] or candidate_aliases.keys()!=pending["candidate_aliases"].keys():
-                return {"ok":False,"committed":False,"code":"PREVIEW_CANDIDATE_CHANGED","revision":current,"authoritative_workspace_changed":False}
-            applied=self.ws.apply_transaction(self.doc,pending["base_revision"],[op])
+            def revalidate(record,base_revision):
+                meta=record["metadata"]
+                op,candidate,candidate_aliases=self._candidate(meta["request"],base_revision,meta["callee_handle"])
+                if candidate_aliases.keys()!=meta["candidate_aliases"].keys():
+                    raise WorkspaceError("PREVIEW_BINDINGS_CHANGED","Candidate symbol bindings changed since preview")
+                return [op],candidate,{"candidate_aliases":candidate_aliases}
+            receipt=self.transactions.commit(txid,revalidate)
+            applied=receipt.applied; candidate=receipt.candidate
+            pending={**receipt.metadata,"request":pending["metadata"]["request"],
+                "callee_handle":pending["metadata"]["callee_handle"]}
         except WorkspaceError as exc:
             return {"ok":False,"committed":False,"code":exc.code,"message":str(exc),"revision":current,"authoritative_workspace_changed":False}
         raw=projection_semantics(build_projection(self.ws,self.doc,applied["revision"]))
