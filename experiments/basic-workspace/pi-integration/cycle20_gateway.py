@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cycle 20 semantic edit gateway; Python Workspace and policy remain authoritative."""
+"""Contract-configured numeric literal maintenance gateway for semantic edits."""
 from __future__ import annotations
 
 import argparse
@@ -41,6 +41,8 @@ BASE = HERE / "results/cycle19b-recovery/real-agent-02"
 MISSION_ID = "cycle20.clamp-score-cap50.v1"
 PROFILE_ID = "basic-workspace.numeric-composition.v1"
 INPUTS = (-100, -1, 0, 1, 49, 50, 51, 59, 60, 80, 99, 100, 101, 200)
+DEFAULT_CONTRACT = HERE / "contracts/numeric-edit/cycle20-cap50.json"
+REVISION4_BASE = HERE / "results/cycle20b-semantic-edit-recovery/real-agent-02"
 
 
 def _calls(value):
@@ -69,13 +71,30 @@ def _set_semantic_path(root, path, value, expected):
 
 
 class Cycle20Gateway:
-    def __init__(self, output: Path, baseline_dir: Path = BASE):
+    """One numeric-literal maintenance gateway configured by a host contract.
+
+    ``baseline_dir`` retains the verified Cycle 19B seed adapter. A recorded
+    constructive stream can instead seed a later mission through
+    ``baseline_stream_path`` plus its commit and validation evidence.
+    """
+    def __init__(self, output: Path, baseline_dir: Path = BASE, *,
+                 contract_path: Path = DEFAULT_CONTRACT,
+                 baseline_stream_path: Path | None = None,
+                 baseline_history_path: Path | None = None,
+                 baseline_validation_path: Path | None = None):
         self.output = output.resolve()
         self.output.mkdir(parents=True, exist_ok=True)
         self.baseline_dir = baseline_dir.resolve()
+        self.contract_path = contract_path.resolve()
+        self.contract = json.loads(self.contract_path.read_text(encoding="utf-8"))
+        self._validate_contract_shape(self.contract)
+        self.mission_id = self.contract["mission_id"]
+        self.baseline_stream_path = baseline_stream_path.resolve() if baseline_stream_path else None
+        self.baseline_history_path = baseline_history_path.resolve() if baseline_history_path else None
+        self.baseline_validation_path = baseline_validation_path.resolve() if baseline_validation_path else None
         self.lock = threading.RLock()
         self.ws = Workspace()
-        self.doc = self.ws.create_empty_document("memory://cycle20/reconstructed.bas")["document_id"]
+        self.doc = self.ws.create_empty_document(f"memory://{self.mission_id}/reconstructed.bas")["document_id"]
         self.aliases: dict[str, str] = {}
         self.discovered: set[str] = set()
         self.preview_pending: dict[str, dict[str, Any]] = {}
@@ -88,16 +107,26 @@ class Cycle20Gateway:
         self.pi_path = self.output / "pi-tool-lifecycle.jsonl"
         # Use the actual campaign output identity so separate Cycle 20 runs
         # cannot be mislabeled as the original real-agent-01 session.
+        # Keep the historical Cycle 20 presentation namespace stable; the
+        # output directory still distinguishes later contract-driven runs.
         self.session_id = f"cycle20-{self.output.name}"
         self.executor = MirExecutionService(timeout=20)
         self.constructive_ops = []
-        self._reconstruct_baseline()
+        if self.baseline_stream_path:
+            self._reconstruct_from_operation_stream()
+        else:
+            self._reconstruct_baseline()
+        self.baseline_aliases = dict(self.aliases)
+        self._validate_contract_against_baseline()
 
     def record_gateway_timing(self, request: dict[str, Any], elapsed_ms: float):
         """Implement the shared Pi bridge instrumentation hook."""
+        method = request.get("method")
         self._log(self.timing_path, {"request_id": request.get("request_id"),
             "tool_call_id": (request.get("transport") or {}).get("tool_call_id"),
-            "method": request.get("method"), "elapsed_ms": round(elapsed_ms, 3),
+            "method": method, "agent_tool": method in {"discover_functions", "inspect_program",
+                "preview_semantic_edit", "commit_preview", "validate_mission"},
+            "elapsed_ms": round(elapsed_ms, 3),
             "observed_monotonic_ns": time.monotonic_ns()})
 
     def flush_trace(self):
@@ -108,6 +137,72 @@ class Cycle20Gateway:
     def write_json(path: Path, value: Any):
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    @staticmethod
+    def _validate_contract_shape(contract):
+        required = {"schema", "version", "mission_id", "objective", "base_document_revision",
+            "execution_profile_id", "allowed_function_handles", "authorized_targets", "minimum_edits",
+            "maximum_edits", "unchanged_function_handles", "required_dependency_edges",
+            "revision_increment", "validation"}
+        if not isinstance(contract, dict) or set(contract) != required:
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Maintenance contract has missing or unsupported fields")
+        if contract["schema"] != "basic-workspace.numeric-literal-maintenance-contract" or contract["version"] != 1:
+            raise WorkspaceError("MISSION_CONTRACT_VERSION", "Unsupported numeric-literal maintenance contract")
+        if (not isinstance(contract["mission_id"], str) or not contract["mission_id"]
+                or not isinstance(contract["objective"], str) or not contract["objective"]):
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Mission identifier and objective are required")
+        for field in ("base_document_revision", "minimum_edits", "maximum_edits", "revision_increment"):
+            if isinstance(contract[field], bool) or not isinstance(contract[field], int) or contract[field] < 0:
+                raise WorkspaceError("MISSION_CONTRACT_INVALID", f"{field} must be a non-negative integer")
+        if contract["minimum_edits"] < 1 or contract["maximum_edits"] < contract["minimum_edits"]:
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Contract edit bounds are inconsistent")
+        for field in ("allowed_function_handles", "authorized_targets", "unchanged_function_handles", "required_dependency_edges"):
+            if not isinstance(contract[field], list):
+                raise WorkspaceError("MISSION_CONTRACT_INVALID", f"{field} must be an array")
+        if not contract["allowed_function_handles"] or not contract["authorized_targets"]:
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "At least one function and literal target must be authorized")
+        if len(contract["authorized_targets"]) < contract["minimum_edits"]:
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Authorized target count is below the minimum edit count")
+        validation = contract["validation"]
+        if not isinstance(validation, dict) or set(validation) != {"inputs", "functions"}:
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Validation requires inputs and function oracle declarations")
+        if not isinstance(validation["inputs"], list) or not validation["inputs"] or not isinstance(validation["functions"], list) or not validation["functions"]:
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Validation inputs and function oracles must be nonempty arrays")
+        for oracle in validation["functions"]:
+            if not isinstance(oracle, dict) or set(oracle) != {"function_handle", "result_key", "oracle"}:
+                raise WorkspaceError("MISSION_CONTRACT_INVALID", "Each function oracle requires a handle, result key, and supported oracle")
+            spec = oracle["oracle"]
+            if not isinstance(spec, dict) or spec.get("kind") not in {"clamp", "threshold_call"}:
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Only clamp and threshold_call host oracles are supported")
+            expected_fields = ({"kind", "minimum", "maximum"} if spec["kind"] == "clamp" else
+                {"kind", "callee_handle", "threshold", "true_value", "false_value"})
+            if set(spec) != expected_fields:
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Oracle declaration contains missing or unsupported fields")
+            if spec["kind"] == "threshold_call" and not isinstance(spec["callee_handle"], str):
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "threshold_call requires a portable callee handle")
+            numeric_fields = ("minimum", "maximum") if spec["kind"] == "clamp" else ("threshold", "true_value", "false_value")
+            for field in numeric_fields:
+                value = spec[field]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise WorkspaceError("MISSION_CONTRACT_ORACLE", f"Oracle field {field} must be a finite number")
+            if spec["kind"] == "clamp" and float(spec["minimum"]) > float(spec["maximum"]):
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Clamp oracle bounds are inverted")
+
+    def _oracle_value(self, function_handle, argument, active=None):
+        active = set() if active is None else active
+        if function_handle in active:
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Recursive host oracle references are unsupported")
+        row = next((item for item in self.contract["validation"]["functions"]
+            if item["function_handle"] == function_handle), None)
+        if row is None:
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", f"No host oracle is configured for {function_handle}")
+        spec = row["oracle"]
+        if spec["kind"] == "clamp":
+            return min(float(spec["maximum"]), max(float(spec["minimum"]), float(argument)))
+        active.add(function_handle)
+        observed = self._oracle_value(spec["callee_handle"], argument, active)
+        active.remove(function_handle)
+        return float(spec["true_value"] if observed >= float(spec["threshold"]) else spec["false_value"])
+
     def _log(self, path: Path, row: dict[str, Any]):
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -115,14 +210,14 @@ class Cycle20Gateway:
     def _emit(self, event: dict[str, Any]):
         self.seq += 1
         event.setdefault("presentation_sequence", self.seq)
-        event.setdefault("event_id", f"cycle20-{self.seq}-{uuid.uuid4().hex[:8]}")
+        event.setdefault("event_id", f"maintenance-{self.seq}-{uuid.uuid4().hex[:8]}")
         event.setdefault("session_id", self.session_id)
-        event.setdefault("mission_id", MISSION_ID)
+        event.setdefault("mission_id", self.mission_id)
         self._log(self.visual_path, event)
 
     def _history(self, event: str, actor: str, **fields):
         self._log(self.trace_path, {"sequence": self.seq + 1, "event": event, "actor": actor,
-            "mission_id": MISSION_ID, "observed_monotonic_ns": time.monotonic_ns(), **fields})
+            "mission_id": self.mission_id, "observed_monotonic_ns": time.monotonic_ns(), **fields})
 
     def _normalized(self, revision: int | None = None):
         return senior.normalized_state(projection_semantics(build_projection(
@@ -242,7 +337,7 @@ class Cycle20Gateway:
             behavior_match=True, identity_count=len(self.aliases))
         self._history("checkpoint_verified", "host_validation", revision=2,
             semantic_fingerprint=checkpoint["semantic_fingerprint"], before_second_constructor=True)
-        self._history("session_started", "host", revision=3, mission_id=MISSION_ID, model_session="fresh_pi_session")
+        self._history("session_started", "host", revision=3, mission_id=self.mission_id, model_session="fresh_pi_session")
         self._emit({"event_type": "initial", "revision": 3,
             "provenance": "Committed baseline after host deterministic replay; no Cycle 20 model action",
             "title": "Committed baseline · revision 3",
@@ -289,26 +384,189 @@ class Cycle20Gateway:
         self.write_json(self.output / "constructive-base.json", stream)
 
     def mission_contract(self):
-        return {"schema": "basic-workspace.mission-contract", "version": 1,
-            "mission_id": MISSION_ID,
-            "objective": "Change CLAMP_SCORE's upper cap from 100 to 50 so it returns min(50,max(0,X)); preserve IS_PASSING unchanged.",
-            "base_document_revision": 3, "execution_profile_id": PROFILE_ID,
-            "allowed_operation": "atomic_edit_two_numeric_literals_in_CLAMP_SCORE",
-            "required_targets": 2, "required_expected_value": 100, "required_replacement_value": 50,
-            "preserved_invariants": ["IS_PASSING normalized structure and binding unchanged",
-                "CLAMP_SCORE structure unchanged except the two authorized numeric leaves",
-                "CLAMP_SCORE-to-IS_PASSING call dependency unchanged", "one atomic revision increment"],
-            "required_validation": {"engines": ["interp", "jit"], "inputs": list(INPUTS)},
-            "trust_boundary": "Restrictions are enforced at this loopback MissionGateway only; unrestricted host access is outside this experiment."}
+        return copy.deepcopy(self.contract)
+
+    @staticmethod
+    def _find_assignment(items, statement_handle):
+        for item in items:
+            if item.get("kind") == "assignment" and item.get("statement_handle") == statement_handle:
+                return item
+            for block_name in ("then", "else", "body"):
+                children = item.get(block_name)
+                if isinstance(children, list):
+                    found = Cycle20Gateway._find_assignment(children, statement_handle)
+                    if found is not None:
+                        return found
+        return None
+
+    @classmethod
+    def _target_expression(cls, state, target):
+        if not isinstance(target, dict) or "function_handle" not in target or not isinstance(target.get("expression_path"), list):
+            raise WorkspaceError("MISSION_EDIT_TARGETS", "Target must use a function handle and explicit expression_path")
+        allowed_shapes = (
+            {"function_handle", "control_path", "expression_path"},
+            {"function_handle", "statement_handle", "expression_path"})
+        if set(target) not in allowed_shapes:
+            raise WorkspaceError("MISSION_EDIT_TARGETS", "Target must be a typed control path or statement handle")
+        function = next((row for row in state["functions"] if row.get("handle") == target["function_handle"]), None)
+        if function is None:
+            raise WorkspaceError("MISSION_EDIT_TARGETS", "Target function handle is unresolved")
+        if "statement_handle" in target:
+            statement = cls._find_assignment(function["statements"], target["statement_handle"])
+            if statement is None or statement.get("target_handle") != target["function_handle"] or not statement.get("target_is_result"):
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Statement handle is not an assignment to its function result")
+            selected = statement.get("expression")
+        else:
+            path = target["control_path"]
+            if not isinstance(path, list) or not path:
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Control path must contain at least one typed step")
+            block = function["statements"]
+            statement = None
+            for step_index, step in enumerate(path):
+                if not isinstance(step, dict) or set(step) != {"block", "index"} or step["block"] not in {"body", "then", "else"}:
+                    raise WorkspaceError("MISSION_EDIT_TARGETS", "Control path contains an unsupported block step")
+                index = step["index"]
+                if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(block):
+                    raise WorkspaceError("MISSION_EDIT_TARGETS", "Control path index is missing or out of range")
+                statement = block[index]
+                if step_index + 1 < len(path):
+                    next_block = path[step_index + 1].get("block")
+                    block = statement.get(next_block) if next_block in {"then", "else", "body"} else None
+                    if not isinstance(block, list):
+                        raise WorkspaceError("MISSION_EDIT_TARGETS", "Intermediate control path does not select a structured block")
+            if statement is None or statement.get("kind") != "if":
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Control path does not resolve to an IF condition")
+            condition = statement.get("condition", {})
+            if condition.get("kind") != "compare" or len(condition.get("children", [])) != 2:
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Only two-operand numeric comparisons are supported")
+            selected = condition
+        for child_index in target["expression_path"]:
+            if isinstance(child_index, bool) or not isinstance(child_index, int):
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Expression path indexes must be integers")
+            children = selected.get("children", []) if isinstance(selected, dict) else []
+            if not 0 <= child_index < len(children):
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Expression path is ambiguous or out of range")
+            selected = children[child_index]
+        if not isinstance(selected, dict) or selected.get("kind") != "number" or "value" not in selected:
+            raise WorkspaceError("MISSION_EDIT_TARGETS", "Selected expression is not a numeric literal")
+        return function, statement, selected
+
+    @classmethod
+    def _set_target_value(cls, state, target, expected, replacement):
+        _function, _statement, leaf = cls._target_expression(state, target)
+        if float(leaf["value"]) != float(expected):
+            raise WorkspaceError("MISSION_CANDIDATE_MISMATCH", "Candidate literal differs from its authorized expected value")
+        leaf["value"] = float(replacement)
+
+    def _reconstruct_from_operation_stream(self):
+        if not self.baseline_stream_path or not self.baseline_history_path or not self.baseline_validation_path:
+            raise WorkspaceError("BASELINE_EVIDENCE_MISSING", "Stream-based baseline requires its commit history and validation evidence")
+        stream = json.loads(self.baseline_stream_path.read_text(encoding="utf-8"))
+        history = [json.loads(line) for line in self.baseline_history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        recorded_validation = json.loads(self.baseline_validation_path.read_text(encoding="utf-8"))
+        if stream.get("schema") != "basic-workspace.constructive-metafile" or stream.get("version") != 1 or stream.get("execution_profile_id") != PROFILE_ID:
+            raise WorkspaceError("BASELINE_STREAM_SCHEMA", "Baseline constructive stream is unsupported")
+        if recorded_validation.get("mission_complete") is not True or recorded_validation.get("replay", {}).get("passed") is not True:
+            raise WorkspaceError("BASELINE_VALIDATION_FAILED", "Recorded revision-4 baseline did not pass its host validation and replay")
+        self.constructive_ops = copy.deepcopy(stream["operations"])
+        for op in stream["operations"]:
+            if op.get("operation") == "create_numeric_function":
+                handles = set(_calls(op.get("arguments", {})))
+                if any(handle not in self.aliases for handle in handles):
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Baseline constructor references an unresolved portable function")
+                args = senior.resolve_function_handles(op["arguments"], self.aliases, handles)
+                applied = self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc),
+                    [{"operation": "create_numeric_function", **args}])
+                raw = projection_semantics(build_projection(self.ws, self.doc, applied["revision"]))
+                self.aliases = senior.aliases_for_new_function(raw, self.aliases, args["name"], op["portable_handle"])
+            elif op.get("operation") == "edit_numeric_literals":
+                operations = self._workspace_operations_for_edits(op["edits"], self.aliases)
+                self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), operations)
+            else:
+                raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED", "Baseline stream contains an unsupported operation")
+        revision = self.ws.get_revision(self.doc)
+        if revision != self.contract["base_document_revision"]:
+            raise WorkspaceError("BASELINE_REVISION_MISMATCH", "Reconstructed stream does not produce the contract's base revision")
+        committed = [row for row in history if row.get("event") == "transaction_committed" and row.get("resulting_revision") == revision]
+        if len(committed) != 1:
+            raise WorkspaceError("BASELINE_COMMIT_EVIDENCE", "Recorded baseline must identify one authoritative commit at the expected revision")
+        self.baseline = self._normalized(revision)
+        if self.baseline != committed[0].get("semantic_snapshot"):
+            raise WorkspaceError("BASELINE_SEMANTIC_MISMATCH", "Fresh replay differs from the recorded committed semantic snapshot")
+        self.base_revision = revision
+        self.baseline_observed = self._run_observations(self.ws, self.doc, revision, self.aliases)
+        if self.baseline_observed["interp"] != self.baseline_observed["jit"]:
+            raise WorkspaceError("BASELINE_ENGINE_MISMATCH", "Baseline interpreter and JIT observations differ")
+        self.initial_code = self.ws.render_document(self.doc)
+        self.edit_targets = self._discover_authorized_targets()
+        self.initial_identity_map = [{"portable_handle": handle, "reconstructed_workspace_id": value, "remapped": True}
+            for handle, value in sorted(self.aliases.items())]
+        self.write_json(self.output / "baseline-reconstruction.json", {
+            "schema": "basic-workspace.semantic-maintenance-baseline", "version": 1,
+            "source_stream": str(self.baseline_stream_path), "starting_document_empty": True,
+            "resulting_revision": revision, "normalized_semantics_match": True,
+            "recorded_checkpoint_validation_passed": True, "interpreter_jit_agree": True,
+            "portable_identity_count": len(self.aliases), "identity_mapping": self.initial_identity_map,
+            "dependencies": self.dependencies(), "passed": True})
+        self.write_json(self.output / "constructive-base.json", stream)
+        self.write_json(self.output / "execution-profile.json",
+            json.loads((ROOT / "results/semantic-replay/execution-profile.json").read_text(encoding="utf-8")))
+        self.write_json(self.output / "visual-source.json", {
+            "schema": "basic-workspace.visual-source", "version": 1,
+            "campaign": {"id": self.mission_id, "title": self.contract["objective"], "filename": "PROGRAM.bas"},
+            "initial": {"revision": revision, "code": self.initial_code, "dependencies": self.dependencies()},
+            "snapshots": {str(revision): self.initial_code}})
+        self.write_json(self.output / "baseline-observations.json", {
+            "revision": revision, "actor": "host_validation_of_reconstruction",
+            "observed_results": self.baseline_observed, "dependency_edges": self.dependencies(),
+            "expectation_source": "host execution of verified constructive baseline"})
+        self._history("program_reconstructed", "host_deterministic_replay", revision=revision,
+            source_operation_count=len(stream["operations"]), normalized_equivalence=True,
+            recorded_snapshot_match=True, behavior_match=True, identity_count=len(self.aliases))
+        self._history("session_started", "host", revision=revision, mission_id=self.mission_id,
+            model_session="fresh_pi_session")
+        self._emit({"event_type": "initial", "revision": revision,
+            "provenance": "Committed baseline after host deterministic replay; no model action",
+            "title": f"Verified committed baseline · revision {revision}",
+            "description": "The supplied portable operation stream was replayed in an empty Workspace and matched its committed semantic snapshot.",
+            "snapshot": self.initial_code, "dependencies": self.dependencies(),
+            "focus": {"handles": sorted(self.aliases), "mapping": "verified_function_boundary"}})
+
+    def _validate_contract_against_baseline(self):
+        if self.contract["execution_profile_id"] != PROFILE_ID:
+            raise WorkspaceError("BASELINE_PROFILE_MISMATCH", "Contract and program use different execution profiles")
+        if self.base_revision != self.contract["base_document_revision"]:
+            raise WorkspaceError("BASELINE_REVISION_MISMATCH", "Workspace revision does not match the mission contract")
+        handles = set(self.aliases)
+        if not set(self.contract["allowed_function_handles"] + self.contract["unchanged_function_handles"]).issubset(handles):
+            raise WorkspaceError("MISSION_CONTRACT_HANDLE", "Contract contains a missing portable function handle")
+        expected_edges = sorted([{"caller": edge["caller_handle"], "callee": edge["callee_handle"]}
+            for edge in self.contract["required_dependency_edges"]], key=lambda row: (row["caller"], row["callee"]))
+        if self._dependency_edges(self.baseline) != expected_edges:
+            raise WorkspaceError("MISSION_CONTRACT_DEPENDENCY", "Baseline dependency bindings do not satisfy the contract")
+        self._validate_unchanged_functions(self.baseline)
+
+    def _validate_unchanged_functions(self, state):
+        for handle in self.contract["unchanged_function_handles"]:
+            if senior.find_function(state, handle) != senior.find_function(self.baseline, handle):
+                raise WorkspaceError("MISSION_UNCHANGED_FUNCTION", f"Function {handle} changed outside the permitted edit scope")
 
     def _run_observations(self, ws, doc, revision, aliases):
         results = {"interp": {}, "jit": {}}
         for engine in results:
-            for value in INPUTS:
-                results[engine][str(value)] = {
-                    "clamp_score": self.executor.execute_function(ws, doc, revision, aliases["clamp_score.function"], [value], engine)["result"],
-                    "is_passing": self.executor.execute_function(ws, doc, revision, aliases["is_passing.function"], [value], engine)["result"]}
+            for value in self.contract["validation"]["inputs"]:
+                row = {}
+                for function_spec in self.contract["validation"]["functions"]:
+                    handle = function_spec["function_handle"]
+                    row[function_spec["result_key"]] = self.executor.execute_function(
+                        ws, doc, revision, aliases[handle], [value], engine)["result"]
+                results[engine][str(value)] = row
         return results
+
+    def _expected_observations(self):
+        return {engine: {str(value): {item["result_key"]: self._oracle_value(item["function_handle"], value)
+            for item in self.contract["validation"]["functions"]}
+            for value in self.contract["validation"]["inputs"]} for engine in ("interp", "jit")}
 
     def _dependency_edges(self, state):
         return sorted(_call_edges(state), key=lambda edge: (edge["caller"], edge["callee"]))
@@ -319,51 +577,77 @@ class Cycle20Gateway:
                  "callee": names.get(edge["callee"], edge["callee"])}
                 for edge in self._dependency_edges(self.baseline)]
 
-    @staticmethod
-    def _target_descriptor(function_handle, *, control_path=None, statement_handle=None,
-                           expression_path, semantic_path):
-        target = {"function_handle": function_handle, "expression_path": expression_path}
-        if control_path is not None: target["control_path"] = control_path
-        if statement_handle is not None: target["statement_handle"] = statement_handle
-        return {"target": target, "semantic_path": semantic_path, "expected_value": 100.0}
-
     def _discover_authorized_targets(self):
-        function = senior.find_function(self.baseline, "clamp_score.function")
         result = []
-        # The exact Cycle 19B shape has one IF comparison with X > 100 and one
-        # result assignment of 100 in its THEN block. Paths are derived from
-        # the normalized typed function and guarded by complete baseline equality.
-        statements = function["statements"]
-        for index, item in enumerate(statements):
-            if item.get("kind") != "if":
-                continue
-            condition = item.get("condition", {})
-            children = condition.get("children", [])
-            if (condition.get("kind") == "compare" and condition.get("value") == ">"
-                    and len(children) == 2 and children[1].get("kind") == "number"
-                    and float(children[1].get("value")) == 100.0):
-                result.append(self._target_descriptor("clamp_score.function",
-                    control_path=[{"block": "body", "index": index}], expression_path=[1],
-                    semantic_path=["functions", 0, "statements", index, "condition", "children", 1, "value"]))
-                for child_index, child in enumerate(item.get("then", [])):
-                    expression = child.get("expression", {})
-                    if (child.get("kind") == "assignment" and child.get("target_handle") == "clamp_score.function"
-                            and expression.get("kind") == "number" and float(expression.get("value")) == 100.0):
-                        result.append(self._target_descriptor("clamp_score.function",
-                            statement_handle=child.get("statement_handle"), expression_path=[],
-                            semantic_path=["functions", 0, "statements", index, "then", child_index, "expression", "value"]))
-        if len(result) != 2 or any(row["target"].get("statement_handle") is None for row in result if "control_path" not in row["target"]):
-            raise WorkspaceError("BASELINE_EDIT_TARGETS", "Baseline does not have exactly the two verified cap-100 expression locations")
+        seen = set()
+        for spec in self.contract["authorized_targets"]:
+            if not isinstance(spec, dict) or set(spec) != {"target", "expected_original_value", "replacement_constraint", "label"}:
+                raise WorkspaceError("MISSION_CONTRACT_TARGET", "Each authorized target requires a typed target, old value, constraint, and label")
+            target = spec["target"]
+            if target.get("function_handle") not in self.contract["allowed_function_handles"]:
+                raise WorkspaceError("MISSION_CONTRACT_TARGET", "Target function is outside the contract's allowed scope")
+            key = json.dumps(target, sort_keys=True)
+            if key in seen:
+                raise WorkspaceError("MISSION_CONTRACT_TARGET", "Contract contains an ambiguous duplicate target")
+            seen.add(key)
+            original = spec["expected_original_value"]
+            if isinstance(original, bool) or not isinstance(original, (int, float)) or not math.isfinite(float(original)):
+                raise WorkspaceError("MISSION_CONTRACT_TARGET", "Expected original values must be finite numbers")
+            constraint = spec["replacement_constraint"]
+            if not isinstance(constraint, dict) or set(constraint) != {"kind", "values"} or constraint["kind"] != "one_of":
+                raise WorkspaceError("MISSION_CONTRACT_CONSTRAINT", "Only a bounded one_of replacement constraint is supported")
+            values = constraint["values"]
+            if not isinstance(values, list) or not values or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) for v in values):
+                raise WorkspaceError("MISSION_CONTRACT_CONSTRAINT", "one_of must list finite numeric replacement values")
+            _fn, _statement, selected = self._target_expression(self.baseline, target)
+            if float(selected["value"]) != float(original):
+                raise WorkspaceError("MISSION_CONTRACT_BASELINE_TARGET", "Authorized target does not contain its expected original value")
+            result.append({"target": copy.deepcopy(target), "expected_value": float(original),
+                "replacement_constraint": copy.deepcopy(constraint), "label": spec["label"]})
+        if len(result) < self.contract["minimum_edits"]:
+            raise WorkspaceError("MISSION_CONTRACT_TARGET", "Not enough unambiguous targets are declared")
         return result
 
     def _current_projection(self):
         return self._normalized(self.ws.get_revision(self.doc))
 
     def _inspect(self):
+        rows = [{"target": row["target"], "current_value": row["expected_value"],
+            "expression_kind": "number", "label": row["label"]} for row in self.edit_targets]
         return {"revision": self.ws.get_revision(self.doc), "structure": self._current_projection(),
-            "editable_upper_bound_occurrences": [{"target": row["target"], "current_value": row["expected_value"],
-                "expression_kind": "number"} for row in self.edit_targets],
-            "identity_note": "Function, parameter, and assignment statement handles are stable Workspace semantic identities. IF condition selection is function identity plus verified ordered control-flow path; the IF node has no independent statement ID."}
+            "editable_numeric_literal_targets": rows,
+            # Kept as a read-only compatibility alias for the original Cycle 20
+            # agent prompt. New callers should use the semantically broader key.
+            "editable_upper_bound_occurrences": rows,
+            "identity_note": "Function, parameter, and assignment statement handles are stable Workspace identities. IF literals use a typed function-anchored control path and are verified against the current revision."}
+
+    def _workspace_operations_for_edits(self, edits, aliases):
+        operations = []
+        for edit in edits:
+            if not isinstance(edit, dict) or set(edit) != {"target", "expected_value", "replacement_value"}:
+                raise WorkspaceError("INVALID_EDIT_REQUEST", "Each literal edit requires exactly target, expected_value, and replacement_value")
+            target = edit["target"]
+            function_id = aliases.get(target.get("function_handle")) if isinstance(target, dict) else None
+            if function_id is None:
+                raise WorkspaceError("UNKNOWN_FUNCTION_HANDLE", "Target function handle is not resolved")
+            for value_name in ("expected_value", "replacement_value"):
+                value = edit[value_name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise WorkspaceError("INVALID_LITERAL_EDIT", f"{value_name} must be a finite number")
+            op = {"operation": "edit_numeric_literal_at_path", "function_id": function_id,
+                "expression_path": target["expression_path"], "expected_value": edit["expected_value"],
+                "replacement_value": edit["replacement_value"]}
+            if "control_path" in target:
+                op.update(target_kind="if_condition_rhs", control_path=target["control_path"])
+            elif "statement_handle" in target:
+                statement_id = aliases.get(target["statement_handle"])
+                if statement_id is None:
+                    raise WorkspaceError("UNKNOWN_STATEMENT_HANDLE", "Assignment statement handle is unresolved")
+                op.update(target_kind="assignment_rhs", statement_id=statement_id)
+            else:
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Target must include a control path or statement handle")
+            operations.append(op)
+        return operations
 
     def _make_workspace_operations(self, request):
         if set(request) != {"expected_revision", "function_handle", "edits"}:
@@ -372,47 +656,33 @@ class Cycle20Gateway:
         if revision != self.ws.get_revision(self.doc):
             raise WorkspaceError("STALE_REVISION", "Edit base revision is stale")
         if self.committed:
-            raise WorkspaceError("MISSION_EDIT_LIMIT", "Mission permits one atomic semantic edit")
+            raise WorkspaceError("MISSION_EDIT_LIMIT", "Contract permits one committed atomic edit")
         handle = request["function_handle"]
         if handle not in self.discovered:
-            raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover CLAMP_SCORE before proposing the edit")
-        if handle != "clamp_score.function":
-            raise WorkspaceError("MISSION_EDIT_SCOPE", "Mission permits edits only within CLAMP_SCORE")
+            raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover the target function before proposing an edit")
+        if handle not in self.contract["allowed_function_handles"]:
+            raise WorkspaceError("MISSION_EDIT_SCOPE", "Target function is outside the mission's allowed scope")
         edits = request["edits"]
-        if not isinstance(edits, list) or len(edits) != 2:
-            raise WorkspaceError("MISSION_EDIT_COUNT", "Both cap expressions must be edited in the same preview")
-        authorized = {json.dumps(row["target"], sort_keys=True) for row in self.edit_targets}
+        if not isinstance(edits, list) or not self.contract["minimum_edits"] <= len(edits) <= self.contract["maximum_edits"]:
+            raise WorkspaceError("MISSION_EDIT_COUNT", "Edit count is outside the mission contract bounds")
         actual = [edit.get("target") for edit in edits if isinstance(edit, dict)]
         if len(actual) != len(edits):
             raise WorkspaceError("INVALID_EDIT_REQUEST", "Each edit requires a typed target")
-        actual_keys = [json.dumps(target, sort_keys=True) for target in actual]
-        if len(set(actual_keys)) != len(actual_keys):
+        target_keys = [json.dumps(target, sort_keys=True) for target in actual]
+        if len(set(target_keys)) != len(target_keys):
             raise WorkspaceError("DUPLICATE_EDIT_TARGET", "The same semantic literal target was selected more than once")
-        if set(actual_keys) != authorized:
-            raise WorkspaceError("MISSION_EDIT_TARGETS", "Candidate must edit exactly the two discovered CLAMP_SCORE upper-bound literals")
-        if any(edit.get("expected_value") != 100 or edit.get("replacement_value") != 50
-               or isinstance(edit.get("expected_value"), bool) or isinstance(edit.get("replacement_value"), bool)
-               for edit in edits):
-            raise WorkspaceError("MISSION_LITERAL_VALUES", "Both authorized cap literals must change from 100 to 50")
-        if not all(math.isfinite(float(edit["expected_value"])) and math.isfinite(float(edit["replacement_value"])) for edit in edits):
-            raise WorkspaceError("INVALID_LITERAL_EDIT", "Literal values must be finite")
-        operations = []
         target_map = {json.dumps(row["target"], sort_keys=True): row for row in self.edit_targets}
-        for edit in edits:
-            row = target_map[json.dumps(edit["target"], sort_keys=True)]
-            target = row["target"]
-            op = {"operation": "edit_numeric_literal_at_path", "function_id": self.aliases["clamp_score.function"],
-                "expression_path": target["expression_path"], "expected_value": edit["expected_value"],
-                "replacement_value": edit["replacement_value"]}
-            if "control_path" in target:
-                op.update(target_kind="if_condition_rhs", control_path=target["control_path"])
-            else:
-                statement_id = self.aliases.get(target["statement_handle"])
-                if statement_id is None:
-                    raise WorkspaceError("UNKNOWN_STATEMENT_HANDLE", "Assignment statement handle is not resolved")
-                op.update(target_kind="assignment_rhs", statement_id=statement_id)
-            operations.append(op)
-        return operations
+        if set(target_keys) != set(target_map):
+            raise WorkspaceError("MISSION_EDIT_TARGETS", "Candidate must select exactly the authorized semantic literal targets")
+        for edit, key in zip(edits, target_keys):
+            target_spec = target_map[key]
+            if edit["target"]["function_handle"] != handle:
+                raise WorkspaceError("MISSION_EDIT_SCOPE", "Every edit must target the selected discovered function")
+            if edit["expected_value"] != target_spec["expected_value"]:
+                raise WorkspaceError("MISSION_LITERAL_VALUES", "Expected old value does not match the contract precondition")
+            if edit["replacement_value"] not in target_spec["replacement_constraint"]["values"]:
+                raise WorkspaceError("MISSION_LITERAL_VALUES", "Replacement value violates the host-owned mission constraint")
+        return self._workspace_operations_for_edits(edits, self.aliases)
 
     def _authorize_candidate(self, request):
         if self.ws.get_revision(self.doc) != request["expected_revision"]:
@@ -421,34 +691,41 @@ class Cycle20Gateway:
         candidate_info = self.ws.preview_transaction_semantics(self.doc, request["expected_revision"], operations)
         candidate = senior.normalized_state(candidate_info["candidate_semantics"], self.aliases)
         expected = copy.deepcopy(self.baseline)
-        for row in self.edit_targets:
-            _set_semantic_path(expected, row["semantic_path"], 50.0, 100.0)
+        target_map = {json.dumps(row["target"], sort_keys=True): row for row in self.edit_targets}
+        for edit in request["edits"]:
+            row = target_map[json.dumps(edit["target"], sort_keys=True)]
+            self._set_target_value(expected, row["target"], row["expected_value"], edit["replacement_value"])
         if candidate != expected:
-            raise WorkspaceError("MISSION_CANDIDATE_MISMATCH", "Typed candidate contains changes outside the two authorized cap literals")
+            raise WorkspaceError("MISSION_CANDIDATE_MISMATCH", "Typed candidate contains changes outside the authorized literal targets")
+        for handle in self.contract["unchanged_function_handles"]:
+            if senior.find_function(candidate, handle) != senior.find_function(self.baseline, handle):
+                raise WorkspaceError("MISSION_UNCHANGED_FUNCTION", f"Function {handle} must remain structurally unchanged")
         before_edges = self._dependency_edges(self.baseline)
         after_edges = self._dependency_edges(candidate)
-        if before_edges != after_edges or before_edges != [{"caller": "is_passing.function", "callee": "clamp_score.function"}]:
-            raise WorkspaceError("MISSION_DEPENDENCY_CHANGED", "Existing CLAMP_SCORE → IS_PASSING function binding must remain unchanged")
+        required_edges = sorted([{"caller": row["caller_handle"], "callee": row["callee_handle"]}
+            for row in self.contract["required_dependency_edges"]], key=lambda row: (row["caller"], row["callee"]))
+        if before_edges != after_edges or after_edges != required_edges:
+            raise WorkspaceError("MISSION_DEPENDENCY_CHANGED", "Required semantic function dependencies must remain unchanged")
         preview = self.ws.preview_transaction(self.doc, request["expected_revision"], operations, include_diff=True)
         candidate_ws = copy.deepcopy(self.ws)
         before_tokens = {token.uid: token.text for token in self.ws.documents[self.doc].tokens}
         applied = candidate_ws.apply_transaction(self.doc, request["expected_revision"], operations)
         after_tokens = {token.uid: token.text for token in candidate_ws.documents[self.doc].tokens}
         changed_token_ids = sorted(uid for uid in before_tokens if before_tokens[uid] != after_tokens.get(uid))
-        if set(after_tokens) != set(before_tokens) or len(changed_token_ids) != 2:
-            raise WorkspaceError("LITERAL_IDENTITY_CHANGED", "Candidate must replace exactly two literal token values and preserve token identities")
+        if set(after_tokens) != set(before_tokens) or len(changed_token_ids) != len(request["edits"]):
+            raise WorkspaceError("LITERAL_IDENTITY_CHANGED", "Edit must replace only its selected literal tokens and preserve token identities")
         after = self._run_observations(candidate_ws, self.doc, applied["revision"], self.aliases)
-        expected_after = {engine: {str(value): {"clamp_score": float(min(50, max(0, value)),), "is_passing": 0.0}
-            for value in INPUTS} for engine in ("interp", "jit")}
+        expected_after = self._expected_observations()
         if after != expected_after:
-            raise WorkspaceError("MISSION_PREVIEW_ORACLE", "Candidate execution does not match the requested cap behavior")
+            raise WorkspaceError("MISSION_PREVIEW_ORACLE", "Candidate execution does not match the independent contract oracle")
         names = {fn["handle"]: fn["name"] for fn in self.baseline["functions"]}
-        indirect = sorted({edge["caller"] for edge in before_edges if edge["callee"] == "clamp_score.function"})
-        impact = {"directly_changed_functions": ["CLAMP_SCORE"],
+        affected = sorted({edit["target"]["function_handle"] for edit in request["edits"]})
+        indirect = sorted({edge["caller"] for edge in before_edges if edge["callee"] in affected})
+        impact = {"directly_changed_functions": [names.get(handle, handle) for handle in affected],
             "dependent_callers": [names.get(handle, handle) for handle in indirect],
             "dependency_edges_unchanged": True, "before_observations": self.baseline_observed,
             "candidate_observations": after, "changed_literal_token_ids": changed_token_ids,
-            "scope_note": "Observed effect is measured on the listed finite test corpus; this is not a complete static behavior proof."}
+            "scope_note": "Behavioral impact is measured on the contract input corpus, not proven for all numeric inputs."}
         return operations, candidate, preview, impact
 
     def _preview(self, params, rid):
@@ -473,8 +750,9 @@ class Cycle20Gateway:
             resulting_revision=revision + 1, diff=preview.get("diff"), impact=impact)
         self._emit({"event_type": "preview", "revision": revision,
             "provenance": "Genuine Pi semantic edit proposal · MissionGateway preview accepted",
-            "title": "Two-location cap edit preview", "description": "Candidate changes both cap literals together. Committed code remains at revision 3 until commit.",
-            "focus": {"handles": ["clamp_score.function", "clamp_score.statement.2"],
+            "title": f"{len(params['edits'])}-location numeric edit preview",
+            "description": f"Candidate changes {len(params['edits'])} authorized numeric literal(s). Committed code remains at revision {revision} until commit.",
+            "focus": {"handles": [params["function_handle"]] + [edit["target"].get("statement_handle") for edit in params["edits"] if edit["target"].get("statement_handle")],
                 "mapping": "verified_function_boundary"},
             "preview": {"status": "accepted", "diff": preview.get("diff"),
                 "edits": params["edits"], "candidate_revision": revision + 1},
@@ -512,8 +790,8 @@ class Cycle20Gateway:
         except WorkspaceError as exc:
             return {"ok": False, "committed": False, "code": exc.code, "message": str(exc),
                 "revision": revision, "authoritative_workspace_changed": False}
-        self.constructive_ops.append({"operation": "edit_numeric_literals", "mission_id": MISSION_ID,
-            "function_handle": "clamp_score.function", "edits": pending["request"]["edits"]})
+        self.constructive_ops.append({"operation": "edit_numeric_literals", "mission_id": self.mission_id,
+            "function_handle": pending["request"]["function_handle"], "edits": pending["request"]["edits"]})
         self.write_json(self.output / "constructive-operations.json", {
             "schema": "basic-workspace.constructive-metafile", "version": 1,
             "execution_profile_id": PROFILE_ID,
@@ -521,23 +799,26 @@ class Cycle20Gateway:
         code = self.ws.render_document(self.doc)
         self.write_json(self.output / "visual-source.json", {
             "schema": "basic-workspace.visual-source", "version": 1,
-            "campaign": {"id": "cycle20-semantic-evolution", "title": "Cycle 20 · semantic evolution of CLAMP_SCORE", "filename": "SCORES.bas"},
-            "initial": {"revision": 3, "code": self.initial_code, "dependencies": self.dependencies()},
-            "snapshots": {"3": self.initial_code, "4": code}})
+            "campaign": {"id": self.mission_id, "title": self.contract["objective"], "filename": "PROGRAM.bas"},
+            "initial": {"revision": self.base_revision, "code": self.initial_code, "dependencies": self.dependencies()},
+            "snapshots": {str(self.base_revision): self.initial_code, str(applied["revision"]): code}})
         self._history("transaction_committed", "mission_gateway", request_id=rid, transaction_id=txid,
             base_revision=revision, resulting_revision=applied["revision"], operation="edit_numeric_literals",
             changed_token_ids=changed_token_ids, affected_statement_ids=applied["affected_statement_ids"],
             alias_bindings=self.aliases, semantic_snapshot=committed, impact=impact)
+        changed_handles = sorted({edit["target"]["function_handle"] for edit in pending["request"]["edits"]})
+        names = {fn["handle"]: fn["name"] for fn in self.baseline["functions"]}
         self._emit({"event_type": "commit", "revision": applied["revision"], "snapshot": code,
             "provenance": "Workspace atomic semantic transaction · genuine Pi commit request",
-            "title": "CLAMP_SCORE cap edit committed", "description": "Both upper-bound literals changed from 100 to 50 in one revision-checked transaction; IS_PASSING code and call binding are unchanged.",
-            "focus": {"handles": ["clamp_score.function", "clamp_score.statement.2"],
+            "title": f"{', '.join(names.get(handle, handle) for handle in changed_handles)} edit committed",
+            "description": f"{len(changed_token_ids)} authorized numeric literal(s) changed in one revision-checked transaction; unaffected functions and required bindings remain unchanged.",
+            "focus": {"handles": changed_handles + [edit["target"].get("statement_handle") for edit in pending["request"]["edits"] if edit["target"].get("statement_handle")],
                 "mapping": "verified_function_boundary", "semantic_paths": [row["target"] for row in pending["request"]["edits"]]},
             "impact": impact, "dependencies": self.dependencies(),
             "outcome": {"committed": True, "workspace_revision": applied["revision"],
-                "atomic_edit_count": 2, "changed_token_ids": changed_token_ids}})
+                "atomic_edit_count": len(pending["request"]["edits"]), "changed_token_ids": changed_token_ids}})
         return {"ok": True, "committed": True, "revision": applied["revision"],
-            "atomic_edit_count": 2, "preserved_semantic_identities": len(self.aliases),
+            "atomic_edit_count": len(pending["request"]["edits"]), "preserved_semantic_identities": len(self.aliases),
             "changed_token_ids": changed_token_ids}
 
     def _run_full_replay(self):
@@ -545,7 +826,7 @@ class Cycle20Gateway:
             "execution_profile_id": PROFILE_ID, "portable_handles": sorted(self.aliases),
             "operations": copy.deepcopy(self.constructive_ops)}
         ws = Workspace()
-        doc = ws.create_empty_document("memory://cycle20/full-replay.bas")["document_id"]
+        doc = ws.create_empty_document("memory://numeric-maintenance/full-replay.bas")["document_id"]
         aliases: dict[str, str] = {}
         for item in stream["operations"]:
             if item["operation"] == "create_numeric_function":
@@ -557,7 +838,7 @@ class Cycle20Gateway:
                 raw = projection_semantics(build_projection(ws, doc, applied["revision"]))
                 aliases = senior.aliases_for_new_function(raw, aliases, args["name"], item["portable_handle"])
             elif item["operation"] == "edit_numeric_literals":
-                if item.get("function_handle") != "clamp_score.function" or item["function_handle"] not in aliases:
+                if item.get("function_handle") not in aliases:
                     raise WorkspaceError("REPLAY_HANDLE_MISSING", "Literal edit function handle is unresolved")
                 replay_request = {"expected_revision": ws.get_revision(doc),
                     "function_handle": item["function_handle"], "edits": item["edits"]}
@@ -574,50 +855,10 @@ class Cycle20Gateway:
         return stream, ws, doc, aliases, normalized, observations, identity_mapping
 
     def _resolve_replay_edit_targets(self, ws, doc, aliases, request):
-        # Recompute semantic paths on replay rather than carrying over transient IDs.
         state = senior.normalized_state(projection_semantics(build_projection(ws, doc, ws.get_revision(doc))), aliases)
-        function = senior.find_function(state, "clamp_score.function")
-        targets = self._derive_targets(function)
-        target_by_key = {json.dumps(row["target"], sort_keys=True): row for row in targets}
-        operations = []
         for edit in request["edits"]:
-            row = target_by_key.get(json.dumps(edit["target"], sort_keys=True))
-            if row is None:
-                raise WorkspaceError("REPLAY_TARGET_MISSING", "Portable semantic edit target does not resolve in replay")
-            target = row["target"]
-            op = {"operation": "edit_numeric_literal_at_path", "function_id": aliases["clamp_score.function"],
-                "expression_path": target["expression_path"], "expected_value": edit["expected_value"],
-                "replacement_value": edit["replacement_value"]}
-            if "control_path" in target:
-                op.update(target_kind="if_condition_rhs", control_path=target["control_path"])
-            else:
-                op.update(target_kind="assignment_rhs", statement_id=aliases[target["statement_handle"]])
-            operations.append(op)
-        return operations
-
-    @staticmethod
-    def _derive_targets(function):
-        rows = []
-        for index, item in enumerate(function["statements"]):
-            if item.get("kind") == "if":
-                condition = item.get("condition", {})
-                children = condition.get("children", [])
-                if (condition.get("kind") == "compare" and condition.get("value") == ">"
-                        and len(children) == 2 and children[1].get("kind") == "number"
-                        and float(children[1].get("value")) == 100.0):
-                    rows.append({"target": {"function_handle": "clamp_score.function",
-                        "control_path": [{"block": "body", "index": index}], "expression_path": [1]},
-                        "semantic_path": ["functions", 0, "statements", index, "condition", "children", 1, "value"],
-                        "expected_value": 100.0})
-                    for child_index, child in enumerate(item.get("then", [])):
-                        expr = child.get("expression", {})
-                        if (child.get("kind") == "assignment" and child.get("target_handle") == "clamp_score.function"
-                                and expr.get("kind") == "number" and float(expr.get("value")) == 100.0):
-                            rows.append({"target": {"function_handle": "clamp_score.function",
-                                "statement_handle": child.get("statement_handle"), "expression_path": []},
-                                "semantic_path": ["functions", 0, "statements", index, "then", child_index, "expression", "value"],
-                                "expected_value": 100.0})
-        return rows
+            self._target_expression(state, edit["target"])
+        return self._workspace_operations_for_edits(request["edits"], aliases)
 
     def validate_current(self, expected_revision, actor="host"):
         revision = self.ws.get_revision(self.doc)
@@ -628,56 +869,67 @@ class Cycle20Gateway:
             return {"reliable": True, "revision": revision, "executed_revision": revision,
                 "mission_complete": False, "diagnostics": ["No semantic edit has committed"]}
         observed = self._run_observations(self.ws, self.doc, revision, self.aliases)
-        expected = {engine: {str(value): {"clamp_score": float(min(50, max(0, value)),), "is_passing": 0.0}
-            for value in INPUTS} for engine in ("interp", "jit")}
+        expected = self._expected_observations()
         normalized = self._normalized(revision)
-        clamp = senior.find_function(normalized, "clamp_score.function")
-        passing = senior.find_function(normalized, "is_passing.function")
-        base_passing = senior.find_function(self.baseline, "is_passing.function")
-        dep_before = self._dependency_edges(self.baseline)
-        dep_after = self._dependency_edges(normalized)
-        dependency_ok = dep_before == dep_after == [{"caller": "is_passing.function", "callee": "clamp_score.function"}]
-        passing_unchanged = passing == base_passing
         expected_state = copy.deepcopy(self.baseline)
-        for row in self.edit_targets:
-            _set_semantic_path(expected_state, row["semantic_path"], 50.0, 100.0)
+        committed_edit = next((row for row in reversed(self.constructive_ops)
+            if row.get("operation") == "edit_numeric_literals" and row.get("mission_id") == self.mission_id), None)
+        if committed_edit is None:
+            raise WorkspaceError("CONSTRUCTIVE_EDIT_MISSING", "Committed semantic edit is absent from the constructive stream")
+        target_map = {json.dumps(row["target"], sort_keys=True): row for row in self.edit_targets}
+        for edit in committed_edit["edits"]:
+            row = target_map.get(json.dumps(edit["target"], sort_keys=True))
+            if row is None:
+                raise WorkspaceError("CONSTRUCTIVE_TARGET_MISSING", "Committed target is missing from the mission contract")
+            self._set_target_value(expected_state, row["target"], row["expected_value"], edit["replacement_value"])
         structural_ok = normalized == expected_state
+        unchanged_ok = all(senior.find_function(normalized, handle) == senior.find_function(self.baseline, handle)
+            for handle in self.contract["unchanged_function_handles"])
+        expected_edges = sorted([{"caller": row["caller_handle"], "callee": row["callee_handle"]}
+            for row in self.contract["required_dependency_edges"]], key=lambda row: (row["caller"], row["callee"]))
+        dependency_ok = self._dependency_edges(self.baseline) == self._dependency_edges(normalized) == expected_edges
         engines_agree = observed["interp"] == observed["jit"]
         values_match = observed == expected
-        complete = bool(values_match and engines_agree and dependency_ok and passing_unchanged and structural_ok)
-        baseline_function_id = self.aliases["clamp_score.function"]
-        current_statement_ids = {key: value for key, value in self.aliases.items() if ".statement." in key}
-        result = {"schema": "basic-workspace.cycle20-validation", "version": 1, "actor": actor,
-            "mission_id": MISSION_ID, "revision": revision, "requested_revision": expected_revision,
-            "executed_revision": revision, "observed_results": observed, "expected_results": expected,
-            "expectation_source": "independent host-owned oracle", "engines_agree": engines_agree,
-            "values_match": values_match, "CLAMP_SCORE_matches_cap50_semantics": values_match,
-            "IS_PASSING_all_zero_on_test_domain": all(row["is_passing"] == 0 for engine in observed.values() for row in engine.values()),
-            "IS_PASSING_structurally_unchanged": passing_unchanged, "dependency_edges_unchanged": dependency_ok,
-            "structural_change_scope_valid": structural_ok, "preserved_semantic_identity_count": len(current_statement_ids) + 4,
-            "function_identity_preserved": baseline_function_id == self.aliases["clamp_score.function"],
-            "mission_complete": complete, "diagnostics": [] if complete else ["Behavior, binding, or structural invariant failed"]}
+        identities_preserved = self.aliases == self.baseline_aliases
+        complete = bool(values_match and engines_agree and dependency_ok and unchanged_ok and structural_ok and identities_preserved)
+        result = {"schema": "basic-workspace.numeric-literal-maintenance-validation", "version": 1,
+            "actor": actor, "mission_id": self.mission_id, "revision": revision,
+            "requested_revision": expected_revision, "executed_revision": revision,
+            "observed_results": observed, "expected_results": expected,
+            "expectation_source": "independent host-owned contract oracle",
+            "engines_agree": engines_agree, "values_match": values_match,
+            "structural_change_scope_valid": structural_ok,
+            "unchanged_functions_preserved": unchanged_ok,
+            "dependency_edges_unchanged": dependency_ok,
+            "preserved_semantic_identity_count": len(self.aliases),
+            "mission_complete": complete,
+            "diagnostics": [] if complete else ["Behavior, binding, identity, or structural invariant failed"]}
+        changed_handles = {edit["target"]["function_handle"] for edit in committed_edit["edits"]}
+        for function in self.baseline["functions"]:
+            result[f"{function['name']}_structurally_unchanged"] = function["handle"] not in changed_handles
         if complete:
             stream, replay_ws, replay_doc, replay_aliases, replay_norm, replay_obs, identity_map = self._run_full_replay()
-            replay_passed = replay_norm == normalized and replay_obs == observed and replay_obs["interp"] == replay_obs["jit"]
-            result["replay"] = {"structural_equivalence": replay_norm == normalized,
-                "binding_equivalence": self._dependency_edges(replay_norm) == dep_after,
-                "behavioral_equivalence": replay_obs == observed, "engine_agreement": replay_obs["interp"] == replay_obs["jit"],
+            structural = replay_norm == normalized
+            binding = self._dependency_edges(replay_norm) == self._dependency_edges(normalized)
+            behavior = replay_obs == observed
+            replay_passed = structural and binding and behavior and replay_obs["interp"] == replay_obs["jit"]
+            result["replay"] = {"structural_equivalence": structural, "binding_equivalence": binding,
+                "behavioral_equivalence": behavior, "engine_agreement": replay_obs["interp"] == replay_obs["jit"],
                 "identity_remappings": sum(row["remapped"] for row in identity_map),
                 "identity_mapping": identity_map, "passed": replay_passed}
             result["mission_complete"] = bool(complete and replay_passed)
             self.write_json(self.output / "constructive-operations.json", stream)
             self.write_json(self.output / "equivalence.json", result)
             self.write_json(self.output / "full-replay-identity-mapping.json", {
-                "schema": "basic-workspace.cycle20-replay-identities", "version": 1,
+                "schema": "basic-workspace.semantic-maintenance-replay-identities", "version": 1,
                 "identity_count": len(identity_map), "all_remapped": all(row["remapped"] for row in identity_map),
                 "mappings": identity_map})
         self.write_json(self.output / "validation.json", result)
         self._history("program_validated", actor, revision=revision, executed_revision=revision,
             passed=result["mission_complete"], engines_agree=engines_agree, diagnostics=result["diagnostics"])
         self._emit({"event_type": "validation", "revision": revision,
-            "provenance": f"Independent {actor} MIR validation", "title": f"{actor.title()} validation {'passed' if complete else 'failed'}",
-            "description": "Both MIR engines were checked against the independent cap-50 oracle and dependent caller invariants.",
+            "provenance": f"Independent {actor} MIR validation", "title": f"{actor.title()} validation {'passed' if result['mission_complete'] else 'failed'}",
+            "description": "MIR interpreter and JIT were checked against the host-owned mission oracle, unchanged-function rules, and replay.",
             "dependencies": self.dependencies(), "observations": observed,
             "outcome": {"passed": result["mission_complete"], "executed_revision": revision}})
         return result
@@ -696,9 +948,10 @@ class Cycle20Gateway:
         return {"ok": True, "deduplicated": duplicate}
 
     def record_timing(self, request, elapsed_ms):
+        method = request.get("method")
         self._log(self.timing_path, {"request_id": request.get("request_id"),
-            "tool_call_id": (request.get("params") or {}).get("toolCallId"), "method": request.get("method"),
-            "elapsed_ms": round(elapsed_ms, 3), "agent_tool": request.get("method") in {
+            "tool_call_id": (request.get("transport") or {}).get("tool_call_id"), "method": method,
+            "elapsed_ms": round(elapsed_ms, 3), "agent_tool": method in {
                 "discover_functions", "inspect_program", "preview_semantic_edit", "commit_preview", "validate_mission"}})
 
     def handle(self, method, params, request_id):
@@ -721,10 +974,11 @@ class Cycle20Gateway:
                     functions.append({"handle": handle, "name": item["name"],
                         "parameters": item["parameters"], "return_type": item["return_type"]})
             self._history("symbol_discovered", "pi_model_tool", request_id=request_id, revision=self.ws.get_revision(self.doc), functions=functions)
+            names = [item["name"] for item in functions]
             self._emit({"event_type": "selection", "revision": self.ws.get_revision(self.doc),
                 "provenance": "Genuine Pi semantic discovery", "title": "Functions discovered",
-                "description": "CLAMP_SCORE and IS_PASSING signatures and the existing call dependency were discovered from Workspace identities.",
-                "focus": {"handles": ["clamp_score.function", "is_passing.function"], "mapping": "verified_function_boundary"},
+                "description": f"Discovered callable signatures for {', '.join(names)} from Workspace identities.",
+                "focus": {"handles": [item["handle"] for item in functions], "mapping": "verified_function_boundary"},
                 "dependencies": self.dependencies()})
             return {"revision": self.ws.get_revision(self.doc), "functions": functions}
         if method == "inspect_program":
@@ -764,20 +1018,27 @@ class Cycle20Gateway:
             self.write_json(self.output / "completion-states.json", {"completion_states": states, "lifecycle": lifecycle})
             self._history("session_completed", "host_lifecycle_classifier", completion_states=states)
             return {"completion_states": states}
-        raise WorkspaceError("UNKNOWN_TOOL", f"Unsupported Cycle 20 tool {method}")
+        raise WorkspaceError("UNKNOWN_TOOL", f"Unsupported semantic maintenance tool {method}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline", type=Path, default=BASE)
+    parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
+    parser.add_argument("--baseline-stream", type=Path)
+    parser.add_argument("--baseline-history", type=Path)
+    parser.add_argument("--baseline-validation", type=Path)
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
-    service = Cycle20Gateway(args.output, args.baseline)
+    service = Cycle20Gateway(args.output, args.baseline, contract_path=args.contract,
+        baseline_stream_path=args.baseline_stream, baseline_history_path=args.baseline_history,
+        baseline_validation_path=args.baseline_validation)
     with Server(("127.0.0.1", args.port), service) as server:
         print(json.dumps({"ready": True, "host": "127.0.0.1", "port": server.server_address[1],
             "revision": service.ws.get_revision(service.doc), "baseline_verified": True,
-            "checkpoint_fingerprint": service.revision2_fingerprint}), flush=True)
+            "mission_id": service.mission_id, "contract_verified": True,
+            "checkpoint_fingerprint": getattr(service, "revision2_fingerprint", None)}), flush=True)
         server.serve_forever()
 
 

@@ -10,7 +10,9 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PI = ROOT / "pi-integration"
-SCHEMA_DIR = PI / "results/cycle20b-semantic-edit-recovery/pi-inventory-preflight"
+# The 16B transcript remains immutable. Dispatch regressions are exercised
+# against the current Pi 1.5 active schema, which now supports 1..8 edits.
+SCHEMA_DIR = PI / "results/cycle21-reusable-maintenance/schema-preflight-02"
 
 
 @unittest.skipUnless(shutil.which("bun") and (SCHEMA_DIR / "tool-schemas.json").is_file(),

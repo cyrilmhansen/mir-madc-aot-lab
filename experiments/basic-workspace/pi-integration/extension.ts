@@ -152,9 +152,9 @@ export default function (pi: ExtensionAPI) {
       return toolResult(await gateway.call("preview_create_function", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_preview_semantic_edit", label: "Preview semantic literal edit",
-    description: "Preview both authorized numeric literal edits as one candidate. First discover the functions and inspect the gateway-provided typed target paths. A target uses the discovered function_handle plus either a control_path and expression_path for an IF comparison operand, or a discovered statement_handle and empty expression_path for an assignment RHS. Include expected_value preconditions. Preview never changes committed BASIC; commit only the accepted transaction. Mission authorization is checked against the complete candidate.",
+    description: "Preview one bounded atomic group of authorized numeric literal edits. First discover functions and inspect the gateway-provided typed target paths. A target uses its discovered function_handle plus either a control_path and expression_path for an IF comparison operand, or a discovered statement_handle and explicit expression_path (use [] for the assignment RHS root). Include expected_value preconditions. Preview never changes committed BASIC; commit only an accepted transaction. The host-owned mission contract enforces edit count, scope, values and invariants.",
     parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
-      edits: Type.Array(SEMANTIC_EDIT, { minItems: 2, maxItems: 2 }) }, { additionalProperties: false }),
+      edits: Type.Array(SEMANTIC_EDIT, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_semantic_edit", params, 30000, toolCallId));
     }});

@@ -22,6 +22,20 @@ from run_cycle16 import MODEL, gateway_call, isolated_config, rpc_preflight
 
 TOOLS = ["workspace_discover_functions", "workspace_inspect_program",
     "workspace_preview_semantic_edit", "workspace_commit_preview", "workspace_validate_mission"]
+AGENT_TOOL_METHODS = {"discover_functions", "inspect_program", "preview_semantic_edit",
+    "commit_preview", "validate_mission"}
+
+
+def aggregate_gateway_timings(rows):
+    """Aggregate agent tool timing whether rows predate or follow agent_tool tagging."""
+    selected = [row for row in rows if row.get("agent_tool") is True
+        or row.get("method") in AGENT_TOOL_METHODS]
+    by_method = {}
+    for row in selected:
+        method = row.get("method", "unknown")
+        by_method[method] = round(by_method.get(method, 0.0) + float(row.get("elapsed_ms", 0) or 0), 3)
+    return {"total_ms": round(sum(by_method.values()), 3), "call_count": len(selected),
+        "by_method_ms": dict(sorted(by_method.items()))}
 
 
 def write_json(path, data):
@@ -61,6 +75,10 @@ def main():
         default=HERE / "results/cycle20-semantic-evolution/real-agent-01")
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--open-browser", action="store_true")
+    parser.add_argument("--contract", type=pathlib.Path, default=HERE / "contracts/numeric-edit/cycle20-cap50.json")
+    parser.add_argument("--baseline-stream", type=pathlib.Path)
+    parser.add_argument("--baseline-history", type=pathlib.Path)
+    parser.add_argument("--baseline-validation", type=pathlib.Path)
     parser.add_argument("--preflight-only", action="store_true",
         help="verify exact active tool inventory/schema and baseline reconstruction without inference")
     args = parser.parse_args()
@@ -68,6 +86,7 @@ def main():
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"output directory already contains evidence: {out}")
     out.mkdir(parents=True, exist_ok=True)
+    contract = json.loads(args.contract.read_text(encoding="utf-8"))
     runtime = HERE / ".runtime" / "cycle20"
     config_dir = pathlib.Path(os.environ.get("PI_CODING_AGENT_DIR", pathlib.Path.home() / ".sushi/pi")).expanduser()
     _models_file, key_env = isolated_config(runtime, config_dir)
@@ -81,8 +100,14 @@ def main():
         reserve.bind(("127.0.0.1", 0))
         gateway_port = reserve.getsockname()[1]
     gateway_err = (out / "gateway-stderr.log").open("w", encoding="utf-8")
-    gateway_proc = subprocess.Popen([sys.executable, str(HERE / "cycle20_gateway.py"),
-        "--output", str(out), "--port", str(gateway_port)], stdout=subprocess.PIPE,
+    gateway_command = [sys.executable, str(HERE / "cycle20_gateway.py"),
+        "--output", str(out), "--contract", str(args.contract.resolve()), "--port", str(gateway_port)]
+    for option, value in (("--baseline-stream", args.baseline_stream),
+            ("--baseline-history", args.baseline_history),
+            ("--baseline-validation", args.baseline_validation)):
+        if value is not None:
+            gateway_command.extend([option, str(value.resolve())])
+    gateway_proc = subprocess.Popen(gateway_command, stdout=subprocess.PIPE,
         stderr=gateway_err, text=True, env=env)
     viewer = None
     try:
@@ -93,8 +118,9 @@ def main():
         else:
             raise RuntimeError("baseline reconstruction gateway did not start")
         ready = json.loads(gateway_proc.stdout.readline())
-        if not ready.get("ready") or ready.get("revision") != 3 or not ready.get("baseline_verified"):
-            raise RuntimeError("Cycle 19B exact reconstruction/checkpoint verification failed; inference was not started")
+        if (not ready.get("ready") or ready.get("revision") != contract["base_document_revision"]
+                or not ready.get("baseline_verified") or not ready.get("contract_verified")):
+            raise RuntimeError("Mission contract or exact baseline reconstruction failed; inference was not started")
         host, port = "127.0.0.1", ready["port"]
         env["BASIC_WS_PI_GATEWAY"] = f"{host}:{port}"
 
@@ -120,16 +146,17 @@ def main():
         properties = (preview_schema or {}).get("parameters", {}).get("properties", {})
         edits_schema = properties.get("edits", {})
         target_schema = edits_schema.get("items", {})
-        if not properties or edits_schema.get("minItems") != 2 or edits_schema.get("maxItems") != 2 or not target_schema:
-            raise RuntimeError("active Pi schema does not expose the required bounded two-edit request")
+        if not properties or edits_schema.get("minItems") != 1 or edits_schema.get("maxItems") != 8 or not target_schema:
+            raise RuntimeError("active Pi schema does not expose the reusable bounded edit grammar")
         schema_text = json.dumps(schema_rows, separators=(",", ":"), ensure_ascii=False)
         if '"items":{}' in schema_text:
             raise RuntimeError("active semantic edit schema contains an unconstrained item shape")
         write_json(out / "preflight-verification.json", {
             "model": MODEL, "pi_version": "1.5.0", "active_tools": TOOLS,
             "tool_schema_bytes": (out / "tool-schemas.json").stat().st_size,
-            "bounded_atomic_edit_items": {"minimum": 2, "maximum": 2},
-            "target_schema": target_schema,
+            "bounded_atomic_edit_items": {"minimum": 1, "maximum": 8},
+            "target_schema": target_schema, "mission_id": contract["mission_id"],
+            "base_document_revision": contract["base_document_revision"],
             "baseline_reconstruction": "passed", "inference_started": False})
         if args.preflight_only:
             write_json(out / "preflight-complete.json", {"passed": True, "inference_started": False,
@@ -141,18 +168,14 @@ def main():
         if args.open_browser:
             webbrowser.open(viewer_url)
 
-        prompt = ("Mission: Modify the existing CLAMP_SCORE function so its upper bound is 50, "
-            "making its behavior min(50,max(0,X)). Preserve IS_PASSING unchanged, including its "
-            "threshold and bound call. There are two related uses of the current upper bound; "
-            "identify both through semantic discovery and include both in one preview. Do not "
-            "edit BASIC source text. Start by discovering functions and inspecting the typed "
-            "program and editable semantic locations. Use the discovered function and statement "
-            "handles, submit one complete candidate, commit only an accepted preview, then request "
-            "MIR interpreter/JIT validation at the current revision. The gateway rechecks the "
-            "complete candidate and revision immediately before commit.")
+        prompt = ("Mission: " + contract["objective"] + " Discover the program's functions and inspect "
+            "the typed semantic target paths before editing. Submit the authorized edits together in "
+            "one preview, commit only an accepted preview, then request MIR interpreter/JIT validation "
+            "at the current revision. The host-owned gateway rechecks the full candidate and revision "
+            "immediately before commit. Do not edit BASIC source text.")
         (out / "mission-prompt.txt").write_text(prompt + "\n", encoding="utf-8")
         command = base + ["--mode", "json", "--session-dir", str(out / "pi-sessions" / "mission-1"),
-            "--name", "Cycle 20 CLAMP_SCORE semantic evolution", "--print", "--", prompt]
+            "--name", contract["mission_id"], "--print", "--", prompt]
         pi_stderr = (out / "pi-stderr.log").open("w", encoding="utf-8")
 
         def publish(state, info):
@@ -183,17 +206,21 @@ def main():
             (out / "visual-replay-error.txt").write_text(replay.stderr, encoding="utf-8")
         frames = json.loads((out / "visual-frames-generic.json").read_text()) if (out / "visual-frames-generic.json").exists() else None
         timing_rows = [json.loads(line) for line in (out / "gateway-tool-timings.jsonl").read_text().splitlines() if line.strip()]
+        timing_summary = aggregate_gateway_timings(timing_rows)
         summary = {"schema": "basic-workspace.cycle20-summary", "version": 1,
-            "campaign_kind": "genuine_pi_semantic_maintenance", "model": MODEL, "pi_version": "1.5.0",
+            "campaign_kind": "genuine_pi_semantic_maintenance", "mission_id": contract["mission_id"],
+            "model": MODEL, "pi_version": "1.5.0",
             "baseline_reconstruction_passed": True, "workspace_revision": status["revision"],
             "committed": status["committed"], "host_validation": validation,
             "completion_states": completion.get("completion_states"), "session": session,
             "active_tool_count": len(TOOLS), "active_tools": TOOLS,
             "tool_schema_bytes": (out / "tool-schemas.json").stat().st_size,
-            "gateway_tool_processing_ms": round(sum(x.get("elapsed_ms", 0) for x in timing_rows if x.get("agent_tool")), 3),
+            "gateway_tool_processing_ms": timing_summary["total_ms"],
+            "gateway_tool_call_count": timing_summary["call_count"],
+            "gateway_tool_processing_by_method_ms": timing_summary["by_method_ms"],
             "constructive_stream_bytes": (out / "constructive-operations.json").stat().st_size if (out / "constructive-operations.json").exists() else 0,
             "visual_frames": len(frames["campaigns"][0]["frames"]) if frames else None,
-            "visual_html": str(out / "visual-replay.html") if replay.returncode == 0 else None,
+            "visual_html": str(out / "visual-replay-generic.html") if replay.returncode == 0 else None,
             "viewer_url": viewer_url, "automatic_retries": 0, "timeout_seconds": args.timeout}
         write_json(out / "summary.json", summary)
         print(json.dumps({"summary": str(out / "summary.json"), "revision": status["revision"],
