@@ -64,8 +64,13 @@ async function run() {
   const discovery = await call("workspace_discover_functions", `${request.correlation_id}-discover`, {});
   const inspection = await call("workspace_inspect_program", `${request.correlation_id}-inspect`, {});
   const controls: any[] = [];
+  const schemaRejections: any[] = [];
   for (const [index, args] of (request.controls || []).entries()) {
-    if (!Value.Check(previewTool.parameters, args)) throw new Error(`control ${index} fails the advertised schema`);
+    if (!Value.Check(previewTool.parameters, args)) {
+      schemaRejections.push({ index, arguments: args,
+        errors: [...Value.Errors(previewTool.parameters, args)].map(error => ({ path: error.path, message: error.message })) });
+      continue;
+    }
     controls.push(await call(previewToolName, `${request.correlation_id}-control-${index}`, args));
   }
   const preview = await call(previewToolName, request.correlation_id, request.preview_args);
@@ -83,7 +88,7 @@ async function run() {
       `${request.correlation_id}-duplicate-commit`, { transaction_id: preview.transaction_id });
   }
   await Bun.write(outPath, JSON.stringify({ ok: true, stage: "extension_to_gateway",
-    active_tools: active, schemas, schema_ok: true, discovery, inspection, controls, preview,
+    active_tools: active, schemas, schema_ok: true, discovery, inspection, controls, schema_rejections: schemaRejections, preview,
     committed, duplicate_commit: duplicateCommit, validation }, null, 2) + "\n");
   await emit("session_shutdown", {});
 }

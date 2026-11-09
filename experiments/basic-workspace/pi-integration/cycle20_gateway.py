@@ -499,6 +499,29 @@ class Cycle20Gateway:
             elif op.get("operation") == "edit_numeric_literals":
                 operations = self._workspace_operations_for_edits(op["edits"], self.aliases)
                 self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), operations)
+            elif op.get("operation") == "insert_typed_if_block":
+                function_id = self.aliases.get(op.get("function_handle"))
+                anchor_id = self.aliases.get(op.get("insertion_anchor_handle"))
+                if function_id is None or anchor_id is None:
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Structural function or anchor handle is unresolved")
+                statement = self._resolve_replay_if(op.get("statement"), self.ws, self.doc, self.aliases, function_id)
+                applied = self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), [{
+                    "operation": "insert_typed_if_block", "function_id": function_id,
+                    "before_statement_id": anchor_id, "statement": statement}])
+                created = [row for row in applied["created_statements"] if row["containing_function_id"] == function_id]
+                if len(created) != 1 or op.get("created_statement_handle") in self.aliases:
+                    raise WorkspaceError("REPLAY_STATEMENT_IDENTITY", "Structural operation must create one fresh statement handle")
+                self.aliases[op["created_statement_handle"]] = created[0]["statement_id"]
+            elif op.get("operation") == "rename_symbol":
+                if set(op) != {"operation", "target_handle", "expected_name", "new_name"}:
+                    raise WorkspaceError("REPLAY_OPERATION_INVALID", "Rename operation has an unsupported shape")
+                symbol_id = self.aliases.get(op["target_handle"])
+                symbol = self.ws.documents[self.doc].symbols.get(symbol_id) if symbol_id else None
+                if symbol is None:
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Rename target portable handle is unresolved")
+                if symbol.name != op["expected_name"]:
+                    raise WorkspaceError("REPLAY_RENAME_PRECONDITION", "Rename old source spelling does not match the replay state")
+                self.ws.rename_symbol(self.doc, symbol_id, op["new_name"], self.ws.get_revision(self.doc))
             else:
                 raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED", "Baseline stream contains an unsupported operation")
         revision = self.ws.get_revision(self.doc)
@@ -508,12 +531,50 @@ class Cycle20Gateway:
         if len(committed) != 1:
             raise WorkspaceError("BASELINE_COMMIT_EVIDENCE", "Recorded baseline must identify one authoritative commit at the expected revision")
         self.baseline = self._normalized(revision)
-        if self.baseline != committed[0].get("semantic_snapshot"):
-            raise WorkspaceError("BASELINE_SEMANTIC_MISMATCH", "Fresh replay differs from the recorded committed semantic snapshot")
+        recorded_snapshot = committed[0].get("semantic_snapshot")
+        if recorded_snapshot is not None:
+            if self.baseline != recorded_snapshot:
+                raise WorkspaceError("BASELINE_SEMANTIC_MISMATCH", "Fresh replay differs from the recorded committed semantic snapshot")
+        else:
+            # Cycle 26's authentic rename journal records the typed operation,
+            # preserved symbol identity and changed token IDs, while its
+            # separately saved host validation attests semantic/binding and
+            # behavior equivalence. Accept that evidence only for a final
+            # rename operation with an exact matching commit record.
+            final = stream["operations"][-1] if stream["operations"] else {}
+            commit_matches = (final.get("operation") == "rename_symbol"
+                and committed[0].get("operation") == "rename_symbol"
+                and committed[0].get("target_handle") == final.get("target_handle")
+                and committed[0].get("old_name") == final.get("expected_name")
+                and committed[0].get("new_name") == final.get("new_name")
+                and committed[0].get("preserved_alias_count") == len(self.aliases))
+            validation_attests = all(recorded_validation.get(key) is True for key in
+                ("function_identity_preserved", "parameter_statement_token_identities_preserved",
+                 "all_bound_target_tokens_renamed", "no_dependency_identity_changed"))
+            if not (commit_matches and validation_attests):
+                raise WorkspaceError("BASELINE_SEMANTIC_ATTESTATION_MISSING",
+                    "A rename-only snapshot omission requires matching commit provenance and host identity validation")
         self.base_revision = revision
         self.baseline_observed = self._run_observations(self.ws, self.doc, revision, self.aliases)
         if self.baseline_observed["interp"] != self.baseline_observed["jit"]:
             raise WorkspaceError("BASELINE_ENGINE_MISMATCH", "Baseline interpreter and JIT observations differ")
+        prior_observed = recorded_validation.get("observed_results")
+        behavior_comparison = {"source": "recorded host validation", "compared_inputs": {}, "complete": False}
+        if isinstance(prior_observed, dict):
+            for engine in ("interp", "jit"):
+                common_values = sorted(set(self.baseline_observed[engine]) & set(prior_observed.get(engine, {})),
+                    key=lambda value: float(value))
+                if not common_values:
+                    raise WorkspaceError("BASELINE_BEHAVIOR_EVIDENCE_MISSING", "Host validation has no comparable behavior inputs")
+                behavior_comparison["compared_inputs"][engine] = common_values
+                for value in common_values:
+                    result_row = self.baseline_observed[engine][value]
+                    prior_row = prior_observed[engine][value]
+                    if any(prior_row.get(key) != result for key, result in result_row.items()):
+                        raise WorkspaceError("BASELINE_BEHAVIOR_MISMATCH", "Fresh MIR observations differ from saved host validation")
+            behavior_comparison["complete"] = all(
+                set(values) == set(prior_observed[engine]) == set(self.baseline_observed[engine])
+                for engine, values in behavior_comparison["compared_inputs"].items())
         self.initial_code = self.ws.render_document(self.doc)
         self.edit_targets = self._discover_authorized_targets()
         self.initial_identity_map = [{"portable_handle": handle, "reconstructed_workspace_id": value, "remapped": True}
@@ -523,6 +584,7 @@ class Cycle20Gateway:
             "source_stream": str(self.baseline_stream_path), "starting_document_empty": True,
             "resulting_revision": revision, "normalized_semantics_match": True,
             "recorded_checkpoint_validation_passed": True, "interpreter_jit_agree": True,
+            "recorded_behavior_comparison": behavior_comparison,
             "portable_identity_count": len(self.aliases), "identity_mapping": self.initial_identity_map,
             "dependencies": self.dependencies(), "passed": True})
         self.write_json(self.output / "constructive-base.json", stream)
@@ -548,6 +610,48 @@ class Cycle20Gateway:
             "description": "The supplied portable operation stream was replayed in an empty Workspace and matched its committed semantic snapshot.",
             "snapshot": self.initial_code, "dependencies": self.dependencies(),
             "focus": {"handles": sorted(self.aliases), "mapping": "verified_function_boundary"}})
+
+    @staticmethod
+    def _resolve_replay_if(statement, ws, doc, aliases, function_id):
+        """Resolve Cycle 25's portable typed IF operation on a fresh Workspace."""
+        if not isinstance(statement, dict) or set(statement) - {"kind", "condition", "then", "else"} or statement.get("kind") != "if":
+            raise WorkspaceError("REPLAY_TYPED_SHAPE", "Structural replay statement must be one typed IF")
+        fn = next((row for row in ws.documents[doc].functions if row["symbol_id"] == function_id), None)
+        if fn is None:
+            raise WorkspaceError("REPLAY_FUNCTION_MISSING", "Structural function identity is missing")
+        parameters = fn["parameters"]
+        def expression(value):
+            if not isinstance(value, dict):
+                raise WorkspaceError("REPLAY_TYPED_SHAPE", "Expression must be an object")
+            kind = value.get("kind")
+            if kind == "number" and set(value) == {"kind", "value"}:
+                return {"kind": "number", "value": value["value"]}
+            if kind == "local_ref" and set(value) == {"kind", "name"}:
+                sid = next((sid for sid in parameters if ws.documents[doc].symbols[sid].name.casefold() == value["name"].casefold()), None)
+                if sid is None:
+                    raise WorkspaceError("REPLAY_PARAMETER_MISSING", "Typed replay parameter is unresolved")
+                return {"kind": "symbol_ref", "symbol_id": sid}
+            if kind == "call" and set(value) == {"kind", "function_handle", "arguments"}:
+                callee = aliases.get(value["function_handle"])
+                if callee is None or not isinstance(value["arguments"], list):
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Typed replay call handle is unresolved")
+                return {"kind": "call", "function_id": callee, "arguments": [expression(arg) for arg in value["arguments"]]}
+            if kind == "binary" and set(value) == {"kind", "operator", "left", "right"}:
+                return {"kind": "binary", "operator": value["operator"],
+                    "left": expression(value["left"]), "right": expression(value["right"])}
+            raise WorkspaceError("REPLAY_TYPED_SHAPE", f"Unsupported typed replay expression {kind!r}")
+        def branch(name):
+            items = statement.get(name, [])
+            if not isinstance(items, list):
+                raise WorkspaceError("REPLAY_TYPED_SHAPE", "IF branches must be arrays")
+            out = []
+            for item in items:
+                if not isinstance(item, dict) or set(item) != {"kind", "target", "expression"} or item.get("kind") != "assign" or item.get("target") != {"kind": "result"}:
+                    raise WorkspaceError("REPLAY_TYPED_SHAPE", "IF branch contains a non-result assignment")
+                out.append({"kind": "assign", "target": {"kind": "result"}, "expression": expression(item["expression"])})
+            return out
+        return {"kind": "if", "condition": expression(statement["condition"]),
+            "then": branch("then"), "else": branch("else")}
 
     def _validate_contract_against_baseline(self):
         if self.contract["execution_profile_id"] != PROFILE_ID:

@@ -91,8 +91,8 @@ class Cycle19Gateway:
         self.trace=age.Trace(); self.lock=threading.RLock(); self.phase=3
         self.revision=self.ws.get_revision(self.doc); self.dispatched={}; self.pi_seen=set(); self.presentation_seq=0
         self.committed_operations=copy.deepcopy(seed.constructive_ops); self.completed_missions=[]
-        self.last_validation=None; self.session_id="cycle24-score-class-agent-01"
-        self.resume_verification={"passed":True,"revision":self.revision,"source":"verified_cycle21_constructive_stream"}
+        self.last_validation=None; self.session_id=f"{mission['mission_id']}-agent-01"
+        self.resume_verification={"passed":True,"revision":self.revision,"source":"verified_portable_constructive_stream"}
         fn=mission["function"]
         if set(fn)!={"name","handle","parameter","return_type"} or fn["return_type"]!="numeric":
             raise WorkspaceError("MISSION_CONTRACT_FUNCTION","Creation mission must describe one numeric function and parameter")
@@ -112,26 +112,28 @@ class Cycle19Gateway:
         self.write_json("execution-profile.json",profile); self.write_json("MISSION-3.json",mission)
         baseline_report=json.loads((seed.output/"baseline-reconstruction.json").read_text())
         baseline_observed=self._run_functions(self.revision)
-        baseline_expected={engine:{str(x):{"clamp_score":float(min(50,max(0,x))),
-            "is_passing":float(min(50,max(0,x))>=40)} for x in mission["validation"]["inputs"]}
-            for engine in ("interp","jit")}
+        baseline_expected_one=mission["validation"].get("baseline_expected_results")
+        if baseline_expected_one is None:
+            baseline_expected_one={str(x):{"clamp_score":float(min(50,max(0,x))),
+                "is_passing":float(min(50,max(0,x))>=40)} for x in mission["validation"]["inputs"]}
+        baseline_expected={engine:baseline_expected_one for engine in ("interp","jit")}
         baseline_ok=(baseline_observed==baseline_expected and baseline_observed["interp"]==baseline_observed["jit"])
         if not baseline_ok:
             raise WorkspaceError("BASELINE_BEHAVIOR_MISMATCH","Reconstructed Cycle 21 baseline does not match cap-50/threshold-40 MIR oracle")
         baseline_report.update({"behavior_oracle_passed":True,"baseline_observed_results":baseline_observed,
-            "baseline_expected_results":baseline_expected,"baseline_expectation_source":"Cycle 24 independent host oracle"})
-        self.write_json("cycle21-baseline-verification.json",baseline_report)
+            "baseline_expected_results":baseline_expected,"baseline_expectation_source":"independent host-owned mission oracle"})
+        self.write_json("baseline-behavior-verification.json",baseline_report)
         self.write_json("visual-source.json",{"schema":"basic-workspace.visual-source","version":1,
-            "campaign":{"id":"cycle24-dependency-propagation","title":"Cycle 24 · multi-dependency function creation","filename":"SCORES.bas"},
+            "campaign":{"id":mission["mission_id"],"title":f"Semantic function creation · {fn['name']}","filename":"SCORES.bas"},
             "initial":self.initial,"snapshots":{str(self.revision):self.code()}})
-        self.append_log(self.output/"setup.jsonl",{"kind":"cycle21_stream_reconstructed","revision":self.revision,
+        self.append_log(self.output/"setup.jsonl",{"kind":"verified_constructive_stream_reconstructed","revision":self.revision,
             "source_stream":str(stream_path),"function_names":[f["name"] for f in self.base_snapshot["functions"]],
             "host_replay":True,"recorded_validation_verified":True,"portable_handles":len(self.aliases)})
-        self.emit_visual({"event_id":"cycle24-verified-revision-5","event_type":"initial","revision":self.revision,
+        self.emit_visual({"event_id":f"verified-baseline-{mission['mission_id']}","event_type":"initial","revision":self.revision,
             "session_id":self.session_id,"mission_id":self.mission_title,
-            "provenance":"Host deterministic replay of Cycle 21 committed stream",
-            "title":"Verified Cycle 21 baseline · revision 5",
-            "description":"The exact committed constructor and literal-edit stream was rebuilt in an empty Workspace and matched its revision-5 semantic snapshot and MIR observations.",
+            "provenance":"Host deterministic replay of the supplied authentic committed stream",
+            "title":f"Verified semantic baseline · revision {self.revision}",
+            "description":"The committed portable operation stream was reconstructed in an empty Workspace and checked against its saved semantic, binding, and MIR evidence.",
             "snapshot":self.code(),"dependencies":self._dependencies(self.base_snapshot),
             "focus":{"handles":["clamp_score.function","is_passing.function"],"mapping":"verified_function_boundary"}})
 
@@ -451,17 +453,16 @@ class Cycle19Gateway:
 
     def _run_functions(self,revision):
         executor=MirExecutionService(timeout=15); result={"interp":{},"jit":{}}
-        funcs={fn["name"].casefold():fn["symbol_id"] for fn in self.ws.documents[self.doc].functions}
+        functions={fn["symbol_id"] for fn in self.ws.documents[self.doc].functions}
         inputs=(self.current_contract.get("validation",{}).get("inputs",INPUTS)
             if self.phase==3 else INPUTS)
         for engine in ("interp","jit"):
             for value in inputs:
-                clamp=executor.execute_function(self.ws,self.doc,revision,funcs["clamp_score"],[value],engine)["result"]
-                row={"clamp_score":clamp}
-                if "is_passing" in funcs:
-                    row["is_passing"]=executor.execute_function(self.ws,self.doc,revision,funcs["is_passing"],[value],engine)["result"]
-                if "score_class" in funcs:
-                    row["score_class"]=executor.execute_function(self.ws,self.doc,revision,funcs["score_class"],[value],engine)["result"]
+                row={}
+                for handle,symbol_id in self.aliases.items():
+                    if not handle.endswith(".function") or symbol_id not in functions:continue
+                    key=self.ws.documents[self.doc].symbols[symbol_id].name.casefold()
+                    row[key]=executor.execute_function(self.ws,self.doc,revision,symbol_id,[value],engine)["result"]
                 result[engine][str(value)]=row
         return result
     @staticmethod
@@ -471,6 +472,7 @@ class Cycle19Gateway:
         stream={"schema":"basic-workspace.constructive-metafile","version":1,"execution_profile_id":PROFILE_ID,
             "portable_handles":sorted(self.aliases.keys()),"operations":self.committed_operations}
         ws=Workspace(); doc=ws.create_empty_document("memory://cycle19/replay.bas")["document_id"]; aliases={}; executor=MirExecutionService(timeout=15)
+        from cycle20_gateway import Cycle20Gateway
         for item in stream["operations"]:
             if item.get("operation")=="edit_numeric_literals":
                 operations=[]
@@ -489,6 +491,28 @@ class Cycle19Gateway:
                     operations.append(op)
                 ws.apply_transaction(doc,ws.get_revision(doc),operations)
                 continue
+            if item.get("operation")=="insert_typed_if_block":
+                function_id=aliases.get(item.get("function_handle")); anchor_id=aliases.get(item.get("insertion_anchor_handle"))
+                if function_id is None or anchor_id is None:
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING","Structural function or anchor handle is unresolved")
+                statement=Cycle20Gateway._resolve_replay_if(item.get("statement"),ws,doc,aliases,function_id)
+                applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"insert_typed_if_block",
+                    "function_id":function_id,"before_statement_id":anchor_id,"statement":statement}])
+                created=[row for row in applied["created_statements"] if row["containing_function_id"]==function_id]
+                new_handle=item.get("created_statement_handle")
+                if len(created)!=1 or not isinstance(new_handle,str) or new_handle in aliases:
+                    raise WorkspaceError("REPLAY_STATEMENT_IDENTITY","Structural operation must create one fresh statement handle")
+                aliases[new_handle]=created[0]["statement_id"]
+                continue
+            if item.get("operation")=="rename_symbol":
+                if set(item)!={"operation","target_handle","expected_name","new_name"}:
+                    raise WorkspaceError("REPLAY_OPERATION_INVALID","Rename operation has an unsupported shape")
+                symbol_id=aliases.get(item["target_handle"]); symbol=ws.documents[doc].symbols.get(symbol_id) if symbol_id else None
+                if symbol is None:raise WorkspaceError("REPLAY_HANDLE_MISSING","Rename target portable handle is unresolved")
+                if symbol.name!=item["expected_name"]:
+                    raise WorkspaceError("REPLAY_RENAME_PRECONDITION","Rename old source spelling does not match replay state")
+                ws.rename_symbol(doc,symbol_id,item["new_name"],ws.get_revision(doc))
+                continue
             call_handles={row.get("function_handle") for row in self._calls(item["arguments"]) if row.get("function_handle")}
             if any(h not in aliases for h in call_handles):raise WorkspaceError("REPLAY_HANDLE_MISSING","Call handle missing in construction order")
             op=senior.resolve_function_handles(item["arguments"],aliases,call_handles)
@@ -497,16 +521,16 @@ class Cycle19Gateway:
             aliases=senior.aliases_for_new_function(raw,aliases,op["name"],item["portable_handle"])
         revision=ws.get_revision(doc)
         norm=senior.normalized_state(projection_semantics(build_projection(ws,doc,revision)),aliases)
-        names={fn["name"].casefold():fn["symbol_id"] for fn in ws.documents[doc].functions}
         obs={engine:{} for engine in ("interp","jit")}
         inputs=(self.current_contract.get("validation",{}).get("inputs",INPUTS)
             if self.phase==3 else INPUTS)
         for engine in obs:
             for x in inputs:
-                clamp=executor.execute_function(ws,doc,revision,names["clamp_score"],[x],engine)["result"]
-                row={"clamp_score":clamp}
-                if "is_passing" in names:row["is_passing"]=executor.execute_function(ws,doc,revision,names["is_passing"],[x],engine)["result"]
-                if "score_class" in names:row["score_class"]=executor.execute_function(ws,doc,revision,names["score_class"],[x],engine)["result"]
+                row={}
+                for function in norm["functions"]:
+                    handle=function["handle"]; symbol_id=aliases.get(handle)
+                    if symbol_id is None:raise WorkspaceError("REPLAY_HANDLE_MISSING",f"Function handle {handle} did not resolve")
+                    row[function["name"].casefold()]=executor.execute_function(ws,doc,revision,symbol_id,[x],engine)["result"]
                 obs[engine][str(x)]=row
         remapped=sum(self.aliases.get(h)!=aliases.get(h) for h in self.aliases)
         identity_mapping=[{"portable_handle":handle,"committed_workspace_id":self.aliases[handle],
