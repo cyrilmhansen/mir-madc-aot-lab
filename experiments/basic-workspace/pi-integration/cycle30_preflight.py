@@ -5,6 +5,9 @@ import json, os, pathlib, socket, subprocess, sys, time, tempfile
 import argparse
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parent
+sys.path.insert(0,str(ROOT))
+from basic_workspace.model import Workspace
+from basic_workspace.portable_replay import replay_constructive_stream
 OUT=HERE/"results/cycle30-post-extraction-maintenance"
 CONTRACT=OUT/"mission-contract.json"
 STREAM=HERE/"results/cycle29-function-extraction/real-agent-01/constructive-operations.json"
@@ -123,7 +126,11 @@ def main():
                 else: raise RuntimeError("retired statement unexpectedly resolved as a live edit target")
                 retired_block=json.loads(STREAM.read_text())["operations"][-1]
                 retired_block["anchor_statement_handle"]=retired_handle
-                try: direct._replay_typed_if_replacement(retired_block)
+                retired_ops=json.loads(STREAM.read_text())["operations"]
+                retired_ops.append(retired_block)
+                try:
+                    test_ws=Workspace();test_doc=test_ws.create_empty_document("memory://cycle30/retired-anchor-preflight.bas")["document_id"]
+                    replay_constructive_stream(test_ws,test_doc,retired_ops)
                 except Exception as exc: anchor_error=getattr(exc,"code",type(exc).__name__)
                 else: raise RuntimeError("retired statement unexpectedly resolved as a live anchor")
             if direct.ws.get_revision(direct.doc)!=before_revision:

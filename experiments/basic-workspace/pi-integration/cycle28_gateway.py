@@ -7,6 +7,7 @@ HERE=Path(__file__).resolve().parent; ROOT=HERE.parent
 sys.path.insert(0,str(HERE)); sys.path.insert(0,str(ROOT))
 from cycle20_gateway import Cycle20Gateway, senior, PROFILE_ID, BASE as C20_BASE
 from basic_workspace.model import Workspace, WorkspaceError
+from basic_workspace.portable_replay import replay_constructive_stream
 from basic_workspace.projection import build_projection, projection_semantics
 from basic_workspace.typed_expr import Expr
 from basic_workspace.mir_execution import MirExecutionService
@@ -262,16 +263,10 @@ class Cycle28Gateway(Cycle20Gateway):
         result={"schema":"basic-workspace.cycle28-validation","version":1,"actor":actor,"revision":rev,"executed_revision":rev,"observed_results":observed,"expected_results":expected,"expectation_source":"host-owned independent oracle","values_match":equal,"engines_agree":agree,"dependency_graph_correct":dep,"existing_assignments_preserved":assignments_preserved,"other_functions_unchanged":unchanged,"mission_complete":complete}
         if complete:
             stream={"schema":"basic-workspace.constructive-metafile","version":1,"execution_profile_id":PROFILE_ID,"portable_handles":sorted(self.aliases),"operations":self.constructive_ops}
-            rw=Workspace(); rd=rw.create_empty_document("memory://cycle28/replay.bas")["document_id"]; ra={}
-            for op in stream["operations"]:
-                if op["operation"]=="edit_typed_if_condition":
-                    fid=ra.get(op["function_handle"]); aid=ra.get(op["anchor_statement_handle"])
-                    if not fid or not aid: raise WorkspaceError("REPLAY_HANDLE_MISSING","Conditional edit handle unresolved")
-                    cond=self._resolve_replay_expr(op["condition"],rw,rd,ra,fid)
-                    old=self._resolve_replay_expr(op["expected_condition"],rw,rd,ra,fid)
-                    rw.apply_transaction(rd,rw.get_revision(rd),[{"operation":"edit_typed_if_condition","function_id":fid,"control_path":op["control_path"],"anchor_statement_id":aid,"expected_condition":old,"condition":cond}])
-                else:
-                    ra=self._replay_op(rw,rd,ra,op)
+            rw=Workspace(); rd=rw.create_empty_document("memory://cycle28/replay.bas")["document_id"]
+            replay=replay_constructive_stream(rw,rd,stream["operations"],expected_start_revision=1,
+                expected_final_handles=stream["portable_handles"])
+            ra=replay.live_handles
             rrev=rw.get_revision(rd); rstate=senior.normalized_state(projection_semantics(build_projection(rw,rd,rrev)),ra)
             robs=self._all_observations(rw,rd,rrev,ra)
             replay_ok=rstate==state and robs==observed and robs["interp"]==robs["jit"] and len(ra)==23
@@ -282,43 +277,6 @@ class Cycle28Gateway(Cycle20Gateway):
         self._history("program_validated",actor,revision=rev,executed_revision=rev,passed=result["mission_complete"],engines_agree=agree)
         self._emit({"event_type":"validation","revision":rev,"provenance":f"Independent {actor} MIR validation","title":f"Validation {'passed' if result['mission_complete'] else 'failed'}","description":"All four functions were checked through interpreter and JIT against the 16-input oracle and fresh replay.","observations":observed,"dependencies":self.dependencies_after(),"outcome":{"passed":result["mission_complete"],"executed_revision":rev}})
         return result
-
-    @staticmethod
-    def _resolve_replay_expr(value,ws,doc,aliases,fid):
-        if value["kind"]=="number": return {"kind":"number","value":value["value"]}
-        if value["kind"]=="local_ref":
-            fn=next(x for x in ws.documents[doc].functions if x["symbol_id"]==fid); sid=next(p for p in fn["parameters"] if ws.documents[doc].symbols[p].name.casefold()==value["name"].casefold()); return {"kind":"symbol_ref","symbol_id":sid}
-        if value["kind"]=="call":
-            callee=aliases.get(value["function_handle"])
-            if not callee: raise WorkspaceError("REPLAY_HANDLE_MISSING","Call handle unresolved")
-            return {"kind":"call","function_id":callee,"arguments":[Cycle28Gateway._resolve_replay_expr(x,ws,doc,aliases,fid) for x in value["arguments"]]}
-        return {"kind":"binary","operator":value["operator"],"left":Cycle28Gateway._resolve_replay_expr(value["left"],ws,doc,aliases,fid),"right":Cycle28Gateway._resolve_replay_expr(value["right"],ws,doc,aliases,fid)}
-
-    def _replay_op(self,ws,doc,aliases,op):
-        if op["operation"]=="create_numeric_function":
-            handles=set(senior._calls(op.get("arguments",{}))) if hasattr(senior,"_calls") else set()
-            from cycle20_gateway import _calls
-            handles=set(_calls(op["arguments"]))
-            args=senior.resolve_function_handles(op["arguments"],aliases,handles)
-            applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"create_numeric_function",**args}])
-            raw=projection_semantics(build_projection(ws,doc,applied["revision"]))
-            aliases=senior.aliases_for_new_function(raw,aliases,args["name"],op["portable_handle"])
-            return aliases
-        if op["operation"]=="edit_numeric_literals":
-            from cycle20_gateway import Cycle20Gateway
-            request={"expected_revision":ws.get_revision(doc),"function_handle":op["function_handle"],"edits":op["edits"]}
-            operations=self._workspace_operations_for_edits(request["edits"],aliases)
-            ws.apply_transaction(doc,ws.get_revision(doc),operations);return aliases
-        if op["operation"]=="insert_typed_if_block":
-            from cycle20_gateway import Cycle20Gateway
-            fn=aliases[op["function_handle"]]; anchor=aliases[op["insertion_anchor_handle"]]
-            statement=self._resolve_replay_if(op["statement"],ws,doc,aliases,fn)
-            applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"insert_typed_if_block","function_id":fn,"before_statement_id":anchor,"statement":statement}])
-            created=[r for r in applied["created_statements"] if r["containing_function_id"]==fn]
-            aliases[op["created_statement_handle"]]=created[0]["statement_id"]; return aliases
-        if op["operation"]=="rename_symbol":
-            sid=aliases[op["target_handle"]]; ws.rename_symbol(doc,sid,op["new_name"],ws.get_revision(doc)); return aliases
-        raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED",op["operation"])
 
     def handle(self,method,params,rid):
         if method=="record_pi_event": return super().record_pi_event(params)

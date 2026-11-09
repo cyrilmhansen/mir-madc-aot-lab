@@ -16,6 +16,9 @@ CONTRACT = RESULT / "mission-contract.json"
 RETIRED = {"score_class.statement.0", "score_class.statement.1"}
 
 sys.path.insert(0, str(PI))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from basic_workspace.model import Workspace
+from basic_workspace.portable_replay import replay_constructive_stream
 spec = importlib.util.spec_from_file_location("cycle20_gateway_cycle30_tests", PI / "cycle20_gateway.py")
 gateway_module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = gateway_module
@@ -47,7 +50,10 @@ class Cycle30PostExtractionTests(unittest.TestCase):
                 replacement = json.loads(STREAM.read_text())["operations"][-1]
                 replacement["anchor_statement_handle"] = handle
                 with self.assertRaises(Exception):
-                    g._replay_typed_if_replacement(replacement)
+                    operations = json.loads(STREAM.read_text())["operations"]
+                    operations.append(replacement)
+                    test_ws = Workspace(); test_doc = test_ws.create_empty_document("memory://cycle30/retired-anchor.bas")["document_id"]
+                    replay_constructive_stream(test_ws, test_doc, operations)
             self.assertEqual(g.ws.get_revision(g.doc), 13)
 
     def test_numeric_edit_preview_commit_oracle_and_full_portable_replay(self):

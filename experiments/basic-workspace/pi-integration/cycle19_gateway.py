@@ -12,6 +12,7 @@ sys.path.insert(0,str(HERE))
 from basic_workspace.model import Workspace, WorkspaceError
 from basic_workspace.projection import build_projection, projection_semantics
 from basic_workspace.mir_execution import MirExecutionService
+from basic_workspace.portable_replay import replay_constructive_stream
 from pi_lifecycle import completion_states
 from gateway import Cycle16Gateway, Server
 from transaction_kernel import SemanticTransactionKernel
@@ -471,64 +472,18 @@ class Cycle19Gateway:
     def _replay(self):
         stream={"schema":"basic-workspace.constructive-metafile","version":1,"execution_profile_id":PROFILE_ID,
             "portable_handles":sorted(self.aliases.keys()),"operations":self.committed_operations}
-        ws=Workspace(); doc=ws.create_empty_document("memory://cycle19/replay.bas")["document_id"]; aliases={}; executor=MirExecutionService(timeout=15)
-        from cycle20_gateway import Cycle20Gateway
-        for item in stream["operations"]:
-            if item.get("operation")=="edit_numeric_literals":
-                operations=[]
-                for edit in item.get("edits",[]):
-                    target=edit["target"]; function_id=aliases.get(target.get("function_handle"))
-                    if function_id is None:raise WorkspaceError("REPLAY_HANDLE_MISSING","Edit function handle is unresolved")
-                    op={"operation":"edit_numeric_literal_at_path","function_id":function_id,
-                        "expression_path":target["expression_path"],"expected_value":edit["expected_value"],
-                        "replacement_value":edit["replacement_value"]}
-                    if "control_path" in target:op.update(target_kind="if_condition_rhs",control_path=target["control_path"])
-                    elif "statement_handle" in target:
-                        statement_id=aliases.get(target["statement_handle"])
-                        if statement_id is None:raise WorkspaceError("REPLAY_HANDLE_MISSING","Edit statement handle is unresolved")
-                        op.update(target_kind="assignment_rhs",statement_id=statement_id)
-                    else:raise WorkspaceError("REPLAY_TARGET_INVALID","Edit target lacks a portable semantic path")
-                    operations.append(op)
-                ws.apply_transaction(doc,ws.get_revision(doc),operations)
-                continue
-            if item.get("operation")=="insert_typed_if_block":
-                function_id=aliases.get(item.get("function_handle")); anchor_id=aliases.get(item.get("insertion_anchor_handle"))
-                if function_id is None or anchor_id is None:
-                    raise WorkspaceError("REPLAY_HANDLE_MISSING","Structural function or anchor handle is unresolved")
-                statement=Cycle20Gateway._resolve_replay_if(item.get("statement"),ws,doc,aliases,function_id)
-                applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"insert_typed_if_block",
-                    "function_id":function_id,"before_statement_id":anchor_id,"statement":statement}])
-                created=[row for row in applied["created_statements"] if row["containing_function_id"]==function_id]
-                new_handle=item.get("created_statement_handle")
-                if len(created)!=1 or not isinstance(new_handle,str) or new_handle in aliases:
-                    raise WorkspaceError("REPLAY_STATEMENT_IDENTITY","Structural operation must create one fresh statement handle")
-                aliases[new_handle]=created[0]["statement_id"]
-                continue
-            if item.get("operation")=="rename_symbol":
-                if set(item)!={"operation","target_handle","expected_name","new_name"}:
-                    raise WorkspaceError("REPLAY_OPERATION_INVALID","Rename operation has an unsupported shape")
-                symbol_id=aliases.get(item["target_handle"]); symbol=ws.documents[doc].symbols.get(symbol_id) if symbol_id else None
-                if symbol is None:raise WorkspaceError("REPLAY_HANDLE_MISSING","Rename target portable handle is unresolved")
-                if symbol.name!=item["expected_name"]:
-                    raise WorkspaceError("REPLAY_RENAME_PRECONDITION","Rename old source spelling does not match replay state")
-                ws.rename_symbol(doc,symbol_id,item["new_name"],ws.get_revision(doc))
-                continue
-            call_handles={row.get("function_handle") for row in self._calls(item["arguments"]) if row.get("function_handle")}
-            if any(h not in aliases for h in call_handles):raise WorkspaceError("REPLAY_HANDLE_MISSING","Call handle missing in construction order")
-            op=senior.resolve_function_handles(item["arguments"],aliases,call_handles)
-            applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"create_numeric_function",**op}])
-            raw=projection_semantics(build_projection(ws,doc,applied["revision"]))
-            aliases=senior.aliases_for_new_function(raw,aliases,op["name"],item["portable_handle"])
-        revision=ws.get_revision(doc)
+        ws=Workspace();doc=ws.create_empty_document("memory://cycle19/replay.bas")["document_id"]
+        replay=replay_constructive_stream(ws,doc,stream["operations"],expected_final_handles=stream["portable_handles"],
+            expected_start_revision=1)
+        aliases=replay.live_handles;revision=replay.revision
         norm=senior.normalized_state(projection_semantics(build_projection(ws,doc,revision)),aliases)
-        obs={engine:{} for engine in ("interp","jit")}
-        inputs=(self.current_contract.get("validation",{}).get("inputs",INPUTS)
-            if self.phase==3 else INPUTS)
+        executor=MirExecutionService(timeout=15);obs={engine:{} for engine in ("interp","jit")}
+        inputs=(self.current_contract.get("validation",{}).get("inputs",INPUTS) if self.phase==3 else INPUTS)
         for engine in obs:
             for x in inputs:
                 row={}
                 for function in norm["functions"]:
-                    handle=function["handle"]; symbol_id=aliases.get(handle)
+                    handle=function["handle"];symbol_id=aliases.get(handle)
                     if symbol_id is None:raise WorkspaceError("REPLAY_HANDLE_MISSING",f"Function handle {handle} did not resolve")
                     row[function["name"].casefold()]=executor.execute_function(ws,doc,revision,symbol_id,[x],engine)["result"]
                 obs[engine][str(x)]=row

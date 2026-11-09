@@ -8,6 +8,7 @@ HERE=Path(__file__).resolve().parent; ROOT=HERE.parent
 sys.path[:0]=[str(ROOT),str(HERE)]
 from basic_workspace.model import Workspace, WorkspaceError
 from basic_workspace.projection import build_projection, projection_semantics
+from basic_workspace.portable_replay import replay_constructive_stream
 from basic_workspace.mir_execution import MirExecutionService
 from transaction_kernel import SemanticTransactionKernel
 from gateway import Server
@@ -412,54 +413,17 @@ class Cycle25Gateway(Cycle20Gateway):
             "dependencies":self.dependencies()})
         return result
     def replay(self,operations):
-        ws=Workspace();doc=ws.create_empty_document("memory://cycle25/replay.bas")["document_id"];aliases={}
-        for item in operations:
-            if item.get("operation")=="create_numeric_function":
-                handles=call_handles(item["arguments"])
-                if not handles.issubset(aliases):raise WorkspaceError("REPLAY_HANDLE_MISSING","Constructor dependency handle unresolved")
-                args=senior.resolve_function_handles(item["arguments"],aliases,handles)
-                applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"create_numeric_function",**args}])
-                raw=projection_semantics(build_projection(ws,doc,applied["revision"]))
-                aliases=senior.aliases_for_new_function(raw,aliases,args["name"],item["portable_handle"])
-            elif item.get("operation")=="edit_numeric_literals":
-                holder=object.__new__(Cycle20Gateway);holder.aliases=aliases
-                ops=Cycle20Gateway._workspace_operations_for_edits(holder,item["edits"],aliases)
-                ws.apply_transaction(doc,ws.get_revision(doc),ops)
-            elif item.get("operation")=="insert_typed_if_block":
-                fn=aliases.get(item.get("function_handle"));anchor=aliases.get(item.get("insertion_anchor_handle"))
-                if fn is None or anchor is None:raise WorkspaceError("REPLAY_HANDLE_MISSING","Structural function or anchor handle is unresolved")
-                statement=self._resolve_replay_statement(item["statement"],ws,doc,aliases,fn)
-                applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"insert_typed_if_block","function_id":fn,
-                    "before_statement_id":anchor,"statement":statement}])
-                created=[r for r in applied["created_statements"] if r["containing_function_id"]==fn]
-                if len(created)!=1:raise WorkspaceError("REPLAY_STATEMENT_IDENTITY","Expected one new assignment identity")
-                aliases[item["created_statement_handle"]]=created[0]["statement_id"]
-            else:raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED",str(item.get("operation")))
-        revision=ws.get_revision(doc);norm=senior.normalized_state(projection_semantics(build_projection(ws,doc,revision)),aliases)
-        observed=self._observe(ws,doc,revision,aliases); remapped=sum(self.aliases.get(h)!=aliases.get(h) for h in aliases if h in self.aliases)
+        """Replay the portable prefix through the shared operation interpreter."""
+        ws=Workspace();doc=ws.create_empty_document("memory://cycle25/replay.bas")["document_id"]
+        replay=replay_constructive_stream(ws,doc,operations,expected_start_revision=1)
+        aliases=replay.live_handles;revision=replay.revision
+        norm=senior.normalized_state(projection_semantics(build_projection(ws,doc,revision)),aliases)
+        observed=self._observe(ws,doc,revision,aliases)
+        remapped=sum(self.aliases.get(handle)!=aliases.get(handle) for handle in aliases if handle in self.aliases)
         return {"workspace":ws,"document_id":doc,"revision":revision,"aliases":aliases,"normalized":norm,
             "observed":observed,"identity_count":len(aliases),"remapped_count":remapped,
-            "existing_handles_preserved":all(h in aliases for h in self.base_aliases)}
-    @staticmethod
-    def _resolve_replay_statement(statement,ws,doc,aliases,fn_id):
-        fn=next(row for row in ws.documents[doc].functions if row["symbol_id"]==fn_id)
-        params=fn["parameters"]
-        def expr(v):
-            if not isinstance(v,dict):raise WorkspaceError("REPLAY_TYPED_SHAPE","Expression is not an object")
-            if v.get("kind")=="number":return {"kind":"number","value":v["value"]}
-            if v.get("kind")=="local_ref":
-                sid=next((sid for sid in params if ws.documents[doc].symbols[sid].name.casefold()==v.get("name","x").casefold()),None)
-                if sid is None:raise WorkspaceError("REPLAY_PARAMETER_MISSING","Parameter reference unresolved")
-                return {"kind":"symbol_ref","symbol_id":sid}
-            if v.get("kind")=="call":
-                callee=aliases.get(v.get("function_handle"))
-                if callee is None:raise WorkspaceError("REPLAY_HANDLE_MISSING","Call target portable handle unresolved")
-                return {"kind":"call","function_id":callee,"arguments":[expr(a) for a in v.get("arguments",[])]}
-            if v.get("kind")=="binary":return {"kind":"binary","operator":v["operator"],"left":expr(v["left"]),"right":expr(v["right"])}
-            raise WorkspaceError("REPLAY_TYPED_SHAPE",f"Unsupported expression {v.get('kind')}")
-        return {"kind":"if","condition":expr(statement["condition"]),
-            "then":[{"kind":"assign","target":{"kind":"result"},"expression":expr(i["expression"])} for i in statement.get("then",[])],
-            "else":[{"kind":"assign","target":{"kind":"result"},"expression":expr(i["expression"])} for i in statement.get("else",[])]}
+            "existing_handles_preserved":all(handle in aliases for handle in self.base_aliases),
+            "operation_events":replay.operation_events,"retired_handles":replay.retired_handles}
 
 
 def main():

@@ -10,6 +10,7 @@ sys.path.insert(0,str(HERE)); sys.path.insert(0,str(ROOT))
 from basic_workspace.model import Workspace, WorkspaceError
 from basic_workspace.projection import Assignment, ForLoop, IfBlock, build_projection, projection_semantics
 from basic_workspace.mir_execution import MirExecutionService
+from basic_workspace.portable_replay import replay_constructive_stream
 from cycle19_gateway import Cycle19Gateway, senior, PROFILE_ID
 from cycle20_gateway import Cycle20Gateway
 from cycle28_gateway import Cycle28Gateway
@@ -567,63 +568,34 @@ class Cycle29Gateway(Cycle19Gateway):
         self.flush_trace();return result
 
     def _replay_all(self):
-        # Fresh empty Workspace replay: Cycle28Gateway authenticates/rebuilds
-        # the first nine ops; we then apply Cycle28's exact commit and Cycle29's
-        # committed portable operations in order.
-        with tempfile.TemporaryDirectory(prefix="atlas-cycle29-replay-",dir="/var/tmp") as td:
-            seed=Cycle28Gateway(Path(td)/"seed",C28_CONTRACT)
-            seed.discovered={h for h in seed.aliases if h.endswith(".function")}
-            stream=json.loads((BASE/"constructive-operations.json").read_text()); ops=copy.deepcopy(stream["operations"])
-            cond=ops[9];fid=seed.aliases[cond["function_handle"]]
-            internal={"operation":"edit_typed_if_condition","function_id":fid,"control_path":cond["control_path"],
-                "anchor_statement_id":seed.aliases[cond["anchor_statement_handle"]],
-                "expected_condition":seed._resolve_expr(cond["expected_condition"],fid),"condition":seed._resolve_expr(cond["condition"],fid)}
-            seed.ws.apply_transaction(seed.doc,seed.ws.get_revision(seed.doc),[internal]);aliases=dict(seed.aliases)
-            added=self.committed_operations[len(ops):]
-            replay_ops=copy.deepcopy(ops)
-            for item in added:
-                if item["operation"]=="create_numeric_function":
-                    refs={call.get("function_handle") for call in self._calls(item["arguments"]) if call.get("function_handle")}
-                    if not refs.issubset(aliases):raise WorkspaceError("REPLAY_HANDLE_MISSING","Creation replay references an unavailable portable function")
-                    args=senior.resolve_function_handles(item["arguments"],aliases,refs)
-                    applied=seed.ws.apply_transaction(seed.doc,seed.ws.get_revision(seed.doc),[{"operation":"create_numeric_function",**args}])
-                    raw=projection_semantics(build_projection(seed.ws,seed.doc,applied["revision"]))
-                    aliases=senior.aliases_for_new_function(raw,aliases,args["name"],item["portable_handle"])
-                    replay_ops.append(copy.deepcopy(item))
-                elif item["operation"]=="replace_typed_if_block":
-                    function_id=aliases.get(item["function_handle"])
-                    anchor=aliases.get(item["anchor_statement_handle"])
-                    projection=build_projection(seed.ws,seed.doc,seed.ws.get_revision(seed.doc))
-                    fn=next(f for f in projection.functions if f.symbol_id==function_id)
-                    selected=fn.statements[item["control_path"][0]["index"]]
-                    portable=self._portable_block_for(seed.ws,seed.doc,selected,aliases)
-                    if portable!=item["expected_block"] or _fingerprint(portable)!=item["expected_block_fingerprint"]:
-                        raise WorkspaceError("REPLAY_BLOCK_MISMATCH","Portable expected block differs during fresh replay")
-                    retired=item["expected_removed_statement_handles"]
-                    local_op={"operation":"replace_typed_if_block","function_id":function_id,"control_path":item["control_path"],
-                        "anchor_statement_id":anchor,"expected_block_fingerprint":seed.ws._typed_if_fingerprint(selected)[0],
-                        "expected_removed_statement_ids":[aliases[h] for h in retired],
-                        "replacement_statements":[{"kind":"assign","target":{"kind":"result"},
-                            "expression":self._resolve_expr_for(seed.ws,seed.doc,aliases,function_id,row["expression"])} for row in item["replacement_statements"]]}
-                    applied=seed.ws.apply_transaction(seed.doc,seed.ws.get_revision(seed.doc),[local_op])
-                    aliases={h:sid for h,sid in aliases.items() if h not in retired}
-                    new_rows=[row for row in applied["created_statements"] if row["containing_function_id"]==function_id]
-                    if len(new_rows)!=1:raise WorkspaceError("REPLAY_NEW_IDENTITY","Expected exactly one extracted assignment identity")
-                    aliases[item["created_statement_handle"]]=new_rows[0]["statement_id"]
-                    replay_ops.append(copy.deepcopy(item))
-                else:raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED",f"Unsupported Cycle29 replay op: {item['operation']}")
-            revision=seed.ws.get_revision(seed.doc);replay_norm=senior.normalized_state(projection_semantics(build_projection(seed.ws,seed.doc,revision)),aliases)
-            live_norm=self._normalized()
-            replay_observed=self._observe(seed.ws,seed.doc,revision,aliases);live_observed=self._observe(self.ws,self.doc,self.ws.get_revision(self.doc),self.aliases)
-            map_rows=[{"portable_handle":h,"live_workspace_id":self.aliases[h],"replay_workspace_id":aliases[h],
-                "remapped":self.aliases[h]!=aliases[h]} for h in sorted(self.aliases)]
-            return {"revision":revision,"operation_count":len(replay_ops),"structural_equivalence":live_norm==replay_norm,
-                "binding_equivalence":_edges(live_norm)==_edges(replay_norm),
-                "behavioral_equivalence":live_observed==replay_observed,"engines_agree":replay_observed["interp"]==replay_observed["jit"],
-                "identity_remappings":sum(row["remapped"] for row in map_rows),"identity_mapping":map_rows,
-                "retired_handles_not_reused":all(row["portable_handle"] not in aliases for row in self.retired),
-                "retired_identities":copy.deepcopy(self.retired),"replay_active_handles":sorted(aliases),
-                "observations":replay_observed,"passed":live_norm==replay_norm and live_observed==replay_observed and replay_observed["interp"]==replay_observed["jit"]}
+        """Replay committed operations with the shared portable interpreter."""
+        # This gateway also validates Mission A at revision 12 before the
+        # replacement transaction exists. Replay the current committed prefix;
+        # later completed runs use the preserved full stream as that prefix.
+        retired_handles=sorted(row["portable_handle"] for row in self.retired)
+        stream={"schema":"basic-workspace.constructive-metafile","version":1,
+            "execution_profile_id":PROFILE_ID,"portable_handles":sorted(self.aliases),
+            "retired_handles":retired_handles,"operations":copy.deepcopy(self.committed_operations)}
+        seed=Workspace(); doc=seed.create_empty_document("memory://cycle29/shared-replay.bas")["document_id"]
+        replay=replay_constructive_stream(seed,doc,stream["operations"],
+            expected_final_handles=stream.get("portable_handles"),
+            expected_retired_handles=stream.get("retired_handles",[]), expected_start_revision=1)
+        aliases=replay.live_handles; revision=replay.revision
+        replay_norm=senior.normalized_state(projection_semantics(build_projection(seed,doc,revision)),aliases)
+        live_norm=self._normalized()
+        replay_observed=self._observe(seed,doc,revision,aliases)
+        live_observed=self._observe(self.ws,self.doc,self.ws.get_revision(self.doc),self.aliases)
+        map_rows=[{"portable_handle":h,"live_workspace_id":self.aliases[h],"replay_workspace_id":aliases[h],
+            "remapped":self.aliases[h]!=aliases[h]} for h in sorted(self.aliases)]
+        live_retired={row["portable_handle"] for row in self.retired}
+        return {"revision":revision,"operation_count":len(replay.operation_events),"structural_equivalence":live_norm==replay_norm,
+            "binding_equivalence":_edges(live_norm)==_edges(replay_norm),
+            "behavioral_equivalence":live_observed==replay_observed,"engines_agree":replay_observed["interp"]==replay_observed["jit"],
+            "identity_remappings":sum(row["remapped"] for row in map_rows),"identity_mapping":map_rows,
+            "retired_handles_not_reused":not (set(aliases)&set(replay.retired_handles)) and set(replay.retired_handles)==live_retired,
+            "retired_identities":copy.deepcopy(self.retired),"replay_active_handles":sorted(aliases),
+            "observations":replay_observed,"operation_events":replay.operation_events,
+            "passed":live_norm==replay_norm and live_observed==replay_observed and replay_observed["interp"]==replay_observed["jit"]}
 
     def _resolve_expr_for(self,ws,doc,aliases,function_id,value):
         old_ws,old_doc,old_aliases,old_discovered=self.ws,self.doc,self.aliases,self.discovered
