@@ -37,3 +37,11 @@ The active Pi tools remain discover, inspect, preview, commit, validate. Preview
 ## Planned tests
 
 Exercise contract parsing, step ordering, call discovery, renamed portable handles, multi-function edits, stale previews, tampered plans, invalid bodies/targets, unauthorized changes, no-mutation rejection, current revision progression, portable replay, independent oracles, and the actual extension handler through JSONL. Existing gateway/replay suites remain unchanged.
+
+## Complexity review and stop
+
+The initial implementation estimate was exceeded before the transport schema or production preflight existed. A first working-tree draft measured **727 physical LOC** for the bounded coordinator and **93 LOC** for two fixed host-owned oracle profiles: **820 production LOC**, before TypeScript schema/handler changes, regression tests, or bridge validation. This exceeds the approximately 700 LOC stop line. The draft also had not passed end-to-end tests, so it is not retained as a production implementation or claimed as validated.
+
+A narrower rewrite was considered. Removing plan validation, typed expression validation, one of the three operation adapters, immutable-plan checks, or replay/oracle verification could reduce lines, but each would remove a required authorization, composition, bridge or acceptance property. Reusing Cycle19/20/26 as opaque callbacks would reduce the coordinator only by hiding their mission-specific baselines and cannot express cross-function atomic edit authorization. The coordinator therefore remains the smallest straightforward design found that preserves the specified boundaries; no evidence supports claiming it can safely meet the 700 LOC limit without a deeper extraction from the legacy gateways.
+
+The two strategies remain distinguishable: Strategy A would touch and generalize several campaign gateways while leaving them needed by old campaigns; Strategy B's bounded coordinator has already exceeded the stop budget. Cycle 33 stops before modifying extension schemas or launching either mission. The incomplete draft was removed; its measured size and design assessment are preserved here. The mission JSON files are prospective plan fixtures, not accepted or executed contracts.

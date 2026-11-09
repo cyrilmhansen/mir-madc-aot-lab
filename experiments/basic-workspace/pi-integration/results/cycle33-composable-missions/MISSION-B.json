@@ -1,0 +1,166 @@
+{
+  "schema": "basic-workspace.composable-mission",
+  "version": 1,
+  "mission_id": "cycle33.marked-value",
+  "objective": "From an independent empty Workspace create RAW_VALUE(X)=10+2*X; BOUND_VALUE(X)=0 if RAW_VALUE(X)<0 else RAW_VALUE(X); IS_LARGE(X)=1 if BOUND_VALUE(X)>=25 else 0; MARKED_VALUE(X)=BOUND_VALUE(X)+10*IS_LARGE(X). Validate the initial program, rename RAW_VALUE to SCALED_VALUE preserving its stable identity and calls, then atomically change the renamed function multiplier 2->3 and IS_LARGE threshold 25->30 in one two-target transaction. BOUND_VALUE and MARKED_VALUE remain semantically structurally unchanged apart from canonical rename propagation.",
+  "execution_profile_id": "basic-workspace.numeric-composition.v1",
+  "initial_revision": 1,
+  "steps": [
+    {
+      "step_id": "create_raw",
+      "operation": "create_numeric_function",
+      "expected_revision": 1,
+      "function_handle": "raw_value.function",
+      "name": "RAW_VALUE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [],
+      "required_dependency_edges": [],
+      "preserve_functions": []
+    },
+    {
+      "step_id": "create_bound",
+      "operation": "create_numeric_function",
+      "expected_revision": 2,
+      "function_handle": "bound_value.function",
+      "name": "BOUND_VALUE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [
+        "raw_value.function"
+      ],
+      "required_dependency_edges": [
+        {
+          "caller": "bound_value.function",
+          "callee": "raw_value.function"
+        }
+      ],
+      "preserve_functions": [
+        "raw_value.function"
+      ]
+    },
+    {
+      "step_id": "create_large",
+      "operation": "create_numeric_function",
+      "expected_revision": 3,
+      "function_handle": "is_large.function",
+      "name": "IS_LARGE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [
+        "bound_value.function"
+      ],
+      "required_dependency_edges": [
+        {
+          "caller": "is_large.function",
+          "callee": "bound_value.function"
+        }
+      ],
+      "preserve_functions": [
+        "raw_value.function",
+        "bound_value.function"
+      ]
+    },
+    {
+      "step_id": "create_marked",
+      "operation": "create_numeric_function",
+      "expected_revision": 4,
+      "function_handle": "marked_value.function",
+      "name": "MARKED_VALUE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [
+        "bound_value.function",
+        "is_large.function"
+      ],
+      "required_dependency_edges": [
+        {
+          "caller": "marked_value.function",
+          "callee": "bound_value.function"
+        },
+        {
+          "caller": "marked_value.function",
+          "callee": "is_large.function"
+        }
+      ],
+      "preserve_functions": [
+        "raw_value.function",
+        "bound_value.function",
+        "is_large.function"
+      ]
+    },
+    {
+      "step_id": "validate_initial",
+      "operation": "validate",
+      "expected_revision": 5,
+      "profile_id": "cycle33.marked.initial.v1"
+    },
+    {
+      "step_id": "rename_raw",
+      "operation": "rename_symbol",
+      "expected_revision": 5,
+      "target_handle": "raw_value.function",
+      "expected_name": "RAW_VALUE",
+      "new_name": "SCALED_VALUE",
+      "preserve_functions": [
+        "bound_value.function",
+        "is_large.function",
+        "marked_value.function"
+      ],
+      "dependency_edges_unchanged": true
+    },
+    {
+      "step_id": "edit_providers",
+      "operation": "edit_numeric_literals",
+      "expected_revision": 6,
+      "targets": [
+        {
+          "function_handle": "raw_value.function",
+          "target": {
+            "statement_handle": "raw_value.statement.0",
+            "expression_path": [
+              1,
+              0
+            ]
+          },
+          "expected_value": 2,
+          "replacement_value": 3
+        },
+        {
+          "function_handle": "is_large.function",
+          "target": {
+            "control_path": [
+              {
+                "block": "body",
+                "index": 1
+              }
+            ],
+            "expression_path": [
+              1
+            ]
+          },
+          "expected_value": 25,
+          "replacement_value": 30
+        }
+      ],
+      "preserve_functions": [
+        "bound_value.function",
+        "marked_value.function"
+      ],
+      "dependency_edges_unchanged": true,
+      "minimum_edits": 2,
+      "maximum_edits": 2
+    },
+    {
+      "step_id": "validate_final",
+      "operation": "validate",
+      "expected_revision": 7,
+      "profile_id": "cycle33.marked.final.v1"
+    }
+  ],
+  "completion_profile": "cycle33.marked.final.v1"
+}

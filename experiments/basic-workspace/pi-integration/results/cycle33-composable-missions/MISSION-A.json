@@ -1,0 +1,157 @@
+{
+  "schema": "basic-workspace.composable-mission",
+  "version": 1,
+  "mission_id": "cycle33.charge-calculation",
+  "objective": "From an empty Workspace create BASE_CHARGE(X)=5+2*X; EARLY_REBATE(X)=3 when X<8 else 0; RUSH_SURCHARGE(X)=7 when X>=12 else 0; TOTAL_CHARGE(X)=BASE_CHARGE(X)-EARLY_REBATE(X)+RUSH_SURCHARGE(X). Validate the initial program, rename EARLY_REBATE to ADVANCE_REBATE preserving its stable function identity and calls, then atomically change RUSH_SURCHARGE threshold 12->15 and BASE_CHARGE multiplier 2->3 in one two-target transaction. TOTAL_CHARGE remains semantically structurally unchanged.",
+  "execution_profile_id": "basic-workspace.numeric-composition.v1",
+  "initial_revision": 1,
+  "steps": [
+    {
+      "step_id": "create_base",
+      "operation": "create_numeric_function",
+      "expected_revision": 1,
+      "function_handle": "base_charge.function",
+      "name": "BASE_CHARGE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [],
+      "required_dependency_edges": [],
+      "preserve_functions": []
+    },
+    {
+      "step_id": "create_rebate",
+      "operation": "create_numeric_function",
+      "expected_revision": 2,
+      "function_handle": "early_rebate.function",
+      "name": "EARLY_REBATE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [],
+      "required_dependency_edges": [],
+      "preserve_functions": [
+        "base_charge.function"
+      ]
+    },
+    {
+      "step_id": "create_rush",
+      "operation": "create_numeric_function",
+      "expected_revision": 3,
+      "function_handle": "rush_surcharge.function",
+      "name": "RUSH_SURCHARGE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [],
+      "required_dependency_edges": [],
+      "preserve_functions": [
+        "base_charge.function",
+        "early_rebate.function"
+      ]
+    },
+    {
+      "step_id": "create_total",
+      "operation": "create_numeric_function",
+      "expected_revision": 4,
+      "function_handle": "total_charge.function",
+      "name": "TOTAL_CHARGE",
+      "parameters": [
+        "X"
+      ],
+      "allowed_callees": [
+        "base_charge.function",
+        "early_rebate.function",
+        "rush_surcharge.function"
+      ],
+      "required_dependency_edges": [
+        {
+          "caller": "total_charge.function",
+          "callee": "base_charge.function"
+        },
+        {
+          "caller": "total_charge.function",
+          "callee": "early_rebate.function"
+        },
+        {
+          "caller": "total_charge.function",
+          "callee": "rush_surcharge.function"
+        }
+      ],
+      "preserve_functions": [
+        "base_charge.function",
+        "early_rebate.function",
+        "rush_surcharge.function"
+      ]
+    },
+    {
+      "step_id": "validate_initial",
+      "operation": "validate",
+      "expected_revision": 5,
+      "profile_id": "cycle33.charge.initial.v1"
+    },
+    {
+      "step_id": "rename_rebate",
+      "operation": "rename_symbol",
+      "expected_revision": 5,
+      "target_handle": "early_rebate.function",
+      "expected_name": "EARLY_REBATE",
+      "new_name": "ADVANCE_REBATE",
+      "preserve_functions": [
+        "base_charge.function",
+        "rush_surcharge.function",
+        "total_charge.function"
+      ],
+      "dependency_edges_unchanged": true
+    },
+    {
+      "step_id": "edit_providers",
+      "operation": "edit_numeric_literals",
+      "expected_revision": 6,
+      "targets": [
+        {
+          "function_handle": "base_charge.function",
+          "target": {
+            "statement_handle": "base_charge.statement.0",
+            "expression_path": [
+              1,
+              0
+            ]
+          },
+          "expected_value": 2,
+          "replacement_value": 3
+        },
+        {
+          "function_handle": "rush_surcharge.function",
+          "target": {
+            "control_path": [
+              {
+                "block": "body",
+                "index": 1
+              }
+            ],
+            "expression_path": [
+              1
+            ]
+          },
+          "expected_value": 12,
+          "replacement_value": 15
+        }
+      ],
+      "preserve_functions": [
+        "early_rebate.function",
+        "total_charge.function"
+      ],
+      "dependency_edges_unchanged": true,
+      "minimum_edits": 2,
+      "maximum_edits": 2
+    },
+    {
+      "step_id": "validate_final",
+      "operation": "validate",
+      "expected_revision": 7,
+      "profile_id": "cycle33.charge.final.v1"
+    }
+  ],
+  "completion_profile": "cycle33.charge.final.v1"
+}
