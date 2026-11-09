@@ -400,6 +400,17 @@ class WorkspaceClient:
                     raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the result-assignment anchor first")
                 self._validate_expression_symbols(op.get("expected_condition"))
                 self._validate_expression_symbols(op.get("condition"))
+            if op.get("operation") == "replace_typed_if_block":
+                if op.get("function_id") not in self._known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "Discover the function before replacing a control block")
+                if op.get("anchor_statement_id") not in self._known_statements:
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "Discover a stable statement inside the selected block first")
+                removed = op.get("expected_removed_statement_ids")
+                if not isinstance(removed, list) or any(sid not in self._known_statements for sid in removed):
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "Discover every statement identity expected to retire")
+                for statement in op.get("replacement_statements", []):
+                    if isinstance(statement, dict):
+                        self._validate_expression_symbols(statement.get("expression"))
             if "expression" in op:
                 self._validate_expression_symbols(op["expression"],
                     allow_local_ref=op.get("operation") == "create_numeric_function")

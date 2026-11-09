@@ -1710,6 +1710,209 @@ class Workspace:
                                  {"expected": list(new_refs), "actual": list(actual_refs)})
         return anchor_id
 
+    @staticmethod
+    def _typed_if_fingerprint(statement: Any) -> tuple[str, list[str]]:
+        """Return a deterministic, identity-sensitive fingerprint for one typed IF.
+
+        The IF marker itself has no canonical identity. The fingerprint covers
+        its typed condition and branch structure, while statement identities
+        are returned separately so callers can explicitly account for retired
+        assignment nodes.
+        """
+        import hashlib
+        import json
+        from .projection import Assignment, ForLoop, IfBlock
+
+        retired: list[str] = []
+
+        def expression(expr: Any) -> Any:
+            return {"kind": expr.kind, "value": expr.value,
+                    "children": [expression(child) for child in expr.children]}
+
+        def block(items: Any) -> list[Any]:
+            output = []
+            for item in items:
+                if isinstance(item, Assignment):
+                    if item.statement_id:
+                        retired.append(item.statement_id)
+                    output.append({"kind": "assign", "target_symbol_id": item.target_symbol_id,
+                        "target_is_result": item.target_is_result,
+                        "target_is_array": item.target_is_array,
+                        "target_index": expression(item.target_index) if item.target_index else None,
+                        "expression": expression(item.expression)})
+                elif isinstance(item, IfBlock):
+                    output.append({"kind": "if", "condition": expression(item.condition),
+                        "then": block(item.then_body), "else": block(item.else_body)})
+                elif isinstance(item, ForLoop):
+                    output.append({"kind": "for", "variable_id": item.variable_id,
+                        "start": item.start, "end": item.end, "step": item.step,
+                        "body": block(item.body)})
+                else:
+                    raise WorkspaceError("UNSUPPORTED_TYPED_BLOCK", "Selected block contains an unsupported projected statement")
+            return output
+
+        if not isinstance(statement, IfBlock):
+            raise WorkspaceError("INVALID_BLOCK_TARGET", "Typed block replacement target must be an IF")
+        value = {"kind": "if", "condition": expression(statement.condition),
+                 "then": block(statement.then_body), "else": block(statement.else_body)}
+        raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest(), retired
+
+    def _replace_typed_if_block_tokens(self, doc: Document, operation: dict[str, Any]) -> tuple[str, list[str]]:
+        """Replace one verified IF block with typed result assignment(s).
+
+        This is a bounded canonical-token splice. The target is selected from
+        the semantic projection, then located by its projected source line and
+        matching canonical IF/END IF markers. The surrounding function body is
+        never reconstructed from rendered source.
+        """
+        from .projection import Assignment, ForLoop, IfBlock, build_projection_from_document
+        from .typed_expr import expression_tokens, parse_request
+
+        required = {"operation", "function_id", "control_path", "anchor_statement_id",
+                    "expected_block_fingerprint", "expected_removed_statement_ids", "replacement_statements"}
+        if not isinstance(operation, dict) or set(operation) != required:
+            raise WorkspaceError("INVALID_BLOCK_REPLACEMENT", "Block replacement requires a typed target, fingerprint, retirement set and replacement statements")
+        function_id = operation["function_id"]
+        owner = doc.symbols.get(function_id)
+        if owner is None or owner.kind != "function" or owner.name.endswith("$"):
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Block replacement target must be an existing numeric function")
+        path = operation["control_path"]
+        if (not isinstance(path, list) or not path or len(path) > 8
+                or any(not isinstance(step, dict) or set(step) != {"block", "index"}
+                    or step.get("block") not in ("body", "then", "else")
+                    or isinstance(step.get("index"), bool) or not isinstance(step.get("index"), int)
+                    for step in path)):
+            raise WorkspaceError("INVALID_IF_PATH", "control_path must select one IF through bounded body/then/else indexes")
+        projection = build_projection_from_document(self, doc, doc.revision)
+        function = next((row for row in projection.functions if row.symbol_id == function_id), None)
+        if function is None:
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Selected function is absent from the typed projection")
+        block_items: Any = function.statements
+        selected: Any = None
+        for offset, step in enumerate(path):
+            index = step["index"]
+            if not 0 <= index < len(block_items):
+                raise WorkspaceError("INVALID_IF_PATH", "control_path index is outside its selected statement block")
+            selected = block_items[index]
+            if offset + 1 < len(path):
+                next_block = path[offset + 1]["block"]
+                if isinstance(selected, IfBlock) and next_block in ("then", "else"):
+                    block_items = selected.then_body if next_block == "then" else selected.else_body
+                elif isinstance(selected, ForLoop) and next_block == "body":
+                    block_items = selected.body
+                else:
+                    raise WorkspaceError("INVALID_IF_PATH", "Path does not descend through a matching structured block")
+        if not isinstance(selected, IfBlock):
+            raise WorkspaceError("INVALID_IF_PATH", "Selected semantic path is not an IF block")
+        fingerprint, retired_ids = self._typed_if_fingerprint(selected)
+        if fingerprint != operation["expected_block_fingerprint"]:
+            raise WorkspaceError("EXPECTED_BLOCK_MISMATCH", "Selected typed IF differs from the inspected block fingerprint")
+        expected_retired = operation["expected_removed_statement_ids"]
+        if (not isinstance(expected_retired, list) or any(not isinstance(sid, str) for sid in expected_retired)
+                or len(expected_retired) != len(set(expected_retired))
+                or set(expected_retired) != set(retired_ids)):
+            raise WorkspaceError("BLOCK_RETIREMENT_SET_MISMATCH", "Explicit removed statement IDs must exactly match statements owned by the selected IF")
+        anchor_id = operation["anchor_statement_id"]
+        if anchor_id not in retired_ids or anchor_id not in doc.statements:
+            raise WorkspaceError("INVALID_IF_ANCHOR", "Anchor must be a stable statement identity inside the selected IF")
+        replacements = operation["replacement_statements"]
+        if not isinstance(replacements, list) or not 1 <= len(replacements) <= 16:
+            raise WorkspaceError("INVALID_BLOCK_REPLACEMENT", "replacement_statements must contain 1 to 16 typed assignments")
+        if any(not isinstance(row, dict) or set(row) != {"kind", "target", "expression"}
+                or row.get("kind") != "assign" or row.get("target") != {"kind": "result"}
+                for row in replacements):
+            raise WorkspaceError("INVALID_BLOCK_REPLACEMENT", "Replacement currently supports typed function-result assignments only")
+
+        function_row = self._function_row(doc, function_id)
+        params, symbols = self._expression_context(doc)
+        rendered: list[list[tuple[str, str]]] = []
+        expected_refs: list[tuple[str, ...]] = []
+        for row in replacements:
+            expr, refs = parse_request(row["expression"], symbols, function_row["scope_id"], function_id, params)
+            parts, emitted = expression_tokens(expr, symbols)
+            if refs != emitted:
+                raise WorkspaceError("INTERNAL_BINDING_ERROR", "Replacement assignment binding changed during typed serialization")
+            rendered.append([("IDENT", owner.name), ("WS", " "), ("OP", "="), ("WS", " ")] + parts)
+            expected_refs.append((function_id,) + refs)
+
+        # Verify a unique, standalone physical IF block in canonical tokens.
+        # Colon-separated statements or inline comments in the selected span
+        # are rejected because their ownership cannot be safely spliced.
+        start_line = selected.line
+        fn_range = next((row for row in doc.functions if row["symbol_id"] == function_id), None)
+        if fn_range is None:
+            raise WorkspaceError("FUNCTION_NOT_FOUND", "Selected function source range is missing")
+        end_function_line = fn_range["end_line"]
+        by_line: dict[int, list[Token]] = {}
+        for token in doc.tokens:
+            if start_line <= token.line <= end_function_line:
+                by_line.setdefault(token.line, []).append(token)
+        depth = 0
+        end_line = None
+        for number in sorted(line for line in by_line if line >= start_line):
+            line_tokens = by_line[number]
+            sig = self._significant(line_tokens)
+            if not sig:
+                if depth:
+                    continue
+                continue
+            if any(token.kind == "PUNCT" and token.text == ":" for token in line_tokens):
+                raise WorkspaceError("AMBIGUOUS_BLOCK_SPAN", "Colon-separated statements cannot be replaced as a typed block")
+            if any(token.kind == "COMMENT" for token in line_tokens):
+                raise WorkspaceError("AMBIGUOUS_BLOCK_SPAN", "Comments inside or attached to the selected block prevent a safe splice")
+            first = sig[0].text.upper()
+            if number == start_line and first != "IF":
+                raise WorkspaceError("BLOCK_TOKEN_MAPPING_FAILED", "Projection IF line has no canonical IF marker")
+            if first == "IF":
+                depth += 1
+            elif first == "END" and len(sig) > 1 and sig[1].text.upper() == "IF":
+                depth -= 1
+                if depth < 0:
+                    raise WorkspaceError("BLOCK_TOKEN_MAPPING_FAILED", "Unbalanced canonical END IF marker")
+                if depth == 0:
+                    end_line = number
+                    break
+        if end_line is None:
+            raise WorkspaceError("BLOCK_TOKEN_MAPPING_FAILED", "Could not find the matching canonical END IF")
+
+        start_indices = [i for i, token in enumerate(doc.tokens) if token.line == start_line]
+        end_indices = [i for i, token in enumerate(doc.tokens) if token.line == end_line]
+        if not start_indices or not end_indices:
+            raise WorkspaceError("BLOCK_TOKEN_MAPPING_FAILED", "Selected IF token span is unavailable")
+        start_index, end_index = min(start_indices), max(end_indices)
+        if end_index + 1 < len(doc.tokens) and doc.tokens[end_index + 1].kind == "NEWLINE":
+            end_index += 1
+        prefix = []
+        for token in by_line[start_line]:
+            if token.kind == "WS":
+                prefix.append((token.kind, token.text))
+            else:
+                break
+        replacement_tokens: list[Token] = []
+        replacement_groups: list[list[Token]] = []
+        for parts in rendered:
+            generated = self._new_tokens(prefix + parts + [("NEWLINE", "\n")])
+            replacement_tokens.extend(generated)
+            replacement_groups.append(generated)
+        doc.tokens[start_index:end_index + 1] = replacement_tokens
+        self._recolumn(doc)
+        self._index(doc)
+        for tokens, refs in zip(replacement_groups, expected_refs):
+            # Each generated assignment is one physical line; its identifier
+            # order is result symbol followed by expression references.
+            line = tokens[0].line
+            identifiers = [token for token in doc.tokens if token.line == line and token.kind == "IDENT"]
+            actual = tuple(doc.token_symbol.get(token.uid) for token in identifiers)
+            if actual != refs:
+                raise WorkspaceError("BINDING_MISMATCH", "Replacement statement resolved to unexpected semantic identities",
+                                     {"expected": list(refs), "actual": list(actual)})
+        created = [doc._statement_ids.get(token.uid) for token in replacement_tokens if token.kind == "IDENT"
+                   and token.text.casefold() == owner.name.casefold() and token.uid in doc._statement_ids]
+        if len(created) != len(replacements) or set(created) & set(retired_ids):
+            raise WorkspaceError("STATEMENT_CREATION_FAILED", "Replacement assignments must receive fresh identities")
+        return fingerprint, retired_ids
+
     def _prepare_transaction(self, document_id: str, expected_revision: int,
                              operations: list[dict[str, Any]], include_diff: bool = False) -> tuple[Document, dict[str, Any]]:
         current = self._doc(document_id)
@@ -1720,6 +1923,7 @@ class Workspace:
         candidate = copy.deepcopy(current)
         touched: dict[str, str] = {}
         touched_statements: set[str] = set()
+        retired_statements: set[str] = set()
         for operation in operations:
             kind = operation.get("operation")
             if kind == "rename_symbol":
@@ -1795,6 +1999,12 @@ class Workspace:
                 touched_statements.add(self._edit_typed_if_condition_tokens(candidate, operation))
                 self._index(candidate)
                 continue
+            elif kind == "replace_typed_if_block":
+                _fingerprint, retired = self._replace_typed_if_block_tokens(candidate, operation)
+                retired_statements.update(retired)
+                touched_statements.update(retired)
+                self._index(candidate)
+                continue
             else:
                 raise WorkspaceError("UNSUPPORTED_OPERATION", f"Unsupported semantic operation: {kind}")
             self._index(candidate)
@@ -1806,7 +2016,7 @@ class Workspace:
                                                 "edit_assignment_expression",
                                                 "edit_numeric_literal_at_path",
                                                 "insert_numeric_assignment", "insert_typed_if_block",
-                                                "edit_typed_if_condition")
+                                                "edit_typed_if_condition", "replace_typed_if_block")
                for operation in operations):
             from .projection import build_projection_from_document
             build_projection_from_document(self, candidate, candidate.revision)
@@ -1836,6 +2046,7 @@ class Workspace:
                    "created_entity_summary": {"symbols": len(created_entities),
                                               "statements": len(created_statements)},
                    "affected_statement_ids": sorted(touched_statements),
+                   "retired_statement_ids": sorted(retired_statements),
                    "_created_entities": created_entities,
                    "_created_statements": created_statements}
         if include_diff:
@@ -1878,12 +2089,15 @@ class Workspace:
             entity["symbol_id"] for entity in created_entities)
         self._discovered_statements.setdefault(document_id, set()).update(
             row["statement_id"] for row in created_statements)
+        self._discovered_statements.setdefault(document_id, set()).difference_update(
+            preview.get("retired_statement_ids", []))
         return {"committed": True, "revision": candidate.revision,
                 "affected_entities": preview["affected_entities"],
                 "diagnostics": preview["diagnostics"],
                 "created_entities": created_entities,
                 "created_statements": created_statements,
-                "affected_statement_ids": preview["affected_statement_ids"]}
+                "affected_statement_ids": preview["affected_statement_ids"],
+                "retired_statement_ids": preview.get("retired_statement_ids", [])}
 
     def rename_symbol(self, document_id: str, symbol_id: str, new_name: str,
                       expected_revision: int) -> dict[str, Any]:
@@ -1978,6 +2192,19 @@ class Workspace:
             "operation": "edit_typed_if_condition", "function_id": function_id,
             "control_path": control_path, "anchor_statement_id": anchor_statement_id,
             "expected_condition": expected_condition, "condition": condition})
+
+    def replace_typed_if_block(self, document_id: str, function_id: str,
+                               control_path: list[dict[str, Any]], anchor_statement_id: str,
+                               expected_block_fingerprint: str,
+                               expected_removed_statement_ids: list[str],
+                               replacement_statements: list[dict[str, Any]],
+                               expected_revision: int) -> dict[str, Any]:
+        return self._transaction(document_id, expected_revision, {
+            "operation": "replace_typed_if_block", "function_id": function_id,
+            "control_path": control_path, "anchor_statement_id": anchor_statement_id,
+            "expected_block_fingerprint": expected_block_fingerprint,
+            "expected_removed_statement_ids": expected_removed_statement_ids,
+            "replacement_statements": replacement_statements})
 
     def _rename(self, d: Document, symbol_id: str, new_name: str) -> None:
         s = d.symbols.get(symbol_id)
@@ -2118,6 +2345,7 @@ class Workspace:
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
             "insert_typed_if_block": lambda: self.insert_typed_if_block(params["document_id"], params["function_id"], params["before_statement_id"], params["statement"], params["expected_revision"]),
             "edit_typed_if_condition": lambda: self.edit_typed_if_condition(params["document_id"], params["function_id"], params["control_path"], params["anchor_statement_id"], params["expected_condition"], params["condition"], params["expected_revision"]),
+            "replace_typed_if_block": lambda: self.replace_typed_if_block(params["document_id"], params["function_id"], params["control_path"], params["anchor_statement_id"], params["expected_block_fingerprint"], params["expected_removed_statement_ids"], params["replacement_statements"], params["expected_revision"]),
             "render_document": lambda: self.render_document(params["document_id"]),
             "get_diagnostics": lambda: self.get_diagnostics(params["document_id"]),
             "get_revision": lambda: self.get_revision(params["document_id"]),

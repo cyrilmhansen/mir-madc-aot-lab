@@ -27,7 +27,7 @@ async function run() {
   if (!inPath || !outPath) throw new Error("probe input/output paths are required");
   const request = JSON.parse(await Bun.file(inPath).text());
   const authoringMode = request.authoring_mode || "semantic_edit";
-  if (!["semantic_edit", "atomic_create", "structural_edit", "rename", "conditional_edit"].includes(authoringMode)) throw new Error("unsupported authoring_mode");
+  if (!["semantic_edit", "atomic_create", "structural_edit", "rename", "conditional_edit", "block_replace"].includes(authoringMode)) throw new Error("unsupported authoring_mode");
   process.env.BASIC_WS_AUTHORING_MODE = authoringMode;
   const { default: workspaceExtension } = await import("./extension.ts");
   workspaceExtension(pi);
@@ -38,7 +38,8 @@ async function run() {
   const previewToolName = authoringMode === "atomic_create" ? "workspace_preview_function" :
     authoringMode === "structural_edit" ? "workspace_preview_structural_edit" :
     authoringMode === "rename" ? "workspace_preview_rename" :
-    authoringMode === "conditional_edit" ? "workspace_preview_conditional_edit" : "workspace_preview_semantic_edit";
+    authoringMode === "conditional_edit" ? "workspace_preview_conditional_edit" :
+    authoringMode === "block_replace" ? "workspace_preview_block_replacement" : "workspace_preview_semantic_edit";
   const previewTool = tools.get(previewToolName);
   if (!previewTool) throw new Error("semantic edit tool was not registered");
   const schemaOk = Value.Check(previewTool.parameters, request.preview_args);

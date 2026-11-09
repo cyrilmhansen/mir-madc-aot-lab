@@ -1,0 +1,2142 @@
+{
+  "ok": true,
+  "stage": "extension_to_gateway",
+  "active_tools": [
+    "workspace_discover_functions",
+    "workspace_inspect_program",
+    "workspace_commit_preview",
+    "workspace_validate_mission",
+    "workspace_preview_block_replacement"
+  ],
+  "schemas": [
+    {
+      "name": "workspace_discover_functions",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "workspace_inspect_program",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "workspace_preview_block_replacement",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "function_handle",
+          "control_path",
+          "anchor_statement_handle",
+          "expected_block_fingerprint",
+          "expected_removed_statement_handles",
+          "replacement_statements"
+        ],
+        "properties": {
+          "expected_revision": {
+            "type": "integer"
+          },
+          "function_handle": {
+            "type": "string"
+          },
+          "control_path": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "block",
+                "index"
+              ],
+              "properties": {
+                "block": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "body"
+                    },
+                    {
+                      "type": "string",
+                      "const": "then"
+                    },
+                    {
+                      "type": "string",
+                      "const": "else"
+                    }
+                  ]
+                },
+                "index": {
+                  "type": "integer"
+                }
+              },
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 8
+          },
+          "anchor_statement_handle": {
+            "type": "string"
+          },
+          "expected_block_fingerprint": {
+            "type": "string"
+          },
+          "expected_removed_statement_handles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 64
+          },
+          "replacement_statements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "target",
+                "expression"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "assign"
+                },
+                "target": {
+                  "type": "object",
+                  "required": [
+                    "kind"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "result"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "expression": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "value"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "number"
+                            },
+                            "value": {
+                              "type": "number"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "name"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "local_ref"
+                            },
+                            "name": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "function_handle",
+                        "arguments"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "call"
+                        },
+                        "function_handle": {
+                          "type": "string"
+                        },
+                        "arguments": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "number"
+                                  },
+                                  "value": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "required": [
+                                  "kind",
+                                  "name"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "local_ref"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "minItems": 1,
+                          "maxItems": 8
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 16
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workspace_commit_preview",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "transaction_id"
+        ],
+        "properties": {
+          "transaction_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workspace_validate_mission",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "expected_revision"
+        ],
+        "properties": {
+          "expected_revision": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+  "schema_ok": true,
+  "discovery": {
+    "revision": 12,
+    "functions": [
+      {
+        "handle": "clamp_score.function",
+        "symbol_id": "sym_3ce88abc187347a39409f45b6b988775",
+        "name": "NORMALIZE_SCORE",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      {
+        "handle": "is_passing.function",
+        "symbol_id": "sym_33703f587153421a81a6f92ae34a096f",
+        "name": "IS_PASSING",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      {
+        "handle": "score_class.function",
+        "symbol_id": "sym_6cf92be714314bb1804cd9f195a8cfc3",
+        "name": "SCORE_CLASS",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      {
+        "handle": "is_at_cap.function",
+        "symbol_id": "sym_dd52882fad99468d9c9edd9c45892ad4",
+        "name": "IS_AT_CAP",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      {
+        "handle": "base_score_class.function",
+        "symbol_id": "sym_4884d5bf324645d6a7c1542a9a7cc07e",
+        "name": "BASE_SCORE_CLASS",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      }
+    ]
+  },
+  "inspection": {
+    "revision": 12,
+    "structure": {
+      "functions": [
+        {
+          "handle": "clamp_score.function",
+          "name": "NORMALIZE_SCORE",
+          "parameters": [
+            "clamp_score.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": "<",
+                "children": [
+                  {
+                    "kind": "variable",
+                    "value": "clamp_score.parameter.id",
+                    "children": []
+                  },
+                  {
+                    "kind": "number",
+                    "value": 0,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "clamp_score.statement.0",
+                  "target_handle": "clamp_score.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 0,
+                    "children": []
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "clamp_score.statement.1",
+                  "target_handle": "clamp_score.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "variable",
+                    "value": "clamp_score.parameter.id",
+                    "children": []
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": ">",
+                "children": [
+                  {
+                    "kind": "variable",
+                    "value": "clamp_score.parameter.id",
+                    "children": []
+                  },
+                  {
+                    "kind": "number",
+                    "value": 50,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "clamp_score.statement.2",
+                  "target_handle": "clamp_score.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 50,
+                    "children": []
+                  }
+                }
+              ],
+              "else": []
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "clamp_score.statement.3",
+              "target_handle": "clamp_score.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        },
+        {
+          "handle": "is_passing.function",
+          "name": "IS_PASSING",
+          "parameters": [
+            "is_passing.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": ">=",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "clamp_score.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "is_passing.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 45,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "is_passing.statement.0",
+                  "target_handle": "is_passing.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "is_passing.statement.1",
+                  "target_handle": "is_passing.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 0,
+                    "children": []
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "is_passing.statement.2",
+              "target_handle": "is_passing.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        },
+        {
+          "handle": "score_class.function",
+          "name": "SCORE_CLASS",
+          "parameters": [
+            "score_class.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": "<",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "clamp_score.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "score_class.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 20,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "score_class.statement.0",
+                  "target_handle": "score_class.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 0,
+                    "children": []
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "score_class.statement.1",
+                  "target_handle": "score_class.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": "=",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "is_passing.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "score_class.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "score_class.statement.2",
+                  "target_handle": "score_class.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 2,
+                    "children": []
+                  }
+                }
+              ],
+              "else": []
+            },
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": "=",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "is_at_cap.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "score_class.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "score_class.statement.category50",
+                  "target_handle": "score_class.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 3,
+                    "children": []
+                  }
+                }
+              ],
+              "else": []
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "score_class.statement.3",
+              "target_handle": "score_class.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        },
+        {
+          "handle": "is_at_cap.function",
+          "name": "IS_AT_CAP",
+          "parameters": [
+            "is_at_cap.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": "=",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "clamp_score.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "is_at_cap.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 50,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "is_at_cap.statement.0",
+                  "target_handle": "is_at_cap.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "is_at_cap.statement.1",
+                  "target_handle": "is_at_cap.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 0,
+                    "children": []
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "is_at_cap.statement.2",
+              "target_handle": "is_at_cap.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        },
+        {
+          "handle": "base_score_class.function",
+          "name": "BASE_SCORE_CLASS",
+          "parameters": [
+            "base_score_class.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": "<",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "clamp_score.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "base_score_class.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 20,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "base_score_class.statement.0",
+                  "target_handle": "base_score_class.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 0,
+                    "children": []
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "base_score_class.statement.1",
+                  "target_handle": "base_score_class.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "base_score_class.statement.2",
+              "target_handle": "base_score_class.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "dependencies": [
+      {
+        "caller": "BASE_SCORE_CLASS",
+        "callee": "NORMALIZE_SCORE"
+      },
+      {
+        "caller": "IS_AT_CAP",
+        "callee": "NORMALIZE_SCORE"
+      },
+      {
+        "caller": "IS_PASSING",
+        "callee": "NORMALIZE_SCORE"
+      },
+      {
+        "caller": "SCORE_CLASS",
+        "callee": "NORMALIZE_SCORE"
+      },
+      {
+        "caller": "SCORE_CLASS",
+        "callee": "IS_AT_CAP"
+      },
+      {
+        "caller": "SCORE_CLASS",
+        "callee": "IS_PASSING"
+      }
+    ],
+    "discovered_handles": [
+      "base_score_class.function",
+      "clamp_score.function",
+      "is_at_cap.function",
+      "is_passing.function",
+      "score_class.function"
+    ],
+    "extraction_target": {
+      "function_handle": "score_class.function",
+      "function_name": "SCORE_CLASS",
+      "control_path": [
+        {
+          "block": "body",
+          "index": 0
+        }
+      ],
+      "typed_block": {
+        "kind": "if",
+        "condition": {
+          "kind": "binary",
+          "operator": "<",
+          "left": {
+            "kind": "call",
+            "function_handle": "clamp_score.function",
+            "arguments": [
+              {
+                "kind": "local_ref",
+                "name": "X"
+              }
+            ]
+          },
+          "right": {
+            "kind": "number",
+            "value": 20
+          }
+        },
+        "then": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "number",
+              "value": 0
+            },
+            "statement_handle": "score_class.statement.0"
+          }
+        ],
+        "else": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "number",
+              "value": 1
+            },
+            "statement_handle": "score_class.statement.1"
+          }
+        ]
+      },
+      "expected_block_fingerprint": "3229bcd7e538f68f3a2672d4d4677591d0b1874a3749e9492459a4892c08b382",
+      "anchor_statement_handles": [
+        "score_class.statement.0",
+        "score_class.statement.1"
+      ],
+      "expected_removed_statement_handles": [
+        "score_class.statement.0",
+        "score_class.statement.1"
+      ],
+      "statement_identity_rule": "removed assignments retire; replacement assignment receives a fresh identity"
+    }
+  },
+  "controls": [
+    {
+      "ok": false,
+      "code": "MISSION_TARGET_DENIED",
+      "message": "Only the first SCORE_CLASS IF is authorized",
+      "revision": 12,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "code": "EXPECTED_BLOCK_MISMATCH",
+      "message": "Inspected block fingerprint is stale or incorrect",
+      "revision": 12,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "code": "FUNCTION_NOT_DISCOVERED",
+      "message": "Discover every referenced function handle before proposing the replacement",
+      "revision": 12,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "code": "MISSION_REPLACEMENT_DENIED",
+      "message": "Mission permits one result assignment calling BASE_SCORE_CLASS(X)",
+      "revision": 12,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "code": "STALE_REVISION",
+      "message": "Block replacement revision is stale",
+      "revision": 12,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "code": "STATEMENT_NOT_DISCOVERED",
+      "message": "Inspect the selected block and discover every retiring statement handle",
+      "revision": 12,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    }
+  ],
+  "schema_rejections": [
+    {
+      "index": 3,
+      "arguments": {
+        "expected_revision": 12,
+        "function_handle": "score_class.function",
+        "control_path": [
+          {
+            "block": "body",
+            "index": 0
+          }
+        ],
+        "anchor_statement_handle": "score_class.statement.0",
+        "expected_block_fingerprint": "3229bcd7e538f68f3a2672d4d4677591d0b1874a3749e9492459a4892c08b382",
+        "expected_removed_statement_handles": [
+          "score_class.statement.0",
+          "score_class.statement.1"
+        ],
+        "replacement_statements": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "call",
+              "function_handle": "base_score_class.function",
+              "arguments": []
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "message": "must have required properties value"
+        },
+        {
+          "message": "schema is false"
+        },
+        {
+          "message": "schema is false"
+        },
+        {
+          "message": "must not have additional properties"
+        },
+        {
+          "message": "must be equal to constant"
+        },
+        {
+          "message": "must have required properties name"
+        },
+        {
+          "message": "schema is false"
+        },
+        {
+          "message": "schema is false"
+        }
+      ]
+    }
+  ],
+  "preview": {
+    "ok": true,
+    "accepted": true,
+    "transaction_id": "tx_a10bee0605c34e3a9c3dd2afe5fd2d11",
+    "base_revision": 12,
+    "expected_result_revision": 13,
+    "candidate_is_preview_only": true,
+    "diff": "--- workspace-before\n+++ workspace-after\n@@ -18,11 +18,7 @@\n   IS_PASSING = IS_PASSING\n END FUNCTION\n FUNCTION SCORE_CLASS(X)\n-  IF (NORMALIZE_SCORE(X) < 20) THEN\n-    SCORE_CLASS = 0\n-  ELSE\n-    SCORE_CLASS = 1\n-  END IF\n+  SCORE_CLASS = BASE_SCORE_CLASS(X)\n   IF (IS_PASSING(X) = 1) THEN\n     SCORE_CLASS = 2\n   END IF\n",
+    "retired_statement_handles": [
+      "score_class.statement.0",
+      "score_class.statement.1"
+    ],
+    "new_statement_handle": "score_class.statement.extracted-base-call",
+    "identity_migration": {
+      "preserved": [
+        "base_score_class.function",
+        "base_score_class.parameter.id",
+        "base_score_class.statement.0",
+        "base_score_class.statement.1",
+        "base_score_class.statement.2",
+        "clamp_score.function",
+        "clamp_score.parameter.id",
+        "clamp_score.statement.0",
+        "clamp_score.statement.1",
+        "clamp_score.statement.2",
+        "clamp_score.statement.3",
+        "is_at_cap.function",
+        "is_at_cap.parameter.id",
+        "is_at_cap.statement.0",
+        "is_at_cap.statement.1",
+        "is_at_cap.statement.2",
+        "is_passing.function",
+        "is_passing.parameter.id",
+        "is_passing.statement.0",
+        "is_passing.statement.1",
+        "is_passing.statement.2",
+        "score_class.function",
+        "score_class.parameter.id",
+        "score_class.statement.2",
+        "score_class.statement.3",
+        "score_class.statement.category50"
+      ],
+      "retired": [
+        "score_class.statement.0",
+        "score_class.statement.1"
+      ],
+      "newly_allocated": [
+        "score_class.statement.extracted-base-call"
+      ]
+    }
+  },
+  "committed": {
+    "ok": true,
+    "committed": true,
+    "revision": 13,
+    "retired_statement_handles": [
+      "score_class.statement.0",
+      "score_class.statement.1"
+    ],
+    "new_statement_handle": "score_class.statement.extracted-base-call",
+    "preserved_portable_identity_count": 26
+  },
+  "duplicate_commit": {
+    "ok": false,
+    "committed": false,
+    "code": "PREVIEW_NOT_FOUND",
+    "revision": 13
+  },
+  "validation": {
+    "schema": "basic-workspace.cycle29-mission-validation",
+    "version": 1,
+    "mission_id": "cycle29.replace-score-classification-block.v1",
+    "actor": "pi_tool",
+    "reliable": true,
+    "revision": 13,
+    "executed_revision": 13,
+    "observed_results": {
+      "interp": {
+        "0": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "1": {
+          "normalize_score": 1,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "19": {
+          "normalize_score": 19,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "20": {
+          "normalize_score": 20,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "39": {
+          "normalize_score": 39,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "40": {
+          "normalize_score": 40,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "44": {
+          "normalize_score": 44,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "45": {
+          "normalize_score": 45,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "49": {
+          "normalize_score": 49,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "50": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "51": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "60": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "100": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "200": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "-100": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "-1": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        }
+      },
+      "jit": {
+        "0": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "1": {
+          "normalize_score": 1,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "19": {
+          "normalize_score": 19,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "20": {
+          "normalize_score": 20,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "39": {
+          "normalize_score": 39,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "40": {
+          "normalize_score": 40,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "44": {
+          "normalize_score": 44,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "45": {
+          "normalize_score": 45,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "49": {
+          "normalize_score": 49,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "50": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "51": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "60": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "100": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "200": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "-100": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "-1": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        }
+      }
+    },
+    "expected_results": {
+      "interp": {
+        "0": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "1": {
+          "normalize_score": 1,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "19": {
+          "normalize_score": 19,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "20": {
+          "normalize_score": 20,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "39": {
+          "normalize_score": 39,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "40": {
+          "normalize_score": 40,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "44": {
+          "normalize_score": 44,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "45": {
+          "normalize_score": 45,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "49": {
+          "normalize_score": 49,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "50": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "51": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "60": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "100": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "200": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "-100": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "-1": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        }
+      },
+      "jit": {
+        "0": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "1": {
+          "normalize_score": 1,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "19": {
+          "normalize_score": 19,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "20": {
+          "normalize_score": 20,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "39": {
+          "normalize_score": 39,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "40": {
+          "normalize_score": 40,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "44": {
+          "normalize_score": 44,
+          "is_passing": 0,
+          "score_class": 1,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "45": {
+          "normalize_score": 45,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "49": {
+          "normalize_score": 49,
+          "is_passing": 1,
+          "score_class": 2,
+          "is_at_cap": 0,
+          "base_score_class": 1
+        },
+        "50": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "51": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "60": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "100": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "200": {
+          "normalize_score": 50,
+          "is_passing": 1,
+          "score_class": 3,
+          "is_at_cap": 1,
+          "base_score_class": 1
+        },
+        "-100": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        },
+        "-1": {
+          "normalize_score": 0,
+          "is_passing": 0,
+          "score_class": 0,
+          "is_at_cap": 0,
+          "base_score_class": 0
+        }
+      }
+    },
+    "values_match": true,
+    "engines_agree": true,
+    "preserved_program_invariants": true,
+    "dependencies_match": true,
+    "new_function_signature_valid": true,
+    "mission_complete": true,
+    "replay": {
+      "revision": 13,
+      "operation_count": 12,
+      "structural_equivalence": true,
+      "binding_equivalence": true,
+      "behavioral_equivalence": true,
+      "engines_agree": true,
+      "identity_remappings": 27,
+      "identity_mapping": [
+        {
+          "portable_handle": "base_score_class.function",
+          "live_workspace_id": "sym_4884d5bf324645d6a7c1542a9a7cc07e",
+          "replay_workspace_id": "sym_71eba5453de34938a69e40d7a5fd14b8",
+          "remapped": true
+        },
+        {
+          "portable_handle": "base_score_class.parameter.id",
+          "live_workspace_id": "sym_1fe85b9789814b4384ebdfc0c87bd8e1",
+          "replay_workspace_id": "sym_59bd58d4f1bf4d06ac034040e6e18446",
+          "remapped": true
+        },
+        {
+          "portable_handle": "base_score_class.statement.0",
+          "live_workspace_id": "stmt_61fde03997f146c5b23577d1d1fdc391",
+          "replay_workspace_id": "stmt_d5f7212d9cb245d2a43ae28d2029a2a4",
+          "remapped": true
+        },
+        {
+          "portable_handle": "base_score_class.statement.1",
+          "live_workspace_id": "stmt_8809561170104780a94e19fa16e83d33",
+          "replay_workspace_id": "stmt_e45c785e04684c189e954be18907fb12",
+          "remapped": true
+        },
+        {
+          "portable_handle": "base_score_class.statement.2",
+          "live_workspace_id": "stmt_72ee9d72cf4f40feb31d4b405cd35f4d",
+          "replay_workspace_id": "stmt_ea15526722cd41d5a0101d3df65e1499",
+          "remapped": true
+        },
+        {
+          "portable_handle": "clamp_score.function",
+          "live_workspace_id": "sym_3ce88abc187347a39409f45b6b988775",
+          "replay_workspace_id": "sym_55d8f65cbffc4e598ce78a6d1d0922c4",
+          "remapped": true
+        },
+        {
+          "portable_handle": "clamp_score.parameter.id",
+          "live_workspace_id": "sym_97de2a1f16df400e80b36597f7e69b55",
+          "replay_workspace_id": "sym_cd5f69b4d04143a6b8780ba04a5b3b56",
+          "remapped": true
+        },
+        {
+          "portable_handle": "clamp_score.statement.0",
+          "live_workspace_id": "stmt_ac8ddd4231004bb09bae7f016a55e952",
+          "replay_workspace_id": "stmt_46d34521902e4d00beb675f1fc9abfe9",
+          "remapped": true
+        },
+        {
+          "portable_handle": "clamp_score.statement.1",
+          "live_workspace_id": "stmt_5b6d090d123d4ae18a354264b77997ad",
+          "replay_workspace_id": "stmt_e7577b4f17324dc28c1fb666a2ce51af",
+          "remapped": true
+        },
+        {
+          "portable_handle": "clamp_score.statement.2",
+          "live_workspace_id": "stmt_9213705741e94c6980e4576be4dac81f",
+          "replay_workspace_id": "stmt_869c1dd7ae254e6d904a6216d9f2d66f",
+          "remapped": true
+        },
+        {
+          "portable_handle": "clamp_score.statement.3",
+          "live_workspace_id": "stmt_2dcee8ced61f456dadb39132fafa66e3",
+          "replay_workspace_id": "stmt_b56cf2dfa28d44798b06b76e722ca37f",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_at_cap.function",
+          "live_workspace_id": "sym_dd52882fad99468d9c9edd9c45892ad4",
+          "replay_workspace_id": "sym_a93e1de554b748d5aa8de28fef918d4c",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_at_cap.parameter.id",
+          "live_workspace_id": "sym_9023a46b35c344898e6e3846fbd862b3",
+          "replay_workspace_id": "sym_3258c461b46f4c62b2387875dc66ebd5",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_at_cap.statement.0",
+          "live_workspace_id": "stmt_b511a48dd3c34ed2b61359481373a337",
+          "replay_workspace_id": "stmt_32739e186fe843f987af6888195d6fdd",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_at_cap.statement.1",
+          "live_workspace_id": "stmt_2e16e6af05544342a146a085c78b424c",
+          "replay_workspace_id": "stmt_656de0e5ceef406fbd5a82e381c97633",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_at_cap.statement.2",
+          "live_workspace_id": "stmt_701c56ea68f041d4ad591906e4538ce6",
+          "replay_workspace_id": "stmt_649b52c8fe1f4828bcd46289ea1d3b76",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_passing.function",
+          "live_workspace_id": "sym_33703f587153421a81a6f92ae34a096f",
+          "replay_workspace_id": "sym_83783fff28a6438aa97fb5c746028d2d",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_passing.parameter.id",
+          "live_workspace_id": "sym_5fca5d04a85d43079eebfe6a711908c5",
+          "replay_workspace_id": "sym_90c3aa5292c84528b78f07fb3fc4091b",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_passing.statement.0",
+          "live_workspace_id": "stmt_a0495ede10e04f81b82a471c9289a903",
+          "replay_workspace_id": "stmt_f0d8ae2e7c314efda2843b5af10ea258",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_passing.statement.1",
+          "live_workspace_id": "stmt_ba0bfce6a0284f83957b8a0fa7a0d674",
+          "replay_workspace_id": "stmt_800c423bea6a43ebb8297cc186ca979a",
+          "remapped": true
+        },
+        {
+          "portable_handle": "is_passing.statement.2",
+          "live_workspace_id": "stmt_ee24ae062f2746be9b9c75b79ec901be",
+          "replay_workspace_id": "stmt_7cb00f73011548f5a78f43577daaf449",
+          "remapped": true
+        },
+        {
+          "portable_handle": "score_class.function",
+          "live_workspace_id": "sym_6cf92be714314bb1804cd9f195a8cfc3",
+          "replay_workspace_id": "sym_6469b9c891764fdd9b12d9bf90394dbd",
+          "remapped": true
+        },
+        {
+          "portable_handle": "score_class.parameter.id",
+          "live_workspace_id": "sym_810b6eb55bff4cdbb1f5d90f3abb18df",
+          "replay_workspace_id": "sym_caee2b8fe6e34fe6b5face4fb3a5f85a",
+          "remapped": true
+        },
+        {
+          "portable_handle": "score_class.statement.2",
+          "live_workspace_id": "stmt_0e7da06548f7452599d44aaeb588c5c2",
+          "replay_workspace_id": "stmt_02159102f0284d06830f08e3f43a41de",
+          "remapped": true
+        },
+        {
+          "portable_handle": "score_class.statement.3",
+          "live_workspace_id": "stmt_e001b9ee85bf4a20b8f78a33754252ed",
+          "replay_workspace_id": "stmt_925289bfa2e44b0ca8da7a57d8caa791",
+          "remapped": true
+        },
+        {
+          "portable_handle": "score_class.statement.category50",
+          "live_workspace_id": "stmt_5846785ebec14165a9468603dd47129e",
+          "replay_workspace_id": "stmt_9aa1ca47d65144f29176a11d1813bf06",
+          "remapped": true
+        },
+        {
+          "portable_handle": "score_class.statement.extracted-base-call",
+          "live_workspace_id": "stmt_9dccc6ba0ea04599b0ef88c6239da0ea",
+          "replay_workspace_id": "stmt_050fafe6e1d54f3cbae114e16cb9db17",
+          "remapped": true
+        }
+      ],
+      "retired_handles_not_reused": true,
+      "retired_identities": [
+        {
+          "portable_handle": "score_class.statement.0",
+          "workspace_id": "stmt_837e2ba2c64f48d3be2d9fe5822419c7",
+          "retired_at_revision": 13,
+          "reason": "removed IF branch assignment during extraction"
+        },
+        {
+          "portable_handle": "score_class.statement.1",
+          "workspace_id": "stmt_cbe71b25c60f43949dda2b34ab77e3bd",
+          "retired_at_revision": 13,
+          "reason": "removed IF branch assignment during extraction"
+        }
+      ],
+      "replay_active_handles": [
+        "base_score_class.function",
+        "base_score_class.parameter.id",
+        "base_score_class.statement.0",
+        "base_score_class.statement.1",
+        "base_score_class.statement.2",
+        "clamp_score.function",
+        "clamp_score.parameter.id",
+        "clamp_score.statement.0",
+        "clamp_score.statement.1",
+        "clamp_score.statement.2",
+        "clamp_score.statement.3",
+        "is_at_cap.function",
+        "is_at_cap.parameter.id",
+        "is_at_cap.statement.0",
+        "is_at_cap.statement.1",
+        "is_at_cap.statement.2",
+        "is_passing.function",
+        "is_passing.parameter.id",
+        "is_passing.statement.0",
+        "is_passing.statement.1",
+        "is_passing.statement.2",
+        "score_class.function",
+        "score_class.parameter.id",
+        "score_class.statement.2",
+        "score_class.statement.3",
+        "score_class.statement.category50",
+        "score_class.statement.extracted-base-call"
+      ],
+      "observations": {
+        "interp": {
+          "0": {
+            "normalize_score": 0,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "1": {
+            "normalize_score": 1,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "19": {
+            "normalize_score": 19,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "20": {
+            "normalize_score": 20,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "39": {
+            "normalize_score": 39,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "40": {
+            "normalize_score": 40,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "44": {
+            "normalize_score": 44,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "45": {
+            "normalize_score": 45,
+            "is_passing": 1,
+            "score_class": 2,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "49": {
+            "normalize_score": 49,
+            "is_passing": 1,
+            "score_class": 2,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "50": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "51": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "60": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "100": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "200": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "-100": {
+            "normalize_score": 0,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "-1": {
+            "normalize_score": 0,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          }
+        },
+        "jit": {
+          "0": {
+            "normalize_score": 0,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "1": {
+            "normalize_score": 1,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "19": {
+            "normalize_score": 19,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "20": {
+            "normalize_score": 20,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "39": {
+            "normalize_score": 39,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "40": {
+            "normalize_score": 40,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "44": {
+            "normalize_score": 44,
+            "is_passing": 0,
+            "score_class": 1,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "45": {
+            "normalize_score": 45,
+            "is_passing": 1,
+            "score_class": 2,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "49": {
+            "normalize_score": 49,
+            "is_passing": 1,
+            "score_class": 2,
+            "is_at_cap": 0,
+            "base_score_class": 1
+          },
+          "50": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "51": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "60": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "100": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "200": {
+            "normalize_score": 50,
+            "is_passing": 1,
+            "score_class": 3,
+            "is_at_cap": 1,
+            "base_score_class": 1
+          },
+          "-100": {
+            "normalize_score": 0,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          },
+          "-1": {
+            "normalize_score": 0,
+            "is_passing": 0,
+            "score_class": 0,
+            "is_at_cap": 0,
+            "base_score_class": 0
+          }
+        }
+      },
+      "passed": true
+    },
+    "identity_migration": {
+      "schema": "basic-workspace.identity-migration",
+      "version": 1,
+      "baseline_revision": 11,
+      "final_revision": 13,
+      "initial_active_count": 23,
+      "preserved_unchanged": [
+        "base_score_class.function",
+        "base_score_class.parameter.id",
+        "base_score_class.statement.0",
+        "base_score_class.statement.1",
+        "base_score_class.statement.2",
+        "clamp_score.function",
+        "clamp_score.parameter.id",
+        "clamp_score.statement.0",
+        "clamp_score.statement.1",
+        "clamp_score.statement.2",
+        "clamp_score.statement.3",
+        "is_at_cap.function",
+        "is_at_cap.parameter.id",
+        "is_at_cap.statement.0",
+        "is_at_cap.statement.1",
+        "is_at_cap.statement.2",
+        "is_passing.function",
+        "is_passing.parameter.id",
+        "is_passing.statement.0",
+        "is_passing.statement.1",
+        "is_passing.statement.2",
+        "score_class.function",
+        "score_class.parameter.id",
+        "score_class.statement.2",
+        "score_class.statement.3",
+        "score_class.statement.category50"
+      ],
+      "preserved_with_new_references": [
+        "base_score_class.function"
+      ],
+      "retired": [
+        {
+          "portable_handle": "score_class.statement.0",
+          "workspace_id": "stmt_837e2ba2c64f48d3be2d9fe5822419c7",
+          "retired_at_revision": 13,
+          "reason": "removed IF branch assignment during extraction"
+        },
+        {
+          "portable_handle": "score_class.statement.1",
+          "workspace_id": "stmt_cbe71b25c60f43949dda2b34ab77e3bd",
+          "retired_at_revision": 13,
+          "reason": "removed IF branch assignment during extraction"
+        }
+      ],
+      "newly_allocated": [
+        {
+          "portable_handle": "base_score_class.function",
+          "workspace_id": "sym_4884d5bf324645d6a7c1542a9a7cc07e",
+          "created_revision": 12
+        },
+        {
+          "portable_handle": "base_score_class.parameter.id",
+          "workspace_id": "sym_1fe85b9789814b4384ebdfc0c87bd8e1",
+          "created_revision": 12
+        },
+        {
+          "portable_handle": "base_score_class.statement.0",
+          "workspace_id": "stmt_61fde03997f146c5b23577d1d1fdc391",
+          "created_revision": 12
+        },
+        {
+          "portable_handle": "base_score_class.statement.1",
+          "workspace_id": "stmt_8809561170104780a94e19fa16e83d33",
+          "created_revision": 12
+        },
+        {
+          "portable_handle": "base_score_class.statement.2",
+          "workspace_id": "stmt_72ee9d72cf4f40feb31d4b405cd35f4d",
+          "created_revision": 12
+        },
+        {
+          "portable_handle": "score_class.statement.extracted-base-call",
+          "workspace_id": "stmt_9dccc6ba0ea04599b0ef88c6239da0ea",
+          "created_revision": 13
+        }
+      ],
+      "live_handles": [
+        "base_score_class.function",
+        "base_score_class.parameter.id",
+        "base_score_class.statement.0",
+        "base_score_class.statement.1",
+        "base_score_class.statement.2",
+        "clamp_score.function",
+        "clamp_score.parameter.id",
+        "clamp_score.statement.0",
+        "clamp_score.statement.1",
+        "clamp_score.statement.2",
+        "clamp_score.statement.3",
+        "is_at_cap.function",
+        "is_at_cap.parameter.id",
+        "is_at_cap.statement.0",
+        "is_at_cap.statement.1",
+        "is_at_cap.statement.2",
+        "is_passing.function",
+        "is_passing.parameter.id",
+        "is_passing.statement.0",
+        "is_passing.statement.1",
+        "is_passing.statement.2",
+        "score_class.function",
+        "score_class.parameter.id",
+        "score_class.statement.2",
+        "score_class.statement.3",
+        "score_class.statement.category50",
+        "score_class.statement.extracted-base-call"
+      ],
+      "no_retired_handle_reuse": true
+    },
+    "diagnostics": []
+  }
+}
