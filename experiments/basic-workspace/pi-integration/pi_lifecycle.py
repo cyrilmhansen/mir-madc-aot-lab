@@ -30,8 +30,10 @@ def completion_states(*, committed: bool, validation: dict[str, Any] | None,
     # interpreter/JIT agreement, value matching when reported, and replay when
     # replay is part of the campaign. Do not require a field belonging to one
     # earlier mission schema.
+    engine_agreement = (validation.get("engines_agree") is True
+        or validation.get("interpreter_jit_agree") is True) if validation else False
     host_ok = bool(validation and validation.get("mission_complete") is True
-        and validation.get("engines_agree") is True
+        and engine_agreement
         and validation.get("values_match", True) is True
         and (validation.get("replay") or {}).get("passed") is True)
     semantic = "passed" if host_ok else "failed" if validation is not None else "not_validated"

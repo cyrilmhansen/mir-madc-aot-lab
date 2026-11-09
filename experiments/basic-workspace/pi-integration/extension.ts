@@ -7,11 +7,13 @@ const COMMON_TOOLS = ["workspace_discover_functions", "workspace_inspect_program
 const ATOMIC_TOOLS = [...COMMON_TOOLS, "workspace_preview_function"];
 const SEMANTIC_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_semantic_edit"];
 const STRUCTURAL_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_structural_edit"];
+const RENAME_TOOLS = [...COMMON_TOOLS, "workspace_preview_rename"];
 const DRAFT_TOOLS = [...COMMON_TOOLS, "workspace_begin_function_draft", "workspace_apply_draft_operations",
   "workspace_inspect_function_draft", "workspace_preview_function_draft"];
 const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit" ? SEMANTIC_EDIT_TOOLS :
-  process.env.BASIC_WS_AUTHORING_MODE === "structural_edit" ? STRUCTURAL_EDIT_TOOLS : ATOMIC_TOOLS;
+  process.env.BASIC_WS_AUTHORING_MODE === "structural_edit" ? STRUCTURAL_EDIT_TOOLS :
+  process.env.BASIC_WS_AUTHORING_MODE === "rename" ? RENAME_TOOLS : ATOMIC_TOOLS;
 const MAX_RESPONSE = 1024 * 1024;
 
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
@@ -166,6 +168,13 @@ export default function (pi: ExtensionAPI) {
       before_statement_handle: Type.String(), statement: IF_STATEMENT }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_structural_edit", params, 30000, toolCallId));
+    }});
+  pi.registerTool({ name: "workspace_preview_rename", label: "Preview semantic rename",
+    description: "Preview a revision-checked rename of a discovered function identity. Supply its stable function_handle, expected current source name, and proposed new source name. The gateway resolves all declaration and bound-reference tokens by identity, authorizes the mission, and previews atomically; source text is never searched or replaced. Commit only an accepted preview.",
+    parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
+      expected_name: Type.String(), new_name: Type.String() }, { additionalProperties: false }),
+    async execute(toolCallId, params) {
+      return toolResult(await gateway.call("preview_rename", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_commit_preview", label: "Commit semantic preview",
     description: "Commit an accepted gateway preview by its transaction ID. Commit rechecks the mission and revision atomically.",

@@ -33,6 +33,15 @@ class PiLifecycleTests(unittest.TestCase):
         self.assertEqual(result["host_validation"],"passed")
         self.assertEqual(result["program_commit"],"committed")
 
+    def test_completion_classifier_accepts_cycle26_interpreter_jit_field(self):
+        # Cycle 26's validator names this shared observation explicitly.
+        validation={"mission_complete":True,"interpreter_jit_agree":True,
+            "replay":{"passed":True}}
+        result=MOD.completion_states(committed=True,validation=validation,timed_out=False,
+            exit_code=0,agent_end_seen=True,agent_settled_seen=True)
+        self.assertEqual(result["semantic_program"],"passed")
+        self.assertEqual(result["host_validation"],"passed")
+
     def test_completion_classifier_rejects_mission_oracle_mismatch(self):
         validation={"mission_complete":True,"engines_agree":True,"values_match":False,
             "replay":{"passed":True}}
