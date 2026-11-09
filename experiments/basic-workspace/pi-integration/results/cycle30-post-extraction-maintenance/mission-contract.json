@@ -1,0 +1,45 @@
+{
+  "schema": "basic-workspace.numeric-literal-maintenance-contract",
+  "version": 1,
+  "mission_id": "cycle30.base-score-class-lower-bound25.v1",
+  "objective": "Change BASE_SCORE_CLASS so that its lower classification boundary is 25 instead of 20. Preserve every other function's source and all semantic dependencies.",
+  "base_document_revision": 13,
+  "execution_profile_id": "basic-workspace.numeric-composition.v1",
+  "allowed_function_handles": ["base_score_class.function"],
+  "authorized_targets": [
+    {
+      "target": {
+        "function_handle": "base_score_class.function",
+        "control_path": [{"block": "body", "index": 0}],
+        "expression_path": [1]
+      },
+      "expected_original_value": 20,
+      "replacement_constraint": {"kind": "one_of", "values": [25]},
+      "label": "BASE_SCORE_CLASS lower classification boundary"
+    }
+  ],
+  "minimum_edits": 1,
+  "maximum_edits": 1,
+  "unchanged_function_handles": [
+    "clamp_score.function", "is_passing.function", "is_at_cap.function", "score_class.function"
+  ],
+  "required_dependency_edges": [
+    {"caller_handle": "base_score_class.function", "callee_handle": "clamp_score.function"},
+    {"caller_handle": "is_at_cap.function", "callee_handle": "clamp_score.function"},
+    {"caller_handle": "is_passing.function", "callee_handle": "clamp_score.function"},
+    {"caller_handle": "score_class.function", "callee_handle": "base_score_class.function"},
+    {"caller_handle": "score_class.function", "callee_handle": "is_at_cap.function"},
+    {"caller_handle": "score_class.function", "callee_handle": "is_passing.function"}
+  ],
+  "revision_increment": 1,
+  "validation": {
+    "inputs": [-100, -1, 0, 1, 19, 20, 21, 24, 25, 26, 39, 40, 44, 45, 49, 50, 51, 60, 100, 200],
+    "functions": [
+      {"function_handle": "clamp_score.function", "result_key": "normalize_score", "oracle": {"kind": "clamp", "minimum": 0, "maximum": 50}},
+      {"function_handle": "is_passing.function", "result_key": "is_passing", "oracle": {"kind": "threshold_call", "callee_handle": "clamp_score.function", "threshold": 45, "true_value": 1, "false_value": 0}},
+      {"function_handle": "is_at_cap.function", "result_key": "is_at_cap", "oracle": {"kind": "threshold_call", "callee_handle": "clamp_score.function", "threshold": 50, "true_value": 1, "false_value": 0}},
+      {"function_handle": "base_score_class.function", "result_key": "base_score_class", "oracle": {"kind": "threshold_call", "callee_handle": "clamp_score.function", "threshold": 25, "true_value": 1, "false_value": 0}},
+      {"function_handle": "score_class.function", "result_key": "score_class", "oracle": {"kind": "score_class_call", "clamp_handle": "clamp_score.function", "passing_handle": "is_passing.function", "cutoff": 25, "passing_value": 1, "below_value": 0, "middle_value": 1, "high_value": 2, "cap_handle": "is_at_cap.function", "cap_value": 1, "cap_output_value": 3}}
+    ]
+  }
+}

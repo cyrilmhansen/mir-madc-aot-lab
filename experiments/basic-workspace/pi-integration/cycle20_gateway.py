@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 
 from basic_workspace.model import Workspace, WorkspaceError
-from basic_workspace.projection import build_projection, projection_semantics
+from basic_workspace.projection import Assignment, ForLoop, IfBlock, build_projection, projection_semantics
 from basic_workspace.mir_execution import MirExecutionService
 from pi_lifecycle import completion_states
 from gateway import Server
@@ -97,6 +97,9 @@ class Cycle20Gateway:
         self.ws = Workspace()
         self.doc = self.ws.create_empty_document(f"memory://{self.mission_id}/reconstructed.bas")["document_id"]
         self.aliases: dict[str, str] = {}
+        # Portable identities removed by an authenticated constructive operation
+        # remain reserved as historical references and can never alias a live ID.
+        self.retired_handles: dict[str, dict[str, Any]] = {}
         self.discovered: set[str] = set()
         self.transactions = SemanticTransactionKernel(self.ws, self.doc)
         self.committed = False
@@ -177,15 +180,19 @@ class Cycle20Gateway:
             expected_fields = ({"kind", "minimum", "maximum"} if spec["kind"] == "clamp" else
                 {"kind", "callee_handle", "threshold", "true_value", "false_value"} if spec["kind"] == "threshold_call" else
                 {"kind", "clamp_handle", "passing_handle", "cutoff", "passing_value", "below_value", "middle_value", "high_value"})
-            if set(spec) != expected_fields:
+            extended_score_class_fields = expected_fields | {"cap_handle", "cap_value", "cap_output_value"} if spec["kind"] == "score_class_call" else expected_fields
+            if set(spec) not in (expected_fields, extended_score_class_fields):
                 raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Oracle declaration contains missing or unsupported fields")
             handle_fields = (("callee_handle",) if spec["kind"] == "threshold_call" else
-                ("clamp_handle", "passing_handle") if spec["kind"] == "score_class_call" else ())
+                ("clamp_handle", "passing_handle") if spec["kind"] == "score_class_call" and "cap_handle" not in spec else
+                ("clamp_handle", "passing_handle", "cap_handle") if spec["kind"] == "score_class_call" else ())
             if any(not isinstance(spec[field], str) or not spec[field] for field in handle_fields):
                 raise WorkspaceError("MISSION_CONTRACT_ORACLE", f"{spec['kind']} requires portable function handles")
             numeric_fields = (("minimum", "maximum") if spec["kind"] == "clamp" else
                 ("threshold", "true_value", "false_value") if spec["kind"] == "threshold_call" else
                 ("cutoff", "passing_value", "below_value", "middle_value", "high_value"))
+            if spec["kind"] == "score_class_call" and "cap_handle" in spec:
+                numeric_fields += ("cap_value", "cap_output_value")
             for field in numeric_fields:
                 value = spec[field]
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -211,6 +218,12 @@ class Cycle20Gateway:
                 result = float(spec["below_value"])
                 active.remove(function_handle)
                 return result
+            if "cap_handle" in spec:
+                at_cap = self._oracle_value(spec["cap_handle"], argument, active)
+                if at_cap == float(spec["cap_value"]):
+                    result = float(spec["cap_output_value"])
+                    active.remove(function_handle)
+                    return result
             passing = self._oracle_value(spec["passing_handle"], argument, active)
             result = float(spec["high_value"] if passing == float(spec["passing_value"]) else spec["middle_value"])
             active.remove(function_handle)
@@ -484,9 +497,31 @@ class Cycle20Gateway:
         if stream.get("schema") != "basic-workspace.constructive-metafile" or stream.get("version") != 1 or stream.get("execution_profile_id") != PROFILE_ID:
             raise WorkspaceError("BASELINE_STREAM_SCHEMA", "Baseline constructive stream is unsupported")
         if recorded_validation.get("mission_complete") is not True or recorded_validation.get("replay", {}).get("passed") is not True:
-            raise WorkspaceError("BASELINE_VALIDATION_FAILED", "Recorded revision-4 baseline did not pass its host validation and replay")
+            raise WorkspaceError("BASELINE_VALIDATION_FAILED", "Recorded baseline did not pass its host validation and replay")
         self.constructive_ops = copy.deepcopy(stream["operations"])
+        retired = stream.get("retired_handles", [])
+        if not isinstance(retired, list) or len(retired) != len(set(retired)) or any(not isinstance(x, str) for x in retired):
+            raise WorkspaceError("BASELINE_RETIREMENT_LEDGER", "Constructive stream retirement ledger is invalid")
+        expected_retired = {"score_class.statement.0", "score_class.statement.1"}
+        if self.baseline_stream_path.name == "constructive-operations.json" and "cycle29-function-extraction" in str(self.baseline_stream_path):
+            # Cycle 29 is a composed history: authenticate its first ten
+            # operations against Cycle 28, then authenticate both Cycle 29
+            # commits and the saved host validation below.
+            c28_stream_path = HERE / "results/cycle28-conditional-refactor/real-agent-01/constructive-operations.json"
+            c28_stream = json.loads(c28_stream_path.read_text(encoding="utf-8"))
+            if stream["operations"][:10] != c28_stream.get("operations"):
+                raise WorkspaceError("BASELINE_PREFIX_MISMATCH", "Cycle 29 constructor/edit prefix differs from authentic Cycle 28 evidence")
+            if set(retired) != expected_retired:
+                raise WorkspaceError("BASELINE_RETIREMENT_LEDGER", "Cycle 29 must explicitly retire its two extracted statements")
+            if recorded_validation.get("revision") != 13 or recorded_validation.get("executed_revision") != 13:
+                raise WorkspaceError("BASELINE_VALIDATION_REVISION", "Cycle 29 host validation is not bound to revision 13")
+        elif retired:
+            raise WorkspaceError("BASELINE_RETIREMENT_LEDGER", "Unexpected retired handles for a non-Cycle-29 stream")
+        c29_mode = "cycle29-function-extraction" in str(self.baseline_stream_path)
+        c29_history = {row.get("resulting_revision"): row for row in history
+            if row.get("event") == "transaction_committed"}
         for op in stream["operations"]:
+            applied = None
             if op.get("operation") == "create_numeric_function":
                 handles = set(_calls(op.get("arguments", {})))
                 if any(handle not in self.aliases for handle in handles):
@@ -498,7 +533,7 @@ class Cycle20Gateway:
                 self.aliases = senior.aliases_for_new_function(raw, self.aliases, args["name"], op["portable_handle"])
             elif op.get("operation") == "edit_numeric_literals":
                 operations = self._workspace_operations_for_edits(op["edits"], self.aliases)
-                self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), operations)
+                applied = self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), operations)
             elif op.get("operation") == "insert_typed_if_block":
                 function_id = self.aliases.get(op.get("function_handle"))
                 anchor_id = self.aliases.get(op.get("insertion_anchor_handle"))
@@ -512,6 +547,21 @@ class Cycle20Gateway:
                 if len(created) != 1 or op.get("created_statement_handle") in self.aliases:
                     raise WorkspaceError("REPLAY_STATEMENT_IDENTITY", "Structural operation must create one fresh statement handle")
                 self.aliases[op["created_statement_handle"]] = created[0]["statement_id"]
+            elif op.get("operation") == "edit_typed_if_condition":
+                if set(op) != {"operation", "mission_id", "function_handle", "control_path",
+                        "anchor_statement_handle", "expected_condition", "condition"}:
+                    raise WorkspaceError("REPLAY_OPERATION_INVALID", "Typed IF condition replay has an unsupported shape")
+                function_id = self.aliases.get(op["function_handle"])
+                anchor_id = self.aliases.get(op["anchor_statement_handle"])
+                if function_id is None or anchor_id is None or op["function_handle"] in retired:
+                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Typed IF condition function or anchor handle is unresolved")
+                applied = self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), [{
+                    "operation": "edit_typed_if_condition", "function_id": function_id,
+                    "control_path": op["control_path"], "anchor_statement_id": anchor_id,
+                    "expected_condition": self._resolve_replay_expr(op["expected_condition"], function_id),
+                    "condition": self._resolve_replay_expr(op["condition"], function_id)}])
+            elif op.get("operation") == "replace_typed_if_block":
+                applied = self._replay_typed_if_replacement(op)
             elif op.get("operation") == "rename_symbol":
                 if set(op) != {"operation", "target_handle", "expected_name", "new_name"}:
                     raise WorkspaceError("REPLAY_OPERATION_INVALID", "Rename operation has an unsupported shape")
@@ -524,6 +574,18 @@ class Cycle20Gateway:
                 self.ws.rename_symbol(self.doc, symbol_id, op["new_name"], self.ws.get_revision(self.doc))
             else:
                 raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED", "Baseline stream contains an unsupported operation")
+            if c29_mode and applied is not None:
+                rev = applied["revision"]
+                recorded = c29_history.get(rev)
+                if recorded and recorded.get("semantic_snapshot") is not None:
+                    if self._normalized(rev) != recorded["semantic_snapshot"]:
+                        raise WorkspaceError("BASELINE_SEMANTIC_MISMATCH", f"Replay differs from Cycle 29 recorded revision {rev} snapshot")
+                if rev == 11:
+                    c28_dir = HERE / "results/cycle28-conditional-refactor/real-agent-01"
+                    c28_history = [json.loads(line) for line in (c28_dir / "history.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+                    c28_commits = [row for row in c28_history if row.get("event") == "transaction_committed" and row.get("resulting_revision") == 11]
+                    if len(c28_commits) != 1 or self._normalized(11) != c28_commits[0].get("semantic_snapshot"):
+                        raise WorkspaceError("BASELINE_PREFIX_ATTESTATION", "Cycle 28 revision-11 snapshot does not authenticate the first ten replay operations")
         revision = self.ws.get_revision(self.doc)
         if revision != self.contract["base_document_revision"]:
             raise WorkspaceError("BASELINE_REVISION_MISMATCH", "Reconstructed stream does not produce the contract's base revision")
@@ -542,18 +604,49 @@ class Cycle20Gateway:
             # behavior equivalence. Accept that evidence only for a final
             # rename operation with an exact matching commit record.
             final = stream["operations"][-1] if stream["operations"] else {}
-            commit_matches = (final.get("operation") == "rename_symbol"
+            if final.get("operation") == "replace_typed_if_block":
+                commit_matches = (committed[0].get("operation") == "replace_typed_if_block"
+                    and committed[0].get("base_revision") == revision - 1
+                    and committed[0].get("resulting_revision") == revision
+                    and committed[0].get("retired_statement_handles") == final.get("expected_removed_statement_handles")
+                    and committed[0].get("new_statement_handle") == final.get("created_statement_handle")
+                    and isinstance(committed[0].get("created_statement_id"), str)
+                    and final.get("created_statement_handle") in self.aliases)
+                prior_snapshot = next((row.get("semantic_snapshot") for row in history
+                    if row.get("event") == "transaction_committed" and row.get("resulting_revision") == revision - 1), None)
+                prior_attestation = (prior_snapshot is not None and recorded_validation.get("revision") == revision
+                    and recorded_validation.get("executed_revision") == revision
+                    and recorded_validation.get("mission_complete") is True
+                    and all(recorded_validation.get("replay", {}).get(key) is True for key in
+                        ("structural_equivalence", "binding_equivalence", "behavioral_equivalence", "engines_agree"))
+                    and recorded_validation.get("replay", {}).get("retired_handles_not_reused") is True
+                    and recorded_validation.get("identity_migration", {}).get("no_retired_handle_reuse") is True
+                    and sorted(row.get("portable_handle") for row in recorded_validation.get("identity_migration", {}).get("retired", [])) == sorted(retired)
+                    and committed[0].get("retired_statement_handles") == retired)
+                if not (commit_matches and prior_attestation):
+                    raise WorkspaceError("BASELINE_SEMANTIC_ATTESTATION_MISSING",
+                        "Cycle 29 replacement replay requires matching r13 commit, r12 snapshot, retirement ledger and host validation")
+            else:
+                commit_matches = (final.get("operation") == "rename_symbol"
                 and committed[0].get("operation") == "rename_symbol"
                 and committed[0].get("target_handle") == final.get("target_handle")
                 and committed[0].get("old_name") == final.get("expected_name")
                 and committed[0].get("new_name") == final.get("new_name")
                 and committed[0].get("preserved_alias_count") == len(self.aliases))
-            validation_attests = all(recorded_validation.get(key) is True for key in
+                validation_attests = all(recorded_validation.get(key) is True for key in
                 ("function_identity_preserved", "parameter_statement_token_identities_preserved",
                  "all_bound_target_tokens_renamed", "no_dependency_identity_changed"))
-            if not (commit_matches and validation_attests):
-                raise WorkspaceError("BASELINE_SEMANTIC_ATTESTATION_MISSING",
-                    "A rename-only snapshot omission requires matching commit provenance and host identity validation")
+                if not (commit_matches and validation_attests):
+                    raise WorkspaceError("BASELINE_SEMANTIC_ATTESTATION_MISSING",
+                        "A rename-only snapshot omission requires matching commit provenance and host identity validation")
+        if set(self.aliases).intersection(retired):
+            raise WorkspaceError("BASELINE_RETIRED_HANDLE_REUSED", "A retired portable identity resolves to a current Workspace entity")
+        if set(self.retired_handles) != set(retired):
+            raise WorkspaceError("BASELINE_RETIREMENT_LEDGER", "Replayed retirements do not match the constructive ledger")
+        for handle, row in self.retired_handles.items():
+            row["historical_reference_only"] = True
+        if sorted(self.aliases) != sorted(stream.get("portable_handles", [])):
+            raise WorkspaceError("BASELINE_HANDLE_SET_MISMATCH", "Active portable handles do not match the stream ledger")
         self.base_revision = revision
         self.baseline_observed = self._run_observations(self.ws, self.doc, revision, self.aliases)
         if self.baseline_observed["interp"] != self.baseline_observed["jit"]:
@@ -653,6 +746,145 @@ class Cycle20Gateway:
         return {"kind": "if", "condition": expression(statement["condition"]),
             "then": branch("then"), "else": branch("else")}
 
+    def _resolve_replay_expr(self, value, function_id):
+        """Resolve a portable Cycle 26–29 expression using current local IDs."""
+        if not isinstance(value, dict):
+            raise WorkspaceError("REPLAY_TYPED_SHAPE", "Portable expression must be an object")
+        kind = value.get("kind")
+        if kind == "number" and set(value) == {"kind", "value"}:
+            number = value["value"]
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(float(number)):
+                raise WorkspaceError("REPLAY_TYPED_SHAPE", "Portable numeric value must be finite")
+            return {"kind": "number", "value": number}
+        if kind == "local_ref" and set(value) == {"kind", "name"}:
+            fn = next((row for row in self.ws.documents[self.doc].functions if row["symbol_id"] == function_id), None)
+            sid = next((sid for sid in fn["parameters"] if self.ws.documents[self.doc].symbols[sid].name.casefold() == str(value["name"]).casefold()), None) if fn else None
+            if sid is None:
+                raise WorkspaceError("REPLAY_PARAMETER_MISSING", "Portable local reference is not a parameter of its function")
+            return {"kind": "symbol_ref", "symbol_id": sid}
+        if kind == "call" and set(value) == {"kind", "function_handle", "arguments"}:
+            callee = self.aliases.get(value["function_handle"])
+            if callee is None or value["function_handle"] in self.retired_handles or not isinstance(value["arguments"], list):
+                raise WorkspaceError("REPLAY_HANDLE_MISSING", "Portable call handle is unknown or retired")
+            declaration = next((row for row in self.ws.documents[self.doc].functions if row["symbol_id"] == callee), None)
+            if declaration is None or len(declaration["parameters"]) != len(value["arguments"]):
+                raise WorkspaceError("REPLAY_SIGNATURE_MISMATCH", "Portable call arity does not match the referenced function")
+            return {"kind": "call", "function_id": callee,
+                "arguments": [self._resolve_replay_expr(arg, function_id) for arg in value["arguments"]]}
+        if kind == "binary" and set(value) == {"kind", "operator", "left", "right"}:
+            return {"kind": "binary", "operator": value["operator"],
+                "left": self._resolve_replay_expr(value["left"], function_id),
+                "right": self._resolve_replay_expr(value["right"], function_id)}
+        raise WorkspaceError("REPLAY_TYPED_SHAPE", f"Unsupported portable expression kind {kind!r}")
+
+    def _portable_replay_expr(self, expression):
+        if expression.kind == "number":
+            return {"kind": "number", "value": expression.value}
+        if expression.kind in ("variable", "result"):
+            symbol_id = str(expression.value)
+            handle = next((h for h, sid in self.aliases.items() if sid == symbol_id), None)
+            if handle and handle.endswith(".parameter.id"):
+                symbol = self.ws.documents[self.doc].symbols.get(symbol_id)
+                if symbol is not None:
+                    return {"kind": "local_ref", "name": symbol.name}
+            raise WorkspaceError("REPLAY_UNPORTABLE_REFERENCE", "Block expression references a non-parameter symbol")
+        if expression.kind == "call":
+            handle = next((h for h, sid in self.aliases.items() if sid == str(expression.value)), None)
+            if not handle or handle in self.retired_handles:
+                raise WorkspaceError("REPLAY_UNPORTABLE_REFERENCE", "Block call has no live portable function handle")
+            return {"kind": "call", "function_handle": handle,
+                "arguments": [self._portable_replay_expr(child) for child in expression.children]}
+        if expression.kind in ("compare", "binary"):
+            return {"kind": "binary", "operator": str(expression.value),
+                "left": self._portable_replay_expr(expression.children[0]),
+                "right": self._portable_replay_expr(expression.children[1])}
+        raise WorkspaceError("REPLAY_UNPORTABLE_REFERENCE", f"Unsupported block expression {expression.kind!r}")
+
+    def _portable_replay_block(self, statement):
+        if not isinstance(statement, IfBlock):
+            raise WorkspaceError("REPLAY_BLOCK_KIND", "Expected a typed IF block")
+        def branch(items):
+            rows = []
+            for child in items:
+                if isinstance(child, Assignment):
+                    if not child.target_is_result:
+                        raise WorkspaceError("REPLAY_BLOCK_KIND", "Only result assignments are portable in this block")
+                    handle = next((h for h, sid in self.aliases.items() if sid == child.statement_id), None)
+                    rows.append({"kind": "assign", "target": {"kind": "result"},
+                        "expression": self._portable_replay_expr(child.expression), "statement_handle": handle})
+                elif isinstance(child, IfBlock):
+                    rows.append(self._portable_replay_block(child))
+                elif isinstance(child, ForLoop):
+                    raise WorkspaceError("REPLAY_BLOCK_KIND", "FOR loops are outside the verified replacement grammar")
+                else:
+                    raise WorkspaceError("REPLAY_BLOCK_KIND", "Unsupported block statement")
+            return rows
+        return {"kind": "if", "condition": self._portable_replay_expr(statement.condition),
+            "then": branch(statement.then_body), "else": branch(statement.else_body)}
+
+    def _replay_typed_if_replacement(self, item):
+        required = {"operation", "function_handle", "control_path", "anchor_statement_handle", "expected_block",
+            "expected_block_fingerprint", "expected_removed_statement_handles", "replacement_statements",
+            "created_statement_handle"}
+        if set(item) != required or item.get("operation") != "replace_typed_if_block":
+            raise WorkspaceError("REPLAY_OPERATION_INVALID", "Typed block replacement has an unsupported portable shape")
+        function_id = self.aliases.get(item["function_handle"])
+        anchor_id = self.aliases.get(item["anchor_statement_handle"])
+        retired = item["expected_removed_statement_handles"]
+        if function_id is None or anchor_id is None or item["function_handle"] in self.retired_handles:
+            raise WorkspaceError("REPLAY_HANDLE_MISSING", "Block target or anchor is unknown or retired")
+        if any(handle not in self.aliases for handle in retired) or any(handle in self.retired_handles for handle in retired):
+            raise WorkspaceError("REPLAY_HANDLE_MISSING", "A block retirement reference is unknown or already retired")
+        if item["created_statement_handle"] in self.aliases or item["created_statement_handle"] in self.retired_handles:
+            raise WorkspaceError("REPLAY_IDENTITY_REUSE", "New statement handle is already live or retired")
+        path = item["control_path"]
+        if not isinstance(path, list) or len(path) != 1 or set(path[0]) != {"block", "index"} or path[0]["block"] != "body":
+            raise WorkspaceError("REPLAY_TARGET_AMBIGUOUS", "Replacement path must identify one top-level body control")
+        projection = build_projection(self.ws, self.doc, self.ws.get_revision(self.doc))
+        fn = next((row for row in projection.functions if row.symbol_id == function_id), None)
+        index = path[0]["index"]
+        if fn is None or isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(fn.statements):
+            raise WorkspaceError("REPLAY_TARGET_AMBIGUOUS", "Replacement control path does not resolve")
+        selected = fn.statements[index]
+        portable = self._portable_replay_block(selected)
+        payload = json.dumps(portable, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+        fingerprint = hashlib.sha256(payload).hexdigest()
+        if portable != item["expected_block"] or fingerprint != item["expected_block_fingerprint"]:
+            raise WorkspaceError("REPLAY_BLOCK_MISMATCH", "Expected block or its fingerprint differs from the current semantic structure")
+        removed_ids = []
+        def collect(rows):
+            for row in rows:
+                if isinstance(row, Assignment): removed_ids.append(row.statement_id)
+                elif isinstance(row, IfBlock): collect(row.then_body); collect(row.else_body)
+                elif isinstance(row, ForLoop): collect(row.body)
+        if not isinstance(selected, IfBlock):
+            raise WorkspaceError("REPLAY_BLOCK_KIND", "Selected control is not an IF")
+        collect(selected.then_body); collect(selected.else_body)
+        expected_ids = {self.aliases[h] for h in retired}
+        if set(removed_ids) != expected_ids or anchor_id not in expected_ids:
+            raise WorkspaceError("REPLAY_RETIREMENT_MISMATCH", "Removed statement handles or stable anchor differ from selected block")
+        if len(item["replacement_statements"]) != 1:
+            raise WorkspaceError("REPLAY_REPLACEMENT_SHAPE", "Cycle 29 replacement must contain exactly one typed statement")
+        replacement = item["replacement_statements"][0]
+        if not isinstance(replacement, dict) or set(replacement) != {"kind", "target", "expression"} or replacement.get("kind") != "assign" or replacement.get("target") != {"kind": "result"}:
+            raise WorkspaceError("REPLAY_REPLACEMENT_SHAPE", "Replacement must be one result assignment")
+        applied = self.ws.apply_transaction(self.doc, self.ws.get_revision(self.doc), [{
+            "operation": "replace_typed_if_block", "function_id": function_id, "control_path": path,
+            "anchor_statement_id": anchor_id,
+            "expected_block_fingerprint": self.ws._typed_if_fingerprint(selected)[0],
+            "expected_removed_statement_ids": [self.aliases[h] for h in retired],
+            "replacement_statements": [{"kind": "assign", "target": {"kind": "result"},
+                "expression": self._resolve_replay_expr(replacement["expression"], function_id)}]}])
+        created = [row for row in applied["created_statements"] if row["containing_function_id"] == function_id]
+        if len(created) != 1:
+            raise WorkspaceError("REPLAY_NEW_IDENTITY", "Block replacement did not allocate exactly one statement identity")
+        for handle in retired:
+            old_id = self.aliases.pop(handle)
+            self.retired_handles[handle] = {"portable_handle": handle,
+                "workspace_id": old_id, "retired_at_revision": applied["revision"]}
+        self.aliases[item["created_statement_handle"]] = created[0]["statement_id"]
+        return applied
+
     def _validate_contract_against_baseline(self):
         if self.contract["execution_profile_id"] != PROFILE_ID:
             raise WorkspaceError("BASELINE_PROFILE_MISMATCH", "Contract and program use different execution profiles")
@@ -742,7 +974,8 @@ class Cycle20Gateway:
             # Kept as a read-only compatibility alias for the original Cycle 20
             # agent prompt. New callers should use the semantically broader key.
             "editable_upper_bound_occurrences": rows,
-            "identity_note": "Function, parameter, and assignment statement handles are stable Workspace identities. IF literals use a typed function-anchored control path and are verified against the current revision."}
+            "retired_portable_handles": sorted(self.retired_handles),
+            "identity_note": "Function, parameter, and assignment statement handles are stable Workspace identities. IF literals use a typed function-anchored control path and are verified against the current revision. Retired portable handles remain historical references and do not resolve in this revision."}
 
     def _workspace_operations_for_edits(self, edits, aliases):
         operations = []
@@ -917,7 +1150,8 @@ class Cycle20Gateway:
         self.write_json(self.output / "constructive-operations.json", {
             "schema": "basic-workspace.constructive-metafile", "version": 1,
             "execution_profile_id": PROFILE_ID,
-            "portable_handles": sorted(self.aliases), "operations": self.constructive_ops})
+            "portable_handles": sorted(self.aliases), "retired_handles": sorted(self.retired_handles),
+            "operations": self.constructive_ops})
         code = self.ws.render_document(self.doc)
         self.write_json(self.output / "visual-source.json", {
             "schema": "basic-workspace.visual-source", "version": 1,
@@ -947,34 +1181,65 @@ class Cycle20Gateway:
     def _run_full_replay(self):
         stream = {"schema": "basic-workspace.constructive-metafile", "version": 1,
             "execution_profile_id": PROFILE_ID, "portable_handles": sorted(self.aliases),
+            "retired_handles": sorted(self.retired_handles),
             "operations": copy.deepcopy(self.constructive_ops)}
         ws = Workspace()
         doc = ws.create_empty_document("memory://numeric-maintenance/full-replay.bas")["document_id"]
         aliases: dict[str, str] = {}
-        for item in stream["operations"]:
-            if item["operation"] == "create_numeric_function":
-                call_handles = set(_calls(item["arguments"]))
-                if any(handle not in aliases for handle in call_handles):
-                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Function call refers to an unresolved portable handle")
-                args = senior.resolve_function_handles(item["arguments"], aliases, call_handles)
-                applied = ws.apply_transaction(doc, ws.get_revision(doc), [{"operation": "create_numeric_function", **args}])
-                raw = projection_semantics(build_projection(ws, doc, applied["revision"]))
-                aliases = senior.aliases_for_new_function(raw, aliases, args["name"], item["portable_handle"])
-            elif item["operation"] == "edit_numeric_literals":
-                if item.get("function_handle") not in aliases:
-                    raise WorkspaceError("REPLAY_HANDLE_MISSING", "Literal edit function handle is unresolved")
-                replay_request = {"expected_revision": ws.get_revision(doc),
-                    "function_handle": item["function_handle"], "edits": item["edits"]}
-                operations = self._resolve_replay_edit_targets(ws, doc, aliases, replay_request)
-                ws.apply_transaction(doc, ws.get_revision(doc), operations)
-            else:
-                raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED", f"Unsupported constructive operation {item['operation']}")
+        old_ws, old_doc, old_aliases, old_retired = self.ws, self.doc, self.aliases, self.retired_handles
+        self.ws, self.doc, self.aliases, self.retired_handles = ws, doc, aliases, {}
+        try:
+            for item in stream["operations"]:
+                if item["operation"] == "create_numeric_function":
+                    call_handles = set(_calls(item["arguments"]))
+                    if any(handle not in aliases or handle in self.retired_handles for handle in call_handles):
+                        raise WorkspaceError("REPLAY_HANDLE_MISSING", "Function call refers to an unresolved or retired portable handle")
+                    args = senior.resolve_function_handles(item["arguments"], aliases, call_handles)
+                    applied = ws.apply_transaction(doc, ws.get_revision(doc), [{"operation": "create_numeric_function", **args}])
+                    raw = projection_semantics(build_projection(ws, doc, applied["revision"]))
+                    aliases.update(senior.aliases_for_new_function(raw, aliases, args["name"], item["portable_handle"]))
+                elif item["operation"] == "edit_numeric_literals":
+                    if item.get("function_handle") not in aliases or item.get("function_handle") in self.retired_handles:
+                        raise WorkspaceError("REPLAY_HANDLE_MISSING", "Literal edit function handle is unresolved or retired")
+                    replay_request = {"expected_revision": ws.get_revision(doc),
+                        "function_handle": item["function_handle"], "edits": item["edits"]}
+                    operations = self._resolve_replay_edit_targets(ws, doc, aliases, replay_request)
+                    ws.apply_transaction(doc, ws.get_revision(doc), operations)
+                elif item["operation"] == "insert_typed_if_block":
+                    function_id=aliases.get(item.get("function_handle")); anchor=aliases.get(item.get("insertion_anchor_handle"))
+                    if function_id is None or anchor is None: raise WorkspaceError("REPLAY_HANDLE_MISSING", "IF insertion target is unresolved")
+                    statement=self._resolve_replay_if(item.get("statement"),ws,doc,aliases,function_id)
+                    applied=ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"insert_typed_if_block","function_id":function_id,"before_statement_id":anchor,"statement":statement}])
+                    created=[row for row in applied["created_statements"] if row["containing_function_id"]==function_id]
+                    handle=item.get("created_statement_handle")
+                    if len(created)!=1 or handle in aliases or handle in self.retired_handles: raise WorkspaceError("REPLAY_STATEMENT_IDENTITY","IF insertion did not allocate a fresh handle")
+                    aliases[handle]=created[0]["statement_id"]
+                elif item["operation"] == "edit_typed_if_condition":
+                    function_id=aliases.get(item.get("function_handle")); anchor=aliases.get(item.get("anchor_statement_handle"))
+                    if function_id is None or anchor is None: raise WorkspaceError("REPLAY_HANDLE_MISSING", "IF condition target is unresolved")
+                    ws.apply_transaction(doc,ws.get_revision(doc),[{"operation":"edit_typed_if_condition","function_id":function_id,
+                        "control_path":item["control_path"],"anchor_statement_id":anchor,
+                        "expected_condition":self._resolve_replay_expr(item["expected_condition"],function_id),
+                        "condition":self._resolve_replay_expr(item["condition"],function_id)}])
+                elif item["operation"] == "rename_symbol":
+                    symbol_id=aliases.get(item["target_handle"]); symbol=ws.documents[doc].symbols.get(symbol_id) if symbol_id else None
+                    if symbol is None or symbol.name!=item["expected_name"]: raise WorkspaceError("REPLAY_RENAME_PRECONDITION","Rename target does not match")
+                    ws.rename_symbol(doc,symbol_id,item["new_name"],ws.get_revision(doc))
+                elif item["operation"] == "replace_typed_if_block":
+                    self._replay_typed_if_replacement(item)
+                else:
+                    raise WorkspaceError("REPLAY_OPERATION_UNSUPPORTED", f"Unsupported constructive operation {item['operation']}")
+            replay_retired = copy.deepcopy(self.retired_handles)
+        finally:
+            self.ws, self.doc, self.aliases, self.retired_handles = old_ws, old_doc, old_aliases, old_retired
         revision = ws.get_revision(doc)
         normalized = senior.normalized_state(projection_semantics(build_projection(ws, doc, revision)), aliases)
         observations = self._run_observations(ws, doc, revision, aliases)
         identity_mapping = [{"portable_handle": handle, "committed_workspace_id": self.aliases[handle],
             "replay_workspace_id": aliases[handle], "remapped": self.aliases[handle] != aliases[handle]}
             for handle in sorted(self.aliases)]
+        if sorted(aliases) != sorted(self.aliases) or sorted(replay_retired) != sorted(self.retired_handles):
+            raise WorkspaceError("REPLAY_IDENTITY_LEDGER", "Fresh replay live/retired identities differ from authoritative state")
         return stream, ws, doc, aliases, normalized, observations, identity_mapping
 
     def _resolve_replay_edit_targets(self, ws, doc, aliases, request):
@@ -1035,11 +1300,14 @@ class Cycle20Gateway:
             structural = replay_norm == normalized
             binding = self._dependency_edges(replay_norm) == self._dependency_edges(normalized)
             behavior = replay_obs == observed
-            replay_passed = structural and binding and behavior and replay_obs["interp"] == replay_obs["jit"]
+            retired_not_reused = (sorted(stream.get("retired_handles", [])) == sorted(self.retired_handles)
+                and not (set(stream.get("retired_handles", [])) & set(replay_aliases)))
+            replay_passed = structural and binding and behavior and replay_obs["interp"] == replay_obs["jit"] and retired_not_reused
             result["replay"] = {"structural_equivalence": structural, "binding_equivalence": binding,
                 "behavioral_equivalence": behavior, "engine_agreement": replay_obs["interp"] == replay_obs["jit"],
                 "identity_remappings": sum(row["remapped"] for row in identity_map),
-                "identity_mapping": identity_map, "passed": replay_passed}
+                "identity_mapping": identity_map, "retired_handles_not_reused": retired_not_reused,
+                "retired_handles": sorted(stream.get("retired_handles", [])), "passed": replay_passed}
             result["mission_complete"] = bool(complete and replay_passed)
             self.write_json(self.output / "constructive-operations.json", stream)
             self.write_json(self.output / "equivalence.json", result)
