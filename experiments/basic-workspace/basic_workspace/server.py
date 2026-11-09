@@ -73,6 +73,12 @@ def _check_discovered_operations(workspace: Workspace, document_id: str,
             before = operation.get("before_statement_id")
             if before is not None and not workspace.statement_was_discovered(document_id, before):
                 raise WorkspaceError("STATEMENT_NOT_DISCOVERED", "Discover the insertion point first")
+        elif kind == "insert_typed_if_block":
+            if not workspace.symbol_was_discovered(document_id, operation.get("function_id")):
+                raise WorkspaceError("SYMBOL_NOT_DISCOVERED", "Discover the function before inserting control flow")
+            if not workspace.statement_was_discovered(document_id, operation.get("before_statement_id")):
+                raise WorkspaceError("STATEMENT_NOT_DISCOVERED", "Discover the structural insertion point first")
+            _check_discovered_body(workspace, document_id, [operation.get("statement")])
         if "expression" in operation:
             _check_discovered_expression(workspace, document_id, operation["expression"])
         if kind in ("create_numeric_function", "create_string_function"):
@@ -157,7 +163,7 @@ def serve() -> None:
                                 _check_discovered_expression(workspace, document_id, assignment[field])
                 _check_discovered_body(workspace, document_id, params.get("body", []))
                 result = workspace.protocol_call(method, params)
-            elif method in ("edit_assignment_expression", "insert_numeric_assignment"):
+            elif method in ("edit_assignment_expression", "insert_numeric_assignment", "insert_typed_if_block"):
                 document_id = params["document_id"]
                 operation = {"operation": method, **{k: v for k, v in params.items()
                                                        if k not in ("document_id", "expected_revision")}}

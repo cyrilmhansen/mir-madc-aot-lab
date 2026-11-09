@@ -6,10 +6,12 @@ const COMMON_TOOLS = ["workspace_discover_functions", "workspace_inspect_program
   "workspace_commit_preview", "workspace_validate_mission"];
 const ATOMIC_TOOLS = [...COMMON_TOOLS, "workspace_preview_function"];
 const SEMANTIC_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_semantic_edit"];
+const STRUCTURAL_EDIT_TOOLS = [...COMMON_TOOLS, "workspace_preview_structural_edit"];
 const DRAFT_TOOLS = [...COMMON_TOOLS, "workspace_begin_function_draft", "workspace_apply_draft_operations",
   "workspace_inspect_function_draft", "workspace_preview_function_draft"];
 const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS :
-  process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit" ? SEMANTIC_EDIT_TOOLS : ATOMIC_TOOLS;
+  process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit" ? SEMANTIC_EDIT_TOOLS :
+  process.env.BASIC_WS_AUTHORING_MODE === "structural_edit" ? STRUCTURAL_EDIT_TOOLS : ATOMIC_TOOLS;
 const MAX_RESPONSE = 1024 * 1024;
 
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
@@ -157,6 +159,13 @@ export default function (pi: ExtensionAPI) {
       edits: Type.Array(SEMANTIC_EDIT, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_semantic_edit", params, 30000, toolCallId));
+    }});
+  pi.registerTool({ name: "workspace_preview_structural_edit", label: "Preview typed structural edit",
+    description: 'Insert one typed IF block into the discovered function before its verified result epilogue. The insertion anchor is a discovered result-assignment statement handle at the function-body boundary. The condition is a typed numeric comparison; branches contain result assignments. A bound call uses {"kind":"call","function_handle":"<discovered-handle>","arguments":[{"kind":"local_ref","name":"X"}]}. For example, {"kind":"if","condition":{"kind":"binary","operator":"=","left":{"kind":"call","function_handle":"<discovered-handle>","arguments":[{"kind":"local_ref","name":"X"}]},"right":{"kind":"number","value":50}},"then":[{"kind":"assign","target":{"kind":"result"},"expression":{"kind":"number","value":3}}]}. Preview leaves committed BASIC unchanged; the gateway checks the complete candidate and authorization before commit.',
+    parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
+      before_statement_handle: Type.String(), statement: IF_STATEMENT }, { additionalProperties: false }),
+    async execute(toolCallId, params) {
+      return toolResult(await gateway.call("preview_structural_edit", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_commit_preview", label: "Commit semantic preview",
     description: "Commit an accepted gateway preview by its transaction ID. Commit rechecks the mission and revision atomically.",

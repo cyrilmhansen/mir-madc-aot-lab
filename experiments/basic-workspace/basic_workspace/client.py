@@ -380,6 +380,19 @@ class WorkspaceClient:
                 before = op.get("before_statement_id")
                 if before is not None and before not in self._known_statements:
                     raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the insertion point first")
+            if op.get("operation") == "insert_typed_if_block":
+                if op.get("function_id") not in self._known_symbols:
+                    raise RpcError("UNKNOWN_SYMBOL_ID", "Discover the function before inserting control flow")
+                if op.get("before_statement_id") not in self._known_statements:
+                    raise RpcError("UNKNOWN_STATEMENT_ID", "Discover the structural insertion position first")
+                statement = op.get("statement")
+                if not isinstance(statement, dict) or statement.get("kind") != "if":
+                    raise RpcError("INVALID_TYPED_IF", "Structural insertion requires a typed IF")
+                self._validate_expression_symbols(statement.get("condition"))
+                for branch in ("then", "else"):
+                    for item in statement.get(branch, []):
+                        if isinstance(item, dict):
+                            self._validate_expression_symbols(item.get("expression"))
             if "expression" in op:
                 self._validate_expression_symbols(op["expression"],
                     allow_local_ref=op.get("operation") == "create_numeric_function")

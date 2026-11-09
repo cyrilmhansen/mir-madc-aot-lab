@@ -1000,6 +1000,125 @@ class Workspace:
             raise WorkspaceError("STATEMENT_CREATION_FAILED", "Indexed array assignment did not receive a stable statement identity")
         return generated[1]
 
+    def _insert_statement_lines_before(self, doc: Document, before_statement_id: str,
+                                       rows: list[tuple[list[tuple[str, str]], int]]) -> list[Token]:
+        """Shared canonical token insertion primitive for constructed bodies and edits."""
+        before = doc.statements.get(before_statement_id)
+        if before is None:
+            raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not locate the semantic insertion anchor")
+        # Insert at the start of the anchor's physical line.  Inserting at the
+        # statement's semantic anchor token can leave the line's existing
+        # indentation before the new text and move that indentation away from
+        # the original statement.  The constructor used to insert at the first
+        # token on the line; preserve that formatting and identity behavior.
+        position = next((i for i, token in enumerate(doc.tokens)
+                         if token.line == before["line"]), None)
+        if position is None:
+            raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not locate the insertion anchor token")
+        generated: list[Token] = []
+        for parts, indent in rows:
+            generated.extend(self._new_tokens([("WS", "  " * indent)] + parts + [("NEWLINE", "\n")]))
+        doc.tokens[position:position] = generated
+        self._recolumn(doc)
+        self._index(doc)
+        return generated
+
+    def _insert_typed_if_block_tokens(self, doc: Document, function_id: str,
+                                      before_statement_id: str,
+                                      statement: dict[str, Any]) -> list[str]:
+        """Insert one bounded, typed IF block before a verified result epilogue.
+
+        This uses the same typed expression parser and token serializer as
+        function construction. IF/ELSE/END IF markers intentionally have no
+        statement IDs in the current canonical model; result assignments do.
+        """
+        from .typed_expr import expression_tokens, parse_request
+
+        if not isinstance(statement, dict) or statement.get("kind") != "if" or set(statement) - {"kind", "condition", "then", "else"}:
+            raise WorkspaceError("INVALID_IF", "Structural insertion requires one typed IF statement")
+        if "condition" not in statement or not isinstance(statement.get("then"), list):
+            raise WorkspaceError("INVALID_IF", "IF insertion requires a condition and then list")
+        if "else" in statement and not isinstance(statement["else"], list):
+            raise WorkspaceError("INVALID_IF", "IF else branch must be a statement list")
+        if len(statement["then"]) + len(statement.get("else", [])) < 1:
+            raise WorkspaceError("INVALID_IF", "Inserted IF must contain at least one assignment")
+
+        function = self._function_row(doc, function_id)
+        fn_symbol = doc.symbols.get(function_id)
+        if fn_symbol is None or fn_symbol.kind != "function" or fn_symbol.name.endswith("$"):
+            raise WorkspaceError("UNSUPPORTED_TYPE", "Typed IF insertion requires a numeric function")
+        anchor = doc.statements.get(before_statement_id)
+        if anchor is None or anchor.get("containing_function_id") != function_id:
+            raise WorkspaceError("INVALID_INSERTION_ANCHOR", "Insertion anchor must be a statement in the selected function")
+        if anchor.get("kind") != "assignment" or anchor.get("target_symbol_id") != function_id:
+            raise WorkspaceError("INVALID_INSERTION_ANCHOR", "Insertion anchor must be a function-result assignment")
+        later = [row for row in doc.statements.values()
+                 if row.get("containing_function_id") == function_id
+                 and row.get("physical_statement_index", -1) > anchor.get("physical_statement_index", -1)]
+        if later:
+            raise WorkspaceError("INVALID_INSERTION_ANCHOR", "Result assignment is not at the verified function-body boundary")
+        # The supported generated epilogue is exactly RESULT = RESULT. It is
+        # retained, and new authored control flow is inserted immediately
+        # before it. This check prevents arbitrary mid-body insertion.
+        if anchor.get("expression_summary", "").replace(" ", "").casefold() != fn_symbol.name.casefold():
+            raise WorkspaceError("INVALID_INSERTION_ANCHOR", "Boundary assignment is not the generated result epilogue")
+
+        params, symbols = self._expression_context(doc)
+        rows: list[tuple[list[tuple[str, str]], int]] = []
+        def verify_parts(parts: list[tuple[str, str]], expected: tuple[str, ...]) -> None:
+            generated_names = tuple(text for kind, text in parts if kind == "IDENT" and text.upper() not in KEYWORDS)
+            expected_names = tuple(doc.symbols[sid].name for sid in expected)
+            if generated_names != expected_names:
+                raise WorkspaceError("BINDING_MISMATCH", "Typed IF token references do not match resolved semantic identities")
+
+        cond_expr, cond_refs = parse_request(statement["condition"], symbols, function["scope_id"], function_id, params)
+        cond_parts, emitted_cond_refs = expression_tokens(cond_expr, symbols)
+        if cond_refs != emitted_cond_refs:
+            raise WorkspaceError("INTERNAL_BINDING_ERROR", "IF condition references changed during token emission")
+        cond_line = [("IDENT", "IF"), ("WS", " ")] + cond_parts + [("WS", " "), ("IDENT", "THEN")]
+        verify_parts(cond_line, cond_refs)
+        rows.append((cond_line, 1))
+
+        def branch(items: list[Any], label: str) -> None:
+            if len(items) > 64:
+                raise WorkspaceError("INVALID_IF", f"IF {label} branch exceeds 64 statements")
+            for item in items:
+                if not isinstance(item, dict) or set(item) != {"kind", "target", "expression"} or item.get("kind") != "assign" or item.get("target") != {"kind": "result"}:
+                    raise WorkspaceError("INVALID_BODY_STATEMENT", "Inserted IF branches may contain only typed function-result assignments")
+                expr, refs = parse_request(item["expression"], symbols, function["scope_id"], function_id, params)
+                expr_parts, emitted_refs = expression_tokens(expr, symbols)
+                if refs != emitted_refs:
+                    raise WorkspaceError("INTERNAL_BINDING_ERROR", "Assignment references changed during token emission")
+                line = [("IDENT", fn_symbol.name), ("WS", " "), ("OP", "="), ("WS", " ")] + expr_parts
+                verify_parts(line, (function_id,) + refs)
+                rows.append((line, 2))
+
+        branch(statement["then"], "then")
+        if statement.get("else"):
+            rows.append(([ ("IDENT", "ELSE") ], 1))
+            branch(statement["else"], "else")
+        rows.append(([("IDENT", "END"), ("WS", " "), ("IDENT", "IF")], 1))
+
+        generated = self._insert_statement_lines_before(doc, before_statement_id, rows)
+        created = [doc._statement_ids[token.uid] for token in generated
+                   if token.kind == "IDENT" and token.text.casefold() == fn_symbol.name.casefold()
+                   and token.uid in doc._statement_ids]
+        if len(created) != len(statement["then"]) + len(statement.get("else", [])):
+            raise WorkspaceError("STATEMENT_CREATION_FAILED", "Inserted result assignments did not receive stable statement identities")
+        # Re-resolve every emitted identifier after canonical indexing. This
+        # proves the serializer did not bind a call or result to another symbol.
+        actual = tuple(doc.token_symbol.get(token.uid) for token in generated
+                       if token.kind == "IDENT" and token.text.upper() not in KEYWORDS)
+        expected = cond_refs
+        for items in (statement["then"], statement.get("else", [])):
+            for item in items:
+                _, refs = parse_request(item["expression"], symbols, function["scope_id"], function_id, params)
+                expected += (function_id,) + refs
+        if actual != expected:
+            raise WorkspaceError("BINDING_MISMATCH", "Inserted IF did not preserve the requested semantic bindings",
+                                 {"expected": list(expected), "actual": list(actual)})
+        return created
+
     def _populate_constructed_function(self, doc: Document, operation: dict[str, Any]) -> None:
         """Build locals and result within the private candidate transaction."""
         from .typed_expr import expression_tokens, parse_request
@@ -1097,15 +1216,7 @@ class Workspace:
             current_result = doc.statements.get(result_statement_id)
             if current_result is None:
                 raise WorkspaceError("STATEMENT_CREATION_FAILED", "Function result anchor disappeared")
-            at_line = current_result["line"]
-            position = next((i for i, token in enumerate(doc.tokens) if token.line == at_line), None)
-            if position is None:
-                raise WorkspaceError("INVALID_STATEMENT_POSITION", "Could not locate function result anchor")
-            generated = self._new_tokens([("WS", "  " * (indent + 1))] + parts + [("NEWLINE", "\n")])
-            doc.tokens[position:position] = generated
-            self._recolumn(doc)
-            self._index(doc)
-            return generated
+            return self._insert_statement_lines_before(doc, result_statement_id, [(parts, indent + 1)])
 
         def checked_expression(request: Any) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
             resolved = self._resolve_constructor_handles(request, handles)
@@ -1582,6 +1693,14 @@ class Workspace:
                 if not any(row["anchor_token_id"] == target_token.uid for row in candidate.statements.values()):
                     raise WorkspaceError("STATEMENT_CREATION_FAILED", "Inserted assignment did not receive a statement identity")
                 continue
+            elif kind == "insert_typed_if_block":
+                function_id = operation.get("function_id")
+                if not isinstance(function_id, str) or function_id not in candidate.symbols:
+                    raise WorkspaceError("FUNCTION_NOT_FOUND", "Typed IF insertion requires a known function identity")
+                self._insert_typed_if_block_tokens(candidate, function_id,
+                    operation.get("before_statement_id"), operation.get("statement"))
+                self._index(candidate)
+                continue
             else:
                 raise WorkspaceError("UNSUPPORTED_OPERATION", f"Unsupported semantic operation: {kind}")
             self._index(candidate)
@@ -1592,7 +1711,7 @@ class Workspace:
         if any(operation.get("operation") in ("create_numeric_function", "create_string_function",
                                                 "edit_assignment_expression",
                                                 "edit_numeric_literal_at_path",
-                                                "insert_numeric_assignment")
+                                                "insert_numeric_assignment", "insert_typed_if_block")
                for operation in operations):
             from .projection import build_projection_from_document
             build_projection_from_document(self, candidate, candidate.revision)
@@ -1749,6 +1868,13 @@ class Workspace:
             operation["before_statement_id"] = before_statement_id
         return self._transaction(document_id, expected_revision, operation)
 
+    def insert_typed_if_block(self, document_id: str, function_id: str,
+                              before_statement_id: str, statement: dict[str, Any],
+                              expected_revision: int) -> dict[str, Any]:
+        return self._transaction(document_id, expected_revision, {
+            "operation": "insert_typed_if_block", "function_id": function_id,
+            "before_statement_id": before_statement_id, "statement": statement})
+
     def _rename(self, d: Document, symbol_id: str, new_name: str) -> None:
         s = d.symbols.get(symbol_id)
         if not s:
@@ -1886,6 +2012,7 @@ class Workspace:
                 params["document_id"], params["name"], params["upper_bound"], params["expected_revision"]),
             "edit_assignment_expression": lambda: self.edit_assignment_expression(params["document_id"], params["statement_id"], params["expression"], params["expected_revision"]),
             "insert_numeric_assignment": lambda: self.insert_numeric_assignment(params["document_id"], params["function_id"], params["target"], params["expression"], params["expected_revision"], params.get("before_statement_id")),
+            "insert_typed_if_block": lambda: self.insert_typed_if_block(params["document_id"], params["function_id"], params["before_statement_id"], params["statement"], params["expected_revision"]),
             "render_document": lambda: self.render_document(params["document_id"]),
             "get_diagnostics": lambda: self.get_diagnostics(params["document_id"]),
             "get_revision": lambda: self.get_revision(params["document_id"]),
