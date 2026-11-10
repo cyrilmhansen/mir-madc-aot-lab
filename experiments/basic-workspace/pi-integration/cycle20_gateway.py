@@ -108,6 +108,7 @@ class Cycle20Gateway:
             from verified_rename_continuation import verify_rename_continuation
             verified = verify_rename_continuation(Path(verified_rename_continuation_path),
                 Path(continuation_anchor_path), Path(continuation_evidence_root), self.contract_path)
+            self._validate_v3_handles(verified["aliases"])
             adapter_dir = self.output / "verified-continuation-adapter"
             adapter_dir.mkdir(parents=True, exist_ok=True)
             stream = copy.deepcopy(verified["source_stream"])
@@ -214,13 +215,13 @@ class Cycle20Gateway:
         version = contract.get("version")
         if isinstance(version, bool) or not isinstance(version, int):
             raise WorkspaceError("MISSION_CONTRACT_VERSION", "Maintenance contract version must be an integer")
-        expected = required | ({"scope_mode"} if version == 2 else set())
+        expected = required | ({"scope_mode"} if version in (2, 3) else set())
         if set(contract) != expected:
             raise WorkspaceError("MISSION_CONTRACT_INVALID", "Maintenance contract has missing or unsupported fields")
-        if contract["schema"] != "basic-workspace.numeric-literal-maintenance-contract" or version not in (1, 2):
+        if contract["schema"] != "basic-workspace.numeric-literal-maintenance-contract" or version not in (1, 2, 3):
             raise WorkspaceError("MISSION_CONTRACT_VERSION", "Unsupported numeric-literal maintenance contract")
-        if version == 2 and contract["scope_mode"] != "per_target":
-            raise WorkspaceError("MISSION_CONTRACT_SCOPE", "Version 2 contracts require per_target scope")
+        if version in (2, 3) and contract["scope_mode"] != "per_target":
+            raise WorkspaceError("MISSION_CONTRACT_SCOPE", f"Version {version} contracts require per_target scope")
         if (not isinstance(contract["mission_id"], str) or not contract["mission_id"]
                 or not isinstance(contract["objective"], str) or not contract["objective"]):
             raise WorkspaceError("MISSION_CONTRACT_INVALID", "Mission identifier and objective are required")
@@ -237,6 +238,9 @@ class Cycle20Gateway:
         if len(contract["authorized_targets"]) < contract["minimum_edits"]:
             raise WorkspaceError("MISSION_CONTRACT_INVALID", "Authorized target count is below the minimum edit count")
         validation = contract["validation"]
+        if version == 3:
+            Cycle20Gateway._validate_finite_validation_table(validation)
+            return
         if not isinstance(validation, dict) or set(validation) != {"inputs", "functions"}:
             raise WorkspaceError("MISSION_CONTRACT_INVALID", "Validation requires inputs and function oracle declarations")
         if not isinstance(validation["inputs"], list) or not validation["inputs"] or not isinstance(validation["functions"], list) or not validation["functions"]:
@@ -269,6 +273,50 @@ class Cycle20Gateway:
                     raise WorkspaceError("MISSION_CONTRACT_ORACLE", f"Oracle field {field} must be a finite number")
             if spec["kind"] == "clamp" and float(spec["minimum"]) > float(spec["maximum"]):
                 raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Clamp oracle bounds are inverted")
+
+    @staticmethod
+    def _validate_finite_validation_table(validation):
+        """Validate a host-owned finite observation table without interpreting a language."""
+        def finite_number(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            try:
+                return math.isfinite(float(value))
+            except (OverflowError, ValueError):
+                return False
+        if (not isinstance(validation, dict)
+                or set(validation) != {"mode", "inputs", "functions", "expected_results"}
+                or validation.get("mode") != "finite_expected_results"):
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Version 3 validation requires finite_expected_results mode and an exact field set")
+        inputs, functions, rows = (validation["inputs"], validation["functions"], validation["expected_results"])
+        if not isinstance(inputs, list) or not inputs or len(inputs) > 64:
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle input count must be between 1 and 64")
+        for value in inputs:
+            if not finite_number(value):
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle inputs must be finite numbers, not Booleans")
+        if len(set(inputs)) != len(inputs):
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle inputs must be unique")
+        if not isinstance(functions, list) or not functions or len(functions) > 8:
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle must declare between 1 and 8 functions")
+        handles, keys = [], []
+        for item in functions:
+            if not isinstance(item, dict) or set(item) != {"function_handle", "result_key"}:
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle function entries require only function_handle and result_key")
+            handle, key = item["function_handle"], item["result_key"]
+            if not isinstance(handle, str) or not handle or not isinstance(key, str) or not key:
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle function handles and result keys must be nonempty strings")
+            handles.append(handle); keys.append(key)
+        if len(set(handles)) != len(handles) or len(set(keys)) != len(keys):
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle function handles and result keys must be unique")
+        if not isinstance(rows, list) or len(rows) != len(inputs):
+            raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle requires exactly one result row per input")
+        expected_keys = set(keys)
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != expected_keys:
+                raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Each finite oracle row must contain exactly one value for every declared result key")
+            for value in row.values():
+                if not finite_number(value):
+                    raise WorkspaceError("MISSION_CONTRACT_ORACLE", "Finite oracle results must be finite numbers, not Booleans")
 
     def _oracle_value(self, function_handle, argument, active=None):
         active = set() if active is None else active
@@ -390,6 +438,7 @@ class Cycle20Gateway:
         raw = projection_semantics(build_projection(self.ws, self.doc, 3))
         self.aliases = senior.aliases_for_new_function(raw, self.aliases, "IS_PASSING", second["portable_handle"])
         self.baseline = senior.normalized_state(raw, self.aliases)
+        self._validate_v3_handles(self.aliases)
         if self.baseline != commit[0].get("semantic_snapshot"):
             raise WorkspaceError("BASELINE_SEMANTIC_MISMATCH", "Full replay differs from the genuine committed revision-3 snapshot")
         if revision2_baseline.get("revision") != 2 or revision2_baseline.get("semantic_fingerprint") != checkpoint.get("semantic_fingerprint"):
@@ -670,6 +719,7 @@ class Cycle20Gateway:
         if sorted(self.aliases) != sorted(stream.get("portable_handles", [])):
             raise WorkspaceError("BASELINE_HANDLE_SET_MISMATCH", "Active portable handles do not match the stream ledger")
         self.base_revision = revision
+        self._validate_v3_handles(self.aliases)
         self.baseline_observed = self._run_observations(self.ws, self.doc, revision, self.aliases)
         if self.baseline_observed["interp"] != self.baseline_observed["jit"]:
             raise WorkspaceError("BASELINE_ENGINE_MISMATCH", "Baseline interpreter and JIT observations differ")
@@ -734,11 +784,20 @@ class Cycle20Gateway:
         handles = set(self.aliases)
         if not set(self.contract["allowed_function_handles"] + self.contract["unchanged_function_handles"]).issubset(handles):
             raise WorkspaceError("MISSION_CONTRACT_HANDLE", "Contract contains a missing portable function handle")
+        self._validate_v3_handles(self.aliases)
         expected_edges = sorted([{"caller": edge["caller_handle"], "callee": edge["callee_handle"]}
             for edge in self.contract["required_dependency_edges"]], key=lambda row: (row["caller"], row["callee"]))
         if self._dependency_edges(self.baseline) != expected_edges:
             raise WorkspaceError("MISSION_CONTRACT_DEPENDENCY", "Baseline dependency bindings do not satisfy the contract")
         self._validate_unchanged_functions(self.baseline)
+
+    def _validate_v3_handles(self, aliases):
+        if self.contract["version"] != 3:
+            return
+        validation_handles = {item["function_handle"] for item in self.contract["validation"]["functions"]}
+        if not validation_handles.issubset(set(aliases)):
+            raise WorkspaceError("MISSION_CONTRACT_HANDLE",
+                "Finite oracle refers to a function absent from the authenticated Workspace")
 
     def _validate_unchanged_functions(self, state):
         for handle in self.contract["unchanged_function_handles"]:
@@ -758,6 +817,11 @@ class Cycle20Gateway:
         return results
 
     def _expected_observations(self):
+        if self.contract["version"] == 3:
+            validation = self.contract["validation"]
+            return {engine: {str(value): dict(row)
+                for value, row in zip(validation["inputs"], validation["expected_results"])}
+                for engine in ("interp", "jit")}
         return {engine: {str(value): {item["result_key"]: self._oracle_value(item["function_handle"], value)
             for item in self.contract["validation"]["functions"]}
             for value in self.contract["validation"]["inputs"]} for engine in ("interp", "jit")}
