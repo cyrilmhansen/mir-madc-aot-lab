@@ -1,0 +1,5 @@
+# Deterministic bridge run attempts
+
+Attempt directories under `production-bridge-attempt-*` are preserved verbatim. The first attempts exposed runner issues, not semantic transaction failures: attempt 01 stopped before launch because the maintenance evidence directory was missing; attempt 02 authenticated and reconstructed but the runner expected an unpublished readiness field; attempt 03 exposed a nested-schema summary bug; attempt 04 exposed a missing local helper; attempt 05 completed Mission A but Mission B stopped before rename because its directory was absent; attempt 06 completed both mutation paths but final summary extraction assumed a `portable_handles` field not returned by Cycle36. The runner corrections are in `cycle38_preflight.py`.
+
+Attempt 07 is the complete paired run and the only run summarized as full mission success. No earlier attempt is deleted or altered. These failures had no model activity; every incomplete path stopped before the affected unauthorized mutation or before a commit.
