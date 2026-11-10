@@ -1,0 +1,1275 @@
+{
+  "ok": true,
+  "stage": "extension_to_gateway",
+  "active_tools": [
+    "workspace_discover_functions",
+    "workspace_inspect_program",
+    "workspace_commit_preview",
+    "workspace_validate_mission",
+    "workspace_preview_function"
+  ],
+  "schemas": [
+    {
+      "name": "workspace_discover_functions",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "workspace_inspect_program",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "workspace_preview_function",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "expected_revision",
+          "name",
+          "parameters",
+          "body"
+        ],
+        "properties": {
+          "expected_revision": {
+            "type": "integer"
+          },
+          "callee_handle": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 8
+          },
+          "body": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "kind",
+                    "target",
+                    "expression"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "assign"
+                    },
+                    "target": {
+                      "type": "object",
+                      "required": [
+                        "kind"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "result"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "expression": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "value"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "number"
+                            },
+                            "value": {
+                              "type": "number"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "name"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "local_ref"
+                            },
+                            "name": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "kind",
+                    "condition",
+                    "then"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "if"
+                    },
+                    "condition": {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "operator",
+                        "left",
+                        "right"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "binary"
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "+",
+                            "-",
+                            "*",
+                            "/",
+                            "=",
+                            "<>",
+                            "<",
+                            "<=",
+                            ">",
+                            ">="
+                          ]
+                        },
+                        "left": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "required": [
+                                    "kind",
+                                    "value"
+                                  ],
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "number"
+                                    },
+                                    "value": {
+                                      "type": "number"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "required": [
+                                    "kind",
+                                    "name"
+                                  ],
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "local_ref"
+                                    },
+                                    "name": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "required": [
+                                "kind",
+                                "function_handle",
+                                "arguments"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "call"
+                                },
+                                "function_handle": {
+                                  "type": "string"
+                                },
+                                "arguments": {
+                                  "type": "array",
+                                  "items": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "kind",
+                                          "value"
+                                        ],
+                                        "properties": {
+                                          "kind": {
+                                            "type": "string",
+                                            "const": "number"
+                                          },
+                                          "value": {
+                                            "type": "number"
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "kind",
+                                          "name"
+                                        ],
+                                        "properties": {
+                                          "kind": {
+                                            "type": "string",
+                                            "const": "local_ref"
+                                          },
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      }
+                                    ]
+                                  },
+                                  "minItems": 1,
+                                  "maxItems": 8
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "right": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "required": [
+                                    "kind",
+                                    "value"
+                                  ],
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "number"
+                                    },
+                                    "value": {
+                                      "type": "number"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "required": [
+                                    "kind",
+                                    "name"
+                                  ],
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "local_ref"
+                                    },
+                                    "name": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "required": [
+                                "kind",
+                                "function_handle",
+                                "arguments"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "call"
+                                },
+                                "function_handle": {
+                                  "type": "string"
+                                },
+                                "arguments": {
+                                  "type": "array",
+                                  "items": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "kind",
+                                          "value"
+                                        ],
+                                        "properties": {
+                                          "kind": {
+                                            "type": "string",
+                                            "const": "number"
+                                          },
+                                          "value": {
+                                            "type": "number"
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "required": [
+                                          "kind",
+                                          "name"
+                                        ],
+                                        "properties": {
+                                          "kind": {
+                                            "type": "string",
+                                            "const": "local_ref"
+                                          },
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "additionalProperties": false
+                                      }
+                                    ]
+                                  },
+                                  "minItems": 1,
+                                  "maxItems": 8
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "then": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "kind",
+                          "target",
+                          "expression"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "assign"
+                          },
+                          "target": {
+                            "type": "object",
+                            "required": [
+                              "kind"
+                            ],
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "const": "result"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "expression": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "number"
+                                  },
+                                  "value": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "required": [
+                                  "kind",
+                                  "name"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "local_ref"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "maxItems": 64
+                    },
+                    "else": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "kind",
+                          "target",
+                          "expression"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "assign"
+                          },
+                          "target": {
+                            "type": "object",
+                            "required": [
+                              "kind"
+                            ],
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "const": "result"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "expression": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "number"
+                                  },
+                                  "value": {
+                                    "type": "number"
+                                  }
+                                },
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "required": [
+                                  "kind",
+                                  "name"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "local_ref"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "maxItems": 64
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 64
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workspace_commit_preview",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "transaction_id"
+        ],
+        "properties": {
+          "transaction_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workspace_validate_mission",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "expected_revision"
+        ],
+        "properties": {
+          "expected_revision": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+  "schema_ok": true,
+  "discovery": {
+    "revision": 3,
+    "functions": [
+      {
+        "handle": "case014_level1.function",
+        "symbol_id": "sym_2ad5676d3ac8478881c8a712249e665e",
+        "name": "CASE014_L1",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      },
+      {
+        "handle": "case014_level2.function",
+        "symbol_id": "sym_28f753caebbd45ed9c8a5a75a3c32350",
+        "name": "CASE014_L2",
+        "parameter_count": 1,
+        "parameter_names": [
+          "X"
+        ],
+        "return_type": "numeric"
+      }
+    ]
+  },
+  "inspection": {
+    "revision": 3,
+    "structure": {
+      "functions": [
+        {
+          "handle": "case014_level1.function",
+          "name": "CASE014_L1",
+          "parameters": [
+            "case014_level1.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "assignment",
+              "statement_handle": "case014_level1.statement.0",
+              "target_handle": "case014_level1.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "number",
+                "value": 0,
+                "children": []
+              }
+            },
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": ">=",
+                "children": [
+                  {
+                    "kind": "variable",
+                    "value": "case014_level1.parameter.id",
+                    "children": []
+                  },
+                  {
+                    "kind": "number",
+                    "value": 17,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "case014_level1.statement.1",
+                  "target_handle": "case014_level1.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                }
+              ],
+              "else": []
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "case014_level1.statement.2",
+              "target_handle": "case014_level1.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        },
+        {
+          "handle": "case014_level2.function",
+          "name": "CASE014_L2",
+          "parameters": [
+            "case014_level2.parameter.id"
+          ],
+          "locals": [],
+          "local_types": [],
+          "return_type": "numeric",
+          "arrays": [],
+          "statements": [
+            {
+              "kind": "assignment",
+              "statement_handle": "case014_level2.statement.0",
+              "target_handle": "case014_level2.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "number",
+                "value": 0,
+                "children": []
+              }
+            },
+            {
+              "kind": "if",
+              "condition": {
+                "kind": "compare",
+                "value": ">=",
+                "children": [
+                  {
+                    "kind": "call",
+                    "value": "case014_level1.function",
+                    "children": [
+                      {
+                        "kind": "variable",
+                        "value": "case014_level2.parameter.id",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "kind": "assignment",
+                  "statement_handle": "case014_level2.statement.1",
+                  "target_handle": "case014_level2.function",
+                  "target_is_result": true,
+                  "target_index": null,
+                  "expression": {
+                    "kind": "number",
+                    "value": 1,
+                    "children": []
+                  }
+                }
+              ],
+              "else": []
+            },
+            {
+              "kind": "assignment",
+              "statement_handle": "case014_level2.statement.2",
+              "target_handle": "case014_level2.function",
+              "target_is_result": true,
+              "target_index": null,
+              "expression": {
+                "kind": "result",
+                "value": null,
+                "children": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "code": null
+  },
+  "controls": [
+    {
+      "ok": false,
+      "reliable": true,
+      "code": "STALE_REVISION",
+      "message": "Expected revision 2, current revision 3",
+      "revision": 3,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "reliable": true,
+      "code": "MISSION_SIGNATURE",
+      "message": "Mission permits only CASE014_L3(X)",
+      "revision": 3,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    },
+    {
+      "ok": false,
+      "reliable": true,
+      "code": "MISSION_DEPENDENCY_REQUIRED",
+      "message": "Calls must bind to every required discovered function and no others",
+      "revision": 3,
+      "revision_unchanged": true,
+      "authoritative_workspace_changed": false
+    }
+  ],
+  "schema_rejections": [
+    {
+      "index": 3,
+      "arguments": {
+        "expected_revision": 3,
+        "name": "CASE014_L3",
+        "parameters": [
+          "X"
+        ],
+        "body": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "number",
+              "value": 0
+            }
+          },
+          {
+            "kind": "if",
+            "condition": {
+              "kind": "binary",
+              "operator": ">=",
+              "left": {
+                "kind": "call",
+                "function_handle": "case014_level2.function",
+                "arguments": [
+                  {
+                    "kind": "local_ref",
+                    "name": "X"
+                  }
+                ]
+              },
+              "right": {
+                "kind": "number",
+                "value": 1
+              }
+            },
+            "then": [
+              {
+                "kind": "assign",
+                "target": {
+                  "kind": "result"
+                },
+                "expression": {
+                  "kind": "number",
+                  "value": 1
+                }
+              }
+            ]
+          }
+        ],
+        "unknown_semantic_field": true
+      },
+      "errors": [
+        {
+          "message": "schema is false"
+        },
+        {
+          "message": "must not have additional properties"
+        }
+      ]
+    }
+  ],
+  "preview": {
+    "ok": true,
+    "transaction_id": "tx_ff5d276536a24d47a185b4bd2c710892",
+    "base_revision": 3,
+    "expected_result_revision": 4,
+    "portable_handle": "case014_level3.function",
+    "bound_callee_handle": "case014_level2.function",
+    "bound_callee_handles": [
+      "case014_level2.function"
+    ],
+    "diagnostics": {
+      "error_count": 0,
+      "warning_count": 0,
+      "new": []
+    },
+    "candidate_is_preview_only": true
+  },
+  "committed": {
+    "ok": true,
+    "committed": true,
+    "revision": 4,
+    "portable_handle": "case014_level3.function",
+    "bound_callee_handle": "case014_level2.function",
+    "bound_callee_handles": [
+      "case014_level2.function"
+    ],
+    "created_entities": [
+      {
+        "symbol_id": "sym_176dff76c8344e959512bb57c1fc9c83",
+        "kind": "function",
+        "name": "CASE014_L3",
+        "scope_id": "module",
+        "document_id": "doc_5d491fce5cea42ddb2fe56967b19b835",
+        "declaration_token_id": "t_da0804a08af449febf7237bf9ff3082f",
+        "line": 15,
+        "implicit": false,
+        "reference_count": 4
+      },
+      {
+        "symbol_id": "sym_290e9d5117024c2bbb86b2e533577ac3",
+        "kind": "parameter",
+        "name": "X",
+        "scope_id": "scope_179de7cb2f694ce2bb6c65d019402cff",
+        "document_id": "doc_5d491fce5cea42ddb2fe56967b19b835",
+        "declaration_token_id": "t_814c11b3596945828010194ff9d23250",
+        "line": 15,
+        "implicit": false,
+        "reference_count": 1
+      }
+    ]
+  },
+  "duplicate_commit": null,
+  "validation": {
+    "schema": "basic-workspace.creation-sequence-validation",
+    "version": 1,
+    "mission_id": "cycle39.case-014.production.03",
+    "actor": "pi_tool",
+    "reliable": true,
+    "revision": 4,
+    "requested_revision": 4,
+    "executed_revision": 4,
+    "observed_results": {
+      "interp": {
+        "0": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "7": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "8": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "9": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "17": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "18": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "19": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "29": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "30": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "-11": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "-1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        }
+      },
+      "jit": {
+        "0": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "7": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "8": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "9": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "17": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "18": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "19": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "29": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "30": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "-11": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "-1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        }
+      }
+    },
+    "expected_results": {
+      "interp": {
+        "0": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "7": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "8": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "9": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "17": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "18": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "19": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "29": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "30": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "-1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "-11": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        }
+      },
+      "jit": {
+        "0": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "7": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "8": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "9": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "17": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "18": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "19": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "29": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "30": {
+          "case014_l1": 1,
+          "case014_l2": 1,
+          "case014_l3": 1
+        },
+        "-1": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        },
+        "-11": {
+          "case014_l1": 0,
+          "case014_l2": 0,
+          "case014_l3": 0
+        }
+      }
+    },
+    "expectation_source": "independent host-owned creation-sequence finite oracle",
+    "values_match": true,
+    "engines_agree": true,
+    "existing_functions_unchanged": true,
+    "dependency_edges": [
+      {
+        "caller": "case014_level2.function",
+        "callee": "case014_level1.function"
+      },
+      {
+        "caller": "case014_level3.function",
+        "callee": "case014_level2.function"
+      }
+    ],
+    "required_dependency_edges": [
+      {
+        "caller": "case014_level2.function",
+        "callee": "case014_level1.function"
+      },
+      {
+        "caller": "case014_level3.function",
+        "callee": "case014_level2.function"
+      }
+    ],
+    "dependencies_match": true,
+    "new_function_signature_valid": true,
+    "mission_complete": true,
+    "replay": {
+      "structural_equivalence": true,
+      "binding_equivalence": true,
+      "behavioral_equivalence": true,
+      "engine_agreement": true,
+      "identity_remappings": 15,
+      "identity_mapping": [
+        {
+          "portable_handle": "case014_level1.function",
+          "committed_workspace_id": "sym_2ad5676d3ac8478881c8a712249e665e",
+          "replay_workspace_id": "sym_6252d09e4ba745f58abd06d487f10392",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level1.parameter.id",
+          "committed_workspace_id": "sym_66a5cad1896c4263b98ab26f6ce02e9a",
+          "replay_workspace_id": "sym_df7de1c5564043048ea74bbbe8b4fa45",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level1.statement.0",
+          "committed_workspace_id": "stmt_ffbb8da7e26c433981516fbd7211cb73",
+          "replay_workspace_id": "stmt_3a6bbc61d6424c779bd8b935ccc7e740",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level1.statement.1",
+          "committed_workspace_id": "stmt_2b41e860a60f44b697251bb8a07d5d72",
+          "replay_workspace_id": "stmt_fd619d0d6382467da4e8cd8e6a546c31",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level1.statement.2",
+          "committed_workspace_id": "stmt_0e26d98aced6419cac34a2ffe9bc4924",
+          "replay_workspace_id": "stmt_437c2b2f902a48d28e23708598831aab",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level2.function",
+          "committed_workspace_id": "sym_28f753caebbd45ed9c8a5a75a3c32350",
+          "replay_workspace_id": "sym_94772c5d4933414fa735a620ceac15b4",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level2.parameter.id",
+          "committed_workspace_id": "sym_b0dc6ed21ba746d39c6cee48a0535b5f",
+          "replay_workspace_id": "sym_a803ba453d2746b3a7a78a12014a6881",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level2.statement.0",
+          "committed_workspace_id": "stmt_eccec82e09944260a70e64f3728015d7",
+          "replay_workspace_id": "stmt_4610bd19696448da9d72d758f51da7ec",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level2.statement.1",
+          "committed_workspace_id": "stmt_e56a6563e5124052b73f7f9d304041c1",
+          "replay_workspace_id": "stmt_49aed0ee2b104622a8577792debd3526",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level2.statement.2",
+          "committed_workspace_id": "stmt_b9e7caa6bba643839f981adfe0b8dd06",
+          "replay_workspace_id": "stmt_971fec6dd84e4af4aa95de8199c85918",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level3.function",
+          "committed_workspace_id": "sym_176dff76c8344e959512bb57c1fc9c83",
+          "replay_workspace_id": "sym_9b57b8ae1c8847ecb0534768a6da9a8a",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level3.parameter.id",
+          "committed_workspace_id": "sym_290e9d5117024c2bbb86b2e533577ac3",
+          "replay_workspace_id": "sym_c2e74c3cf2db4105a3849a830bbd5084",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level3.statement.0",
+          "committed_workspace_id": "stmt_8c828d0ca2d6457687e86b6ba98bee69",
+          "replay_workspace_id": "stmt_1ba2166d156a429bab8a906ce87778c9",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level3.statement.1",
+          "committed_workspace_id": "stmt_afdb9b333f66463bbb0cd27bdbcd47ca",
+          "replay_workspace_id": "stmt_3879641025f145be888489a0a7930673",
+          "remapped": true
+        },
+        {
+          "portable_handle": "case014_level3.statement.2",
+          "committed_workspace_id": "stmt_a576fc562711438bac9b73c792f5fd66",
+          "replay_workspace_id": "stmt_ca4a2698a26541c7b1957362ccd27515",
+          "remapped": true
+        }
+      ],
+      "passed": true
+    },
+    "diagnostics": []
+  }
+}
