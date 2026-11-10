@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Two-mission, empty-document semantic gateway for Cycle 19."""
 from __future__ import annotations
-import argparse, copy, importlib.util, json, math, sys, threading, time, uuid
+import argparse, copy, hashlib, importlib.util, json, math, sys, threading, time, uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +27,13 @@ INPUTS=(-100,-1,0,1,59,60,99,100,101,200)
 class Cycle19Gateway:
     def __init__(self, output:Path, resume_from:Path|None=None, *, creation_contract_path:Path|None=None,
                  seed_contract_path:Path|None=None, baseline_stream_path:Path|None=None,
-                 baseline_history_path:Path|None=None, baseline_validation_path:Path|None=None):
-        self.output=output; output.mkdir(parents=True,exist_ok=True)
+                 baseline_history_path:Path|None=None, baseline_validation_path:Path|None=None,
+                 creation_sequence_path:Path|None=None, sequence_stream_path:Path|None=None,
+                 sequence_checkpoint_path:Path|None=None):
+        self.output=output; output.mkdir(parents=True,exist_ok=True); self.sequence_mode=False
+        if creation_sequence_path is not None:
+            self._init_creation_sequence(creation_sequence_path, sequence_stream_path, sequence_checkpoint_path)
+            return
         if creation_contract_path is not None:
             self._init_from_verified_stream(creation_contract_path,seed_contract_path,
                 baseline_stream_path,baseline_history_path,baseline_validation_path)
@@ -65,6 +70,309 @@ class Cycle19Gateway:
                 "mission_status":"Mission 1 pending · empty committed revision 1","dependencies":[]})
         else:
             self._resume_from_cycle19(resume_from)
+
+    @staticmethod
+    def _validate_creation_sequence(contract):
+        required={"schema","version","sequence_id","objective","execution_profile_id","starting_revision","maximum_steps","steps"}
+        if not isinstance(contract,dict) or set(contract)!=required:
+            raise WorkspaceError("SEQUENCE_CONTRACT_INVALID","Creation sequence has missing or unsupported fields")
+        version=contract["version"]
+        if isinstance(version,bool) or not isinstance(version,int) or version!=1 or contract["schema"]!="basic-workspace.numeric-function-creation-sequence":
+            raise WorkspaceError("SEQUENCE_CONTRACT_VERSION","Unsupported numeric function creation sequence")
+        if not isinstance(contract["sequence_id"],str) or not contract["sequence_id"] or not isinstance(contract["objective"],str) or not contract["objective"]:
+            raise WorkspaceError("SEQUENCE_CONTRACT_INVALID","Sequence identifier and objective are required")
+        if (contract["execution_profile_id"]!=PROFILE_ID or isinstance(contract["starting_revision"],bool)
+                or not isinstance(contract["starting_revision"],int) or contract["starting_revision"]!=1):
+            raise WorkspaceError("SEQUENCE_CONTRACT_PROFILE","Creation sequences must start from an empty revision-1 Workspace using the configured profile")
+        if isinstance(contract["maximum_steps"],bool) or not isinstance(contract["maximum_steps"],int) or not 1<=contract["maximum_steps"]<=8:
+            raise WorkspaceError("SEQUENCE_CONTRACT_LIMIT","maximum_steps must be an integer from 1 through 8")
+        steps=contract["steps"]
+        if not isinstance(steps,list) or not 1<=len(steps)<=contract["maximum_steps"]:
+            raise WorkspaceError("SEQUENCE_CONTRACT_STEPS","Sequence must contain a bounded nonempty ordered step list")
+        step_fields={"step_id","mission_id","expected_base_revision","function","required_callees",
+            "required_dependency_edges","required_existing_function_handles_unchanged","validation"}
+        step_ids=set(); mission_ids=set(); function_handles=set(); function_names=set(); all_names=[]
+        for index,step in enumerate(steps):
+            if not isinstance(step,dict) or set(step)!=step_fields:
+                raise WorkspaceError("SEQUENCE_STEP_INVALID",f"Step {index} has missing or unsupported fields")
+            if not isinstance(step["step_id"],str) or not step["step_id"] or step["step_id"] in step_ids:
+                raise WorkspaceError("SEQUENCE_STEP_ID","Step IDs must be unique nonempty strings")
+            if not isinstance(step["mission_id"],str) or not step["mission_id"] or step["mission_id"] in mission_ids:
+                raise WorkspaceError("SEQUENCE_MISSION_ID","Mission IDs must be unique nonempty strings")
+            step_ids.add(step["step_id"]); mission_ids.add(step["mission_id"])
+            revision=step["expected_base_revision"]
+            if isinstance(revision,bool) or not isinstance(revision,int) or revision!=contract["starting_revision"]+index:
+                raise WorkspaceError("SEQUENCE_REVISION_ORDER",f"Step {step['step_id']} must start at revision {contract['starting_revision']+index}")
+            fn=step["function"]
+            if not isinstance(fn,dict) or set(fn)!={"name","portable_handle","parameters","return_type"}:
+                raise WorkspaceError("SEQUENCE_FUNCTION_INVALID","Each step requires name, portable handle, parameters and return type")
+            name,handle,parameters=fn["name"],fn["portable_handle"],fn["parameters"]
+            if not isinstance(name,str) or not name.isidentifier() or name.casefold() in function_names:
+                raise WorkspaceError("SEQUENCE_FUNCTION_NAME","Function names must be unique nonempty strings")
+            if (not isinstance(handle,str) or not handle.endswith(".function") or
+                    not handle[:-9].isidentifier() or handle in function_handles):
+                raise WorkspaceError("SEQUENCE_FUNCTION_HANDLE","Each function requires a unique portable .function handle")
+            if (fn["return_type"]!="numeric" or not isinstance(parameters,list) or len(parameters)!=1 or
+                    not isinstance(parameters[0],str) or not parameters[0].isidentifier()):
+                raise WorkspaceError("SEQUENCE_FUNCTION_SIGNATURE","Only one-parameter numeric functions are supported")
+            if parameters[0].endswith("$"):
+                raise WorkspaceError("SEQUENCE_FUNCTION_SIGNATURE","Function parameters must be numeric")
+            function_names.add(name.casefold()); function_handles.add(handle); all_names.append(name.casefold())
+            callees=step["required_callees"]
+            if (not isinstance(callees,list) or any(not isinstance(x,str) for x in callees) or
+                    len(callees)!=len(set(callees)) or any(x not in function_handles-{handle} for x in callees)):
+                raise WorkspaceError("SEQUENCE_DEPENDENCY_ORDER","Required callees must be unique functions created by earlier steps")
+            edges=step["required_dependency_edges"]
+            if not isinstance(edges,list):
+                raise WorkspaceError("SEQUENCE_DEPENDENCY_INVALID","required_dependency_edges must be an array")
+            edge_set=set()
+            for edge in edges:
+                if (not isinstance(edge,dict) or set(edge)!={"caller_handle","callee_handle"} or
+                        edge["caller_handle"]!=handle or not isinstance(edge["callee_handle"],str) or edge["callee_handle"] not in callees):
+                    raise WorkspaceError("SEQUENCE_DEPENDENCY_INVALID","Each declared edge must originate at this new function and target a required earlier callee")
+                edge_set.add((edge["caller_handle"],edge["callee_handle"]))
+            if edge_set!={(handle,callee) for callee in callees}:
+                raise WorkspaceError("SEQUENCE_DEPENDENCY_INVALID","Every required callee needs exactly one declared dependency edge")
+            unchanged=step["required_existing_function_handles_unchanged"]
+            expected_prior=[row["function"]["portable_handle"] for row in steps[:index]]
+            if unchanged!=expected_prior:
+                raise WorkspaceError("SEQUENCE_INVARIANT_INVALID","Each step must preserve every function from the completed prefix in order")
+            validation=step["validation"]
+            if not isinstance(validation,dict) or set(validation)!={"inputs","expected_results"}:
+                raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Each step requires finite inputs and independent expected results")
+            inputs=validation["inputs"]
+            if not isinstance(inputs,list) or not inputs:
+                raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Validation inputs must be a nonempty array")
+            input_keys=[]
+            for value in inputs:
+                if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(float(value)):
+                    raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Validation inputs must be finite numbers")
+                input_keys.append(str(value))
+            if len(set(input_keys))!=len(input_keys):
+                raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Validation inputs must be unique")
+            expected=validation["expected_results"]
+            if not isinstance(expected,dict) or set(expected)!=set(input_keys):
+                raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Expected result rows must match the exact input corpus")
+            expected_names=set(all_names)
+            for row in expected.values():
+                if not isinstance(row,dict) or set(row)!=expected_names:
+                    raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Every oracle row must report every function present at this revision")
+                for value in row.values():
+                    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(float(value)):
+                        raise WorkspaceError("SEQUENCE_VALIDATION_INVALID","Expected results must be finite numbers")
+        return copy.deepcopy(contract)
+
+    @staticmethod
+    def _sequence_fingerprint(contract):
+        payload=json.dumps(contract,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    def _init_creation_sequence(self,sequence_path,stream_path=None,checkpoint_path=None):
+        sequence_path=Path(sequence_path).resolve()
+        self.sequence_contract=self._validate_creation_sequence(json.loads(sequence_path.read_text(encoding="utf-8")))
+        self.sequence_path=sequence_path
+        self.sequence_fingerprint=self._sequence_fingerprint(self.sequence_contract)
+        self.sequence_mode=True; self.sequence_cursor=0; self.sequence_complete=False
+        self.sequence_completed=[]; self.sequence_checkpoints=[]; self.last_sequence_checkpoint=None
+        self.ws=Workspace(); self.doc=self.ws.create_empty_document("memory://cycle35/empty.bas")["document_id"]
+        self.aliases={}; self.trace=age.Trace(); self.lock=threading.RLock()
+        self.transactions=SemanticTransactionKernel(self.ws,self.doc); self.dispatched={}
+        self.revision=self.ws.get_revision(self.doc); self.phase=3; self.resume_verification=None
+        self.pi_seen=set(); self.presentation_seq=0; self.committed_operations=[]; self.completed_missions=[]
+        self.last_validation=None; self.session_id=f"{self.sequence_contract['sequence_id']}-step-01"
+        self.base_snapshot={"functions":[]}; self.base_aliases={}; self.discovered=set(); self.committed=False
+        self.current_contract=None; self.current_step=None; self.mission_specs={}
+        self.mission_title=self.sequence_contract["objective"]
+        self.visual_events=self.output/"visual-events.jsonl"; self.gateway_timings=self.output/"gateway-tool-timings.jsonl"
+        self.pi_events=self.output/"pi-tool-lifecycle.jsonl"
+        self.initial={"revision":1,"code":"","dependencies":[]}
+        self.write_json("execution-profile.json",json.loads((ROOT/"results/semantic-replay/execution-profile.json").read_text()))
+        self.write_json("creation-sequence.json",self.sequence_contract)
+        if stream_path is not None or checkpoint_path is not None:
+            if stream_path is None or checkpoint_path is None:
+                raise WorkspaceError("SEQUENCE_RECOVERY_EVIDENCE","Resume requires both a constructive prefix and a checkpoint")
+            self._reconstruct_creation_sequence_prefix(Path(stream_path),Path(checkpoint_path))
+        else:
+            self._activate_creation_step(0)
+            (self.output/"setup.jsonl").write_text(json.dumps({"kind":"empty_workspace_created","revision":1,
+                "function_count":0,"host_inserted_program_logic":False,"sequence_id":self.sequence_contract["sequence_id"]},separators=(",",":"))+"\n")
+        self.write_json("visual-source.json",{"schema":"basic-workspace.visual-source","version":1,
+            "campaign":{"id":self.sequence_contract["sequence_id"],"title":self.sequence_contract["objective"],"filename":"PROGRAM.bas"},
+            "initial":self.initial,"snapshots":{str(self.ws.get_revision(self.doc)):self.code()}})
+
+    def _activate_creation_step(self,index):
+        if index<0 or index>=len(self.sequence_contract["steps"]):
+            self.sequence_cursor=len(self.sequence_contract["steps"]); self.sequence_complete=True
+            self.current_step=None; self.current_contract=None; self.committed=True
+            return
+        step=self.sequence_contract["steps"][index]; fn=step["function"]
+        self.sequence_cursor=index; self.sequence_complete=False; self.phase=3+index
+        self.current_step=step
+        self.current_contract={"mission_id":step["mission_id"],"name":fn["name"],"handle":fn["portable_handle"],
+            "parameter":fn["parameters"][0],"parameters":list(fn["parameters"]),"return_type":fn["return_type"],
+            "callee":step["required_callees"][0] if len(step["required_callees"])==1 else None,
+            "required_callees":list(step["required_callees"]),"required_dependency_edges":[
+                {"caller":edge["caller_handle"],"callee":edge["callee_handle"]}
+                for edge in step["required_dependency_edges"]],
+            "required_existing_function_handles_unchanged":list(step["required_existing_function_handles_unchanged"]),
+            "objective":self.sequence_contract["objective"],"validation":copy.deepcopy(step["validation"])}
+        self.mission_specs[self.phase]=self.current_contract
+        self.mission_title=f"Creation sequence · {index+1}/{len(self.sequence_contract['steps'])} · {fn['name']}"
+        self.session_id=f"{self.sequence_contract['sequence_id']}-step-{index+1:02d}"
+        self.revision=self.ws.get_revision(self.doc)
+        if self.revision!=step["expected_base_revision"]:
+            raise WorkspaceError("SEQUENCE_REVISION_MISMATCH",f"Step {step['step_id']} expected revision {step['expected_base_revision']}, current revision is {self.revision}")
+        self.base_snapshot=self._normalized() if self.aliases else {"functions":[]}
+        self.base_aliases=dict(self.aliases); self.discovered=set(); self.transactions.clear(); self.committed=False
+        self.last_validation=None; self.last_sequence_checkpoint=None
+
+    def _reconstruct_creation_sequence_prefix(self,stream_path,checkpoint_path):
+        stream=json.loads(stream_path.read_text(encoding="utf-8")); checkpoint=json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if not isinstance(stream,dict) or set(stream)!={"schema","version","execution_profile_id","portable_handles","operations"}:
+            raise WorkspaceError("SEQUENCE_RECOVERY_STREAM","Prefix stream has missing or unsupported fields")
+        if stream["schema"]!="basic-workspace.constructive-metafile" or stream["version"]!=1 or stream["execution_profile_id"]!=PROFILE_ID:
+            raise WorkspaceError("SEQUENCE_RECOVERY_STREAM","Prefix stream uses an unsupported schema or execution profile")
+        completed=checkpoint.get("completed_steps") if isinstance(checkpoint,dict) else None
+        if not isinstance(completed,list) or not 1<=len(completed)<len(self.sequence_contract["steps"]):
+            raise WorkspaceError("SEQUENCE_RECOVERY_CHECKPOINT","Resume checkpoint must identify a nonempty incomplete sequence prefix")
+        prefix_length=len(completed); operations=stream["operations"]
+        if not isinstance(operations,list) or len(operations)!=prefix_length:
+            raise WorkspaceError("SEQUENCE_RECOVERY_PREFIX","Operation count does not match the claimed completed prefix")
+        for index,(operation,step,completion) in enumerate(zip(operations,self.sequence_contract["steps"],completed)):
+            if (not isinstance(completion,dict) or set(completion)!={"step_id","mission_id","revision","validated"}
+                    or completion!={"step_id":step["step_id"],"mission_id":step["mission_id"],
+                        "revision":step["expected_base_revision"]+1,"validated":True}):
+                raise WorkspaceError("SEQUENCE_RECOVERY_CHECKPOINT",f"Checkpoint completion row {index} does not match the ordered contract prefix")
+            if not isinstance(operation,dict) or operation.get("operation")!="create_numeric_function" or operation.get("portable_handle")!=step["function"]["portable_handle"]:
+                raise WorkspaceError("SEQUENCE_RECOVERY_ORDER","Constructive prefix does not follow the configured step order")
+            args=operation.get("arguments")
+            if not isinstance(args,dict) or args.get("name")!=step["function"]["name"] or args.get("parameters")!=step["function"]["parameters"]:
+                raise WorkspaceError("SEQUENCE_RECOVERY_SIGNATURE","Recorded constructor differs from the configured step signature")
+        expected_handles=set(stream.get("portable_handles",[]))
+        if len(expected_handles)!=len(stream.get("portable_handles",[])) or stream.get("retired_handles",[]) not in (None,[]):
+            raise WorkspaceError("SEQUENCE_RECOVERY_IDENTITIES","Creation-only prefix has duplicate or retired portable identities")
+        replay=replay_constructive_stream(self.ws,self.doc,operations,expected_final_handles=sorted(expected_handles),
+            expected_start_revision=1)
+        expected_function_handles={step["function"]["portable_handle"] for step in self.sequence_contract["steps"][:prefix_length]}
+        actual_function_handles={handle for handle in replay.live_handles if handle.endswith(".function")}
+        if actual_function_handles!=expected_function_handles or replay.revision!=1+prefix_length:
+            raise WorkspaceError("SEQUENCE_RECOVERY_IDENTITIES","Replayed prefix function handles or revision differ from contract")
+        self.aliases=dict(replay.live_handles); self.committed_operations=copy.deepcopy(operations)
+        self.sequence_completed=copy.deepcopy(completed); self.completed_missions=copy.deepcopy(completed)
+        for index in range(prefix_length):
+            self._verify_sequence_revision(index,index)
+        normalized=self._normalized()
+        if set(checkpoint)!={"schema","version","sequence_id","sequence_fingerprint","completed_steps","active_step_id",
+                "revision","semantic_fingerprint","portable_handles","function_signatures","dependencies","last_validation"}:
+            raise WorkspaceError("SEQUENCE_RECOVERY_CHECKPOINT","Checkpoint contains missing or unsupported fields")
+        if checkpoint["schema"]!="basic-workspace.creation-sequence-checkpoint" or checkpoint["version"]!=1:
+            raise WorkspaceError("SEQUENCE_RECOVERY_CHECKPOINT","Unsupported creation sequence checkpoint")
+        next_step=self.sequence_contract["steps"][prefix_length]
+        if (checkpoint["sequence_id"]!=self.sequence_contract["sequence_id"] or checkpoint["sequence_fingerprint"]!=self.sequence_fingerprint
+                or checkpoint["active_step_id"]!=next_step["step_id"] or checkpoint["revision"]!=replay.revision
+                or checkpoint["semantic_fingerprint"]!=self._program_fingerprint(normalized)
+                or checkpoint["portable_handles"]!=sorted(self.aliases)
+                or checkpoint["function_signatures"]!=self._sequence_signatures(normalized)
+                or checkpoint["dependencies"]!=self._dependencies(normalized)
+                or not isinstance(checkpoint["last_validation"],dict)
+                or set(checkpoint["last_validation"])!={"actor","mission_complete","revision","engines_agree","replay_passed"}
+                or checkpoint["last_validation"]!={"actor":"host","mission_complete":True,"revision":replay.revision,
+                    "engines_agree":True,"replay_passed":True}):
+            raise WorkspaceError("SEQUENCE_RECOVERY_FINGERPRINT","Checkpoint does not attest the replayed committed prefix")
+        self.resume_verification={"passed":True,"revision":replay.revision,"completed_steps":prefix_length,
+            "semantic_fingerprint":checkpoint["semantic_fingerprint"],"portable_handle_count":len(self.aliases),
+            "source":"shared portable constructive replay plus independent step validations"}
+        self.initial={"revision":1,"code":"","dependencies":[]}
+        self.write_json("sequence-reconstruction-verification.json",self.resume_verification)
+        self._activate_creation_step(prefix_length)
+        self.append_log(self.output/"setup.jsonl",{"kind":"validated_sequence_prefix_reconstructed","revision":replay.revision,
+            "completed_steps":prefix_length,"active_step":self.current_step["step_id"],"replay_actor":"host_deterministic_replay"})
+
+    def _sequence_signatures(self,normalized):
+        return [{"handle":row["handle"],"name":row["name"],"parameters":row["parameters"],"return_type":row["return_type"]}
+            for row in normalized["functions"]]
+
+    def _sequence_checkpoint(self):
+        normalized=self._normalized(); revision=self.ws.get_revision(self.doc)
+        completed=[*self.sequence_completed,{
+            "step_id":self.current_step["step_id"],"mission_id":self.current_step["mission_id"],
+            "revision":revision,"validated":True}]
+        next_index=self.sequence_cursor+1
+        return {"schema":"basic-workspace.creation-sequence-checkpoint","version":1,
+            "sequence_id":self.sequence_contract["sequence_id"],"sequence_fingerprint":self.sequence_fingerprint,
+            "completed_steps":completed,
+            "active_step_id":self.sequence_contract["steps"][next_index]["step_id"] if next_index<len(self.sequence_contract["steps"]) else None,
+            "revision":revision,"semantic_fingerprint":self._program_fingerprint(normalized),
+            "portable_handles":sorted(self.aliases),"function_signatures":self._sequence_signatures(normalized),
+            "dependencies":self._dependencies(normalized),
+            "last_validation":{"actor":"host","mission_complete":True,"revision":revision,
+                "engines_agree":self.last_validation.get("engines_agree"),
+                "replay_passed":self.last_validation.get("replay",{}).get("passed")}}
+
+    def _advance_creation_sequence(self,checkpoint):
+        revision=self.ws.get_revision(self.doc)
+        if (not self.sequence_mode or self.sequence_complete or not self.committed or not self.last_validation
+                or self.last_validation.get("actor")!="host" or not self.last_validation.get("mission_complete")):
+            return {"ok":False,"code":"SEQUENCE_STEP_NOT_VALIDATED","revision":revision,"progress_advanced":False}
+        if self.last_sequence_checkpoint is None:
+            return {"ok":False,"code":"SEQUENCE_CHECKPOINT_REQUIRED","revision":revision,"progress_advanced":False}
+        if checkpoint!=self.last_sequence_checkpoint:
+            return {"ok":False,"code":"SEQUENCE_CHECKPOINT_MISMATCH","revision":revision,"progress_advanced":False}
+        expected=self._sequence_checkpoint()
+        if checkpoint!=expected or checkpoint["revision"]!=revision or checkpoint["sequence_fingerprint"]!=self.sequence_fingerprint:
+            return {"ok":False,"code":"SEQUENCE_CHECKPOINT_STALE","revision":revision,"progress_advanced":False}
+        self.sequence_completed=copy.deepcopy(checkpoint["completed_steps"])
+        next_index=self.sequence_cursor+1
+        if next_index==len(self.sequence_contract["steps"]):
+            self.sequence_cursor=next_index; self.sequence_complete=True; self.committed=True
+            self.current_step=None; self.current_contract=None
+            self.append_log(self.output/"creation-sequence-history.jsonl",{"event":"sequence_completed",
+                "revision":revision,"completed_steps":len(self.sequence_completed),"sequence_id":self.sequence_contract["sequence_id"]})
+            return {"ok":True,"sequence_completed":True,"revision":revision,"progress_advanced":True}
+        self._activate_creation_step(next_index)
+        self.append_log(self.output/"creation-sequence-history.jsonl",{"event":"step_advanced",
+            "revision":revision,"completed_step":checkpoint["completed_steps"][-1]["step_id"],
+            "active_step":self.current_step["step_id"],"sequence_id":self.sequence_contract["sequence_id"]})
+        return {"ok":True,"sequence_completed":False,"revision":revision,
+            "active_step_id":self.current_step["step_id"],"mission_id":self.current_step["mission_id"],
+            "function_handles":self._function_handles(),"progress_advanced":True}
+
+    def _verify_sequence_revision(self,step_index,revision_offset):
+        revision=2+revision_offset
+        step=self.sequence_contract["steps"][step_index]
+        prefix_ws=Workspace(); prefix_doc=prefix_ws.create_empty_document("memory://cycle35/prefix-check.bas")["document_id"]
+        prefix_ops=self.committed_operations[:revision_offset+1]
+        prefix_replay=replay_constructive_stream(prefix_ws,prefix_doc,prefix_ops,expected_start_revision=1)
+        if prefix_replay.revision!=revision:
+            raise WorkspaceError("SEQUENCE_RECOVERY_REVISION","Prefix replay did not produce the completed step revision")
+        prefix_aliases=prefix_replay.live_handles
+        normalized=senior.normalized_state(projection_semantics(build_projection(prefix_ws,prefix_doc,revision)),prefix_aliases)
+        expected_handles={row["function"]["portable_handle"] for row in self.sequence_contract["steps"][:step_index+1]}
+        if {row["handle"] for row in normalized["functions"]}!=expected_handles:
+            raise WorkspaceError("SEQUENCE_RECOVERY_FUNCTION_SET","Replay prefix has an unexpected function set")
+        edge_set={(row["caller"],row["callee"]) for row in senior.candidate_call_edges(normalized)}
+        expected_edge_set={(edge["caller_handle"],edge["callee_handle"])
+            for row in self.sequence_contract["steps"][:step_index+1] for edge in row["required_dependency_edges"]}
+        if edge_set!=expected_edge_set:
+            raise WorkspaceError("SEQUENCE_RECOVERY_BINDING","Replay prefix dependency graph differs from sequence contract")
+        expected=step["validation"]["expected_results"]
+        observed=self._observe_sequence_results(revision,step["validation"]["inputs"],prefix_ws,prefix_doc,prefix_aliases)
+        if observed!={engine:expected for engine in ("interp","jit")} or observed["interp"]!=observed["jit"]:
+            raise WorkspaceError("SEQUENCE_RECOVERY_ORACLE",f"Replayed revision {revision} differs from its independent sequence oracle")
+
+    def _observe_sequence_results(self,revision,inputs,workspace=None,document_id=None,aliases=None):
+        workspace=workspace or self.ws; document_id=document_id or self.doc; aliases=aliases or self.aliases
+        executor=MirExecutionService(timeout=15); functions={fn["symbol_id"] for fn in workspace.documents[document_id].functions}
+        result={engine:{} for engine in ("interp","jit")}
+        for engine in result:
+            for value in inputs:
+                row={}
+                for handle,symbol_id in aliases.items():
+                    if handle.endswith(".function") and symbol_id in functions:
+                        row[workspace.documents[document_id].symbols[symbol_id].name.casefold()]=executor.execute_function(
+                            workspace,document_id,revision,symbol_id,[value],engine)["result"]
+                result[engine][str(value)]=row
+        return result
 
     def _init_from_verified_stream(self,creation_contract_path,seed_contract_path,stream_path,history_path,validation_path):
         """Start a creation mission on a fresh replay of an authenticated stream."""
@@ -154,7 +462,9 @@ class Cycle19Gateway:
         return {symbol:handle for handle,symbol in self.aliases.items() if handle.endswith(".function")}
     def _function_handles(self):
         return sorted(handle for handle in self.aliases if handle.endswith(".function"))
-    def _mission_id(self):return self.current_contract["mission_id"]
+    def _mission_id(self):
+        if self.current_contract is None and getattr(self,"sequence_mode",False):return self.sequence_contract["sequence_id"]
+        return self.current_contract["mission_id"]
     def _function_span(self,symbol_id:str):
         rows=[f for f in self.ws.documents[self.doc].functions if f["symbol_id"]==symbol_id]
         if len(rows)!=1:return {"mapping":"unknown","spans":{}}
@@ -170,7 +480,7 @@ class Cycle19Gateway:
             for caller,callee in sorted(edges)]
     def mission_contract(self,phase:int,base_revision:int|None=None):
         spec=self.mission_specs[phase]
-        if phase==3:
+        if self.sequence_mode or phase==3:
             return {"schema":"basic-workspace.mission-contract","version":1,
                 "mission_id":spec["mission_id"],"objective":spec["objective"],
                 "execution_profile":PROFILE_ID,"base_document_revision":base_revision or self.ws.get_revision(self.doc),
@@ -198,6 +508,8 @@ class Cycle19Gateway:
             for child in value.values():yield from self._calls(child)
     def _candidate(self,request:dict[str,Any],expected_revision:int,callee_handle:str|None):
         spec=self.current_contract; now=self.ws.get_revision(self.doc)
+        if spec is None or getattr(self,"sequence_complete",False):
+            raise WorkspaceError("SEQUENCE_COMPLETE","No function-creation step is active")
         if expected_revision!=now:raise WorkspaceError("STALE_REVISION",f"Expected revision {expected_revision}, current revision {now}")
         if self.committed:raise WorkspaceError("MISSION_EDIT_LIMIT","Mission permits exactly one function commit")
         if set(request)!={"name","parameters","body"}:raise WorkspaceError("MISSION_OPERATION_FORBIDDEN","Only typed create_numeric_function is allowed")
@@ -439,6 +751,17 @@ class Cycle19Gateway:
         self.flush_trace()
         return {"ok":True,"revision":current,"mission_id":self._mission_id(),"function_handles":self._function_handles()}
     def create_checkpoint(self):
+        if getattr(self,"sequence_mode",False):
+            if (self.sequence_complete or not self.committed or not self.last_validation or self.last_validation.get("actor")!="host"
+                    or not self.last_validation.get("mission_complete")):
+                return {"ok":False,"code":"SEQUENCE_STEP_NOT_VALIDATED","revision":self.ws.get_revision(self.doc)}
+            checkpoint=self._sequence_checkpoint(); self.last_sequence_checkpoint=copy.deepcopy(checkpoint)
+            index=self.sequence_cursor+1; self.write_json(f"checkpoint-step-{index:02d}.json",checkpoint)
+            self.append_log(self.output/"creation-sequence-history.jsonl",{"event":"checkpoint_created",
+                "step_id":self.current_step["step_id"],"mission_id":self.current_step["mission_id"],
+                "revision":checkpoint["revision"],"semantic_fingerprint":checkpoint["semantic_fingerprint"],
+                "portable_handle_count":len(checkpoint["portable_handles"])})
+            return {"ok":True,"checkpoint":checkpoint}
         if self.phase!=1 or not self.last_validation or not self.last_validation.get("mission_complete"):
             return {"ok":False,"code":"MISSION1_NOT_VALIDATED","revision":self.ws.get_revision(self.doc)}
         checkpoint=self._checkpoint(self.last_validation); self.write_json("checkpoint.json",checkpoint)
@@ -456,7 +779,7 @@ class Cycle19Gateway:
         executor=MirExecutionService(timeout=15); result={"interp":{},"jit":{}}
         functions={fn["symbol_id"] for fn in self.ws.documents[self.doc].functions}
         inputs=(self.current_contract.get("validation",{}).get("inputs",INPUTS)
-            if self.phase==3 else INPUTS)
+            if self.phase>=3 else INPUTS)
         for engine in ("interp","jit"):
             for value in inputs:
                 row={}
@@ -478,7 +801,8 @@ class Cycle19Gateway:
         aliases=replay.live_handles;revision=replay.revision
         norm=senior.normalized_state(projection_semantics(build_projection(ws,doc,revision)),aliases)
         executor=MirExecutionService(timeout=15);obs={engine:{} for engine in ("interp","jit")}
-        inputs=(self.current_contract.get("validation",{}).get("inputs",INPUTS) if self.phase==3 else INPUTS)
+        inputs=((self.current_contract or {"validation":self.sequence_contract["steps"][-1]["validation"]})
+            .get("validation",{}).get("inputs",INPUTS) if self.phase>=3 else INPUTS)
         for engine in obs:
             for x in inputs:
                 row={}
@@ -497,9 +821,11 @@ class Cycle19Gateway:
         revision=self.ws.get_revision(self.doc)
         if requested_revision!=revision:return {"reliable":False,"code":"STALE_VALIDATION_REVISION","mission_complete":False,
             "requested_revision":requested_revision,"workspace_revision":revision,"executed_revision":None}
+        if getattr(self,"sequence_complete",False) and self.last_validation:
+            return copy.deepcopy(self.last_validation)
         if not self.committed:return {"reliable":True,"mission_complete":False,"phase":"pre-create","executed_revision":revision,
             "diagnostics":[f"{self.current_contract['name']} is not committed"]}
-        if self.phase==3:
+        if self.phase>=3:
             observed=self._run_functions(revision)
             expected_one=self.current_contract["validation"]["expected_results"]
             expected={engine:expected_one for engine in ("interp","jit")}
@@ -524,11 +850,11 @@ class Cycle19Gateway:
             replay_binding={(edge["caller"],edge["callee"]) for edge in senior.candidate_call_edges(replay_norm)}==expected_edge_set
             replay_ok=replay_structural and replay_behavioral and replay_binding and replay_obs["interp"]==replay_obs["jit"]
             complete=bool(values_match and engines_agree and unchanged and dependency_ok and signature_ok and replay_ok)
-            result={"schema":"basic-workspace.cycle24-creation-validation","version":1,
+            result={"schema":"basic-workspace.creation-sequence-validation" if self.sequence_mode else "basic-workspace.cycle24-creation-validation","version":1,
                 "mission_id":self._mission_id(),"actor":actor,"reliable":True,"revision":revision,
                 "requested_revision":requested_revision,"executed_revision":revision,
                 "observed_results":observed,"expected_results":expected,
-                "expectation_source":"independent host-owned Cycle 24 finite oracle",
+                "expectation_source":"independent host-owned creation-sequence finite oracle" if self.sequence_mode else "independent host-owned Cycle 24 finite oracle",
                 "values_match":values_match,"engines_agree":engines_agree,
                 "existing_functions_unchanged":unchanged,"dependency_edges":actual_edges,
                 "required_dependency_edges":expected_edges,"dependencies_match":dependency_ok,
@@ -542,7 +868,7 @@ class Cycle19Gateway:
                 self.write_json("equivalence.json",result)
             self.write_json(f"mission-{self.phase}-validation-{actor}.json",result)
             self.append_log(self.output/"validation.jsonl",result)
-            self.trace.emit("program_validated",phase="mission-3",actor=actor,mission_id=self._mission_id(),
+            self.trace.emit("program_validated",phase=f"creation-step-{self.sequence_cursor+1}" if self.sequence_mode else "mission-3",actor=actor,mission_id=self._mission_id(),
                 revision=revision,executed_revision=revision,passed=complete,engines_agree=engines_agree,
                 replay_passed=replay_ok,dependencies_match=dependency_ok)
             self.emit_visual({"event_id":f"cycle24-validation-{actor}-{revision}","event_type":"validation",
@@ -628,6 +954,9 @@ class Cycle19Gateway:
                 "source_event_ref":rid,"title":"No existing functions","description":"The agent inspected the initially empty Workspace.","focus":{"handles":[],"mapping":"unknown"}})
         return {"revision":revision,"functions":rows}
     def _preview(self,p,rid):
+        if getattr(self,"sequence_complete",False) or self.current_contract is None:
+            return {"ok":False,"reliable":True,"code":"SEQUENCE_COMPLETE","revision":self.ws.get_revision(self.doc),
+                "revision_unchanged":True,"authoritative_workspace_changed":False}
         revision=self.ws.get_revision(self.doc); request={k:p.get(k) for k in ("name","parameters","body")}
         syntax=Cycle16Gateway.typed_shape_error(request)
         if syntax:
@@ -766,9 +1095,16 @@ class Cycle19Gateway:
         if method=="record_agent_status":
             self._record_status(str(p.get("state","unknown")),p.get("info") if isinstance(p.get("info"),dict) else {})
             return {"ok":True,"revision":self.ws.get_revision(self.doc)}
-        if method=="get_status":return {"revision":self.ws.get_revision(self.doc),"phase":self.phase,
-            "mission_id":self._mission_id(),"document_id":self.doc,"function_handles":self._function_handles(),
-            "committed":self.committed,"resume_verification":self.resume_verification}
+        if method=="get_status":
+            status={"revision":self.ws.get_revision(self.doc),"phase":self.phase,
+                "mission_id":self._mission_id(),"document_id":self.doc,"function_handles":self._function_handles(),
+                "committed":self.committed,"resume_verification":self.resume_verification}
+            if getattr(self,"sequence_mode",False):
+                status.update({"sequence_id":self.sequence_contract["sequence_id"],
+                    "sequence_step_index":self.sequence_cursor,"sequence_step_count":len(self.sequence_contract["steps"]),
+                    "active_step_id":self.current_step["step_id"] if self.current_step else None,
+                    "sequence_complete":self.sequence_complete})
+            return status
         if method=="discover_functions":
             result=self._discover(rid); self.flush_trace(); return result
         if method=="inspect_program":
@@ -784,6 +1120,7 @@ class Cycle19Gateway:
         if method=="host_validate":return self.validate_current(p.get("expected_revision"),actor="host")
         if method=="create_checkpoint":return self.create_checkpoint()
         if method=="advance_mission2":return self.advance_mission2(p.get("checkpoint",{}))
+        if method=="host_advance_creation_sequence":return self._advance_creation_sequence(p.get("checkpoint",{}))
         if method=="finalize_session":
             lifecycle=p.get("pi_lifecycle") if isinstance(p.get("pi_lifecycle"),dict) else {}
             validation=p.get("validation") if isinstance(p.get("validation"),dict) else None
@@ -817,10 +1154,14 @@ def main():
     ap.add_argument("--resume-from",type=Path)
     ap.add_argument("--creation-contract",type=Path);ap.add_argument("--seed-contract",type=Path)
     ap.add_argument("--baseline-stream",type=Path);ap.add_argument("--baseline-history",type=Path)
-    ap.add_argument("--baseline-validation",type=Path);a=ap.parse_args()
+    ap.add_argument("--baseline-validation",type=Path)
+    ap.add_argument("--creation-sequence",type=Path);ap.add_argument("--sequence-stream",type=Path)
+    ap.add_argument("--sequence-checkpoint",type=Path);a=ap.parse_args()
     service=Cycle19Gateway(a.output,a.resume_from,creation_contract_path=a.creation_contract,
         seed_contract_path=a.seed_contract,baseline_stream_path=a.baseline_stream,
-        baseline_history_path=a.baseline_history,baseline_validation_path=a.baseline_validation)
+        baseline_history_path=a.baseline_history,baseline_validation_path=a.baseline_validation,
+        creation_sequence_path=a.creation_sequence,sequence_stream_path=a.sequence_stream,
+        sequence_checkpoint_path=a.sequence_checkpoint)
     with Server(("127.0.0.1",a.port),service) as server:
         print(json.dumps({"ready":True,"host":"127.0.0.1","port":server.server_address[1],"revision":service.revision,
             "phase":service.phase,"resume_verification":service.resume_verification},separators=(",",":")),flush=True)

@@ -34,4 +34,4 @@ This is a bounded positive result: one cross-function semantic edit capability w
 - **Level 4 — Genuine agent demonstration:** not run; no inference was authorized.
 - **Level 5 — Measured reusable authorization:** passed in the scoped numeric-edit domain. V1 and v2 share one authorization implementation; Mission B adds no runtime code. Broader gateway consolidation remains outside this experiment.
 
-Full suite: 254 tests passed. No Pi/Sushi inference was performed. See `METRICS.md`, `REGRESSION.md`, the raw bridge outputs and full observation evidence for details.
+Full suite: 256 tests passed. Cycle35 reconciled the prior summary against the preserved `regression.log` (256); only this derived report summary was corrected. The historical raw log and Cycle34 `REGRESSION.md` are unchanged. No Pi/Sushi inference was performed. See `METRICS.md`, `REGRESSION.md`, the raw bridge outputs and full observation evidence for details.
