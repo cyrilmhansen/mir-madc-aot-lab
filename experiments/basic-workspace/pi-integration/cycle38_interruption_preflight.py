@@ -17,7 +17,7 @@ import cycle36_preflight as c36
 from run_cycle16 import gateway_call
 from verified_rename_continuation import verify_rename_continuation
 
-ATTEMPT = HERE / "results/cycle38-longitudinal-stress/production-bridge-attempt-07"
+ATTEMPT = HERE / "results/cycle38-longitudinal-stress/production-bridge-attempt-08"
 
 
 def read(path): return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
@@ -57,7 +57,7 @@ def launch_maintenance(mission, out):
     env = os.environ.copy(); env["PYTHONPATH"] = os.pathsep.join((str(ROOT), str(HERE), env.get("PYTHONPATH", "")))
     proc = subprocess.Popen([sys.executable, str(HERE / "cycle20_gateway.py"), "--output", str(output),
         "--contract", str(contract), "--verified-rename-continuation", str(package / "continuation.json"),
-        "--continuation-anchor", str(package / "host-trust-anchor.json"),
+        "--continuation-anchor", str(src / "continuation-package-host-trust-anchor.json"),
         "--continuation-evidence-root", str(package), "--port", "0"], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=err, text=True, env=env)
     line = proc.stdout.readline()
@@ -154,7 +154,7 @@ def main():
             "last_commit": len(rename["operations"]) + 1, "available_trusted_evidence": "rename stream, journal, host receipt, creation anchor",
             "reconstructable": True, "resume": "trusted host reruns continuation verification/builder; no mutation repeated"})
         package = src / "continuation-package"
-        checked = verify_rename_continuation(package / "continuation.json", package / "host-trust-anchor.json",
+        checked = verify_rename_continuation(package / "continuation.json", src / "continuation-package-host-trust-anchor.json",
             package, src / "maintenance-contract.json")
         rows[mission]["cuts"].append({"cut": "continuation generated before maintenance process",
             "last_commit": checked["revision"], "available_trusted_evidence": "separate continuation anchor and package",

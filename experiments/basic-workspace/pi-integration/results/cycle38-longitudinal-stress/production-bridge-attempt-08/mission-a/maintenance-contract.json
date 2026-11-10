@@ -1,0 +1,160 @@
+{
+  "schema": "basic-workspace.numeric-literal-maintenance-contract",
+  "version": 2,
+  "scope_mode": "per_target",
+  "mission_id": "cycle38.mission-a.maintenance.v1",
+  "objective": "At revision 6, cap NORMALIZED_SCORE at 80 and set IS_PASSING threshold to 70 atomically.",
+  "base_document_revision": 6,
+  "execution_profile_id": "basic-workspace.numeric-composition.v1",
+  "allowed_function_handles": [
+    "bounded_score.function",
+    "is_passing.function"
+  ],
+  "authorized_targets": [
+    {
+      "target": {
+        "function_handle": "bounded_score.function",
+        "control_path": [
+          {
+            "block": "body",
+            "index": 2
+          }
+        ],
+        "expression_path": [
+          1
+        ]
+      },
+      "expected_original_value": 100,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          80
+        ]
+      },
+      "label": "BOUNDED_SCORE upper comparison"
+    },
+    {
+      "target": {
+        "function_handle": "bounded_score.function",
+        "statement_handle": "bounded_score.statement.2",
+        "expression_path": []
+      },
+      "expected_original_value": 100,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          80
+        ]
+      },
+      "label": "BOUNDED_SCORE upper result"
+    },
+    {
+      "target": {
+        "function_handle": "is_passing.function",
+        "control_path": [
+          {
+            "block": "body",
+            "index": 1
+          }
+        ],
+        "expression_path": [
+          1
+        ]
+      },
+      "expected_original_value": 60,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          70
+        ]
+      },
+      "label": "IS_PASSING threshold"
+    }
+  ],
+  "minimum_edits": 3,
+  "maximum_edits": 3,
+  "unchanged_function_handles": [
+    "is_excellent.function",
+    "high_priority.function"
+  ],
+  "required_dependency_edges": [
+    {
+      "caller_handle": "is_passing.function",
+      "callee_handle": "bounded_score.function"
+    },
+    {
+      "caller_handle": "is_excellent.function",
+      "callee_handle": "bounded_score.function"
+    },
+    {
+      "caller_handle": "high_priority.function",
+      "callee_handle": "is_excellent.function"
+    }
+  ],
+  "revision_increment": 1,
+  "validation": {
+    "inputs": [
+      -20,
+      -1,
+      0,
+      1,
+      59,
+      60,
+      69,
+      70,
+      79,
+      80,
+      81,
+      89,
+      90,
+      99,
+      100,
+      101,
+      150
+    ],
+    "functions": [
+      {
+        "function_handle": "bounded_score.function",
+        "result_key": "normalized_score",
+        "oracle": {
+          "kind": "clamp",
+          "minimum": 0,
+          "maximum": 80
+        }
+      },
+      {
+        "function_handle": "is_passing.function",
+        "result_key": "is_passing",
+        "oracle": {
+          "kind": "threshold_call",
+          "callee_handle": "bounded_score.function",
+          "threshold": 70,
+          "true_value": 1,
+          "false_value": 0
+        }
+      },
+      {
+        "function_handle": "is_excellent.function",
+        "result_key": "is_excellent",
+        "oracle": {
+          "kind": "threshold_call",
+          "callee_handle": "bounded_score.function",
+          "threshold": 90,
+          "true_value": 1,
+          "false_value": 0
+        }
+      },
+      {
+        "function_handle": "high_priority.function",
+        "result_key": "high_priority",
+        "oracle": {
+          "kind": "threshold_call",
+          "callee_handle": "is_excellent.function",
+          "threshold": 1,
+          "true_value": 1,
+          "false_value": 0
+        }
+      }
+    ]
+  }
+}

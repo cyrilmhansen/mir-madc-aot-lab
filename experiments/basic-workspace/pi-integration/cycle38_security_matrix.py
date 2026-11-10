@@ -26,11 +26,12 @@ def dump(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def continuation_cases(original: Path, tmp: Path) -> list[dict]:
+def continuation_cases(original: Path, original_anchor: Path, tmp: Path) -> list[dict]:
     package = tmp / "package"
     shutil.copytree(original, package)
     bundle_path = package / "continuation.json"
-    anchor_path = package / "host-trust-anchor.json"
+    anchor_path = tmp / "host-trust-anchor.json"
+    shutil.copyfile(original_anchor, anchor_path)
     dest_path = package / "maintenance-contract.json"
     bundle_base, anchor_base = read(bundle_path), read(anchor_path)
     cases: list[dict] = []
@@ -38,6 +39,7 @@ def continuation_cases(original: Path, tmp: Path) -> list[dict]:
     def check(name, attack, stage="continuation_receiver"):
         shutil.rmtree(package)
         shutil.copytree(original, package)
+        shutil.copyfile(original_anchor, anchor_path)
         try:
             attack()
             verify_rename_continuation(bundle_path, anchor_path, package, dest_path)
@@ -66,6 +68,12 @@ def continuation_cases(original: Path, tmp: Path) -> list[dict]:
     check("operation count tampering", lambda: mutate_bundle("operation_count", 1))
     check("rename contract digest tampering", lambda: mutate_bundle("rename_contract_sha256", "2" * 64))
     check("external host anchor tampering", lambda: dump(anchor_path, {**anchor_base, "semantic_fingerprint": "3" * 64}))
+    def bundle_and_internal_checksum():
+        data = read(bundle_path)
+        data["semantic_fingerprint"] = "4" * 64
+        data["artifacts"]["rename_stream"]["sha256"] = "5" * 64
+        dump(bundle_path, data)
+    check("bundle and internal checksum changed against unchanged host anchor", bundle_and_internal_checksum)
     check("continuation artifact path traversal", lambda: (lambda d: (d["artifacts"]["rename_stream"].update({"path": "../escape"}), dump(bundle_path, d)))(read(bundle_path)))
 
     # Artifact-level attacks leave the independently anchored bundle intact;
@@ -142,8 +150,9 @@ def main():
     root = args.attempt.resolve()
     all_rows = bridge_cases(root)
     package = root / "mission-a/continuation-package"
+    anchor = root / "mission-a/continuation-package-host-trust-anchor.json"
     with tempfile.TemporaryDirectory(prefix="atlas-cycle38-negative-", dir="/var/tmp") as name:
-        continuation = continuation_cases(package, Path(name))
+        continuation = continuation_cases(package, anchor, Path(name))
     all_rows.extend(continuation)
     failures = [row for row in all_rows if row["actual"] in {"ACCEPTED_UNEXPECTEDLY", "UNKNOWN"}
         or (row.get("state_unchanged") is False)]

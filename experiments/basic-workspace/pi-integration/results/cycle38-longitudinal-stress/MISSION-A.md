@@ -13,7 +13,7 @@
 
 `NORMALIZED_SCORE(X) = min(80, max(0, X))`; `IS_PASSING(X) = 1` when the normalized score is at least 70; `IS_EXCELLENT` still tests 90 and `HIGH_PRIORITY` still calls `IS_EXCELLENT`. Thus the latter two now return zero because the cap is 80. Their source and identities remain unchanged.
 
-The independent oracle is explicit arithmetic in the Cycle38 preflight. It was compared to interpreter and JIT observations at every fresh replay prefix using the 17-input corpus recorded in `production-bridge-attempt-07/mission-a/independent-oracle-observations.json`. See the continuation package and Cycle20 gateway evidence for the per-stage receipts.
+The independent oracle is explicit arithmetic in the Cycle38 preflight. It was compared to interpreter and JIT observations at every fresh replay prefix using the 17-input corpus recorded in `production-bridge-attempt-08/mission-a/independent-oracle-observations.json`. See the continuation package and Cycle20 gateway evidence for the per-stage receipts.
 
 ## Provenance boundary
 

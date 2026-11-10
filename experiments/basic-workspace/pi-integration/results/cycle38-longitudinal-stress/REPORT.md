@@ -6,7 +6,7 @@ The primary hypothesis survived this bounded experiment: existing creation, rena
 
 The work did **not** produce a general workflow coordinator. It added one explicit continuation verifier for the narrow history shape `Cycle36 creation proof + one Cycle37 rename + Cycle20 maintenance contract`. Existing Cycle36, Cycle37 and Cycle20 authorization stayed in their own gateways. Mission B used identical production code; no mission-specific runtime branch was added.
 
-No Pi/Sushi inference was run. All primary mission evidence is deterministic production-handler execution through TypeScript → JSONL → Python. The complete regression suite passed 286 tests.
+No Pi/Sushi inference was run. All primary mission evidence is deterministic production-handler execution through TypeScript → JSONL → Python. The complete regression suite passed 287 tests.
 
 ## Mission results
 
@@ -14,13 +14,13 @@ Mission A created four functions at revisions 2–5, renamed the shared provider
 
 Mission B created the three-function dependency chain at revisions 2–4, renamed `NORMALIZED_AGE` to `CAPPED_AGE` at 4→5 while retaining `normalized_age.function`, then committed the cap and threshold edits together at 5→6. It added no production code.
 
-Each stage used the real existing five-tool allowlist. Both maintenance previews left the revision unchanged; each subsequent commit advanced it once. Three edits were one `edit_numeric_literals` constructive operation. Both engines matched independent host oracles at every saved prefix and final state. Complete observations, signatures, dependencies, identity maps and replay results are in the JSON evidence files and raw attempt 07.
+Each stage used the real existing five-tool allowlist. Both maintenance previews left the revision unchanged; each subsequent commit advanced it once. Three edits were one `edit_numeric_literals` constructive operation. Both engines matched independent host oracles at every saved prefix and final state. Complete observations, signatures, dependencies, identity maps and replay results are in the JSON evidence files and raw attempt 08.
 
 ## Trust and security
 
 The receiver does not accept a mutable Workspace from the previous process. It verifies the separate continuation anchor, exact Cycle36 creation proof, exact Cycle37 rename suffix and commit/host receipts, portable handle set, signatures, dependencies, current fingerprint, and independent MIR observations. It reconstructs from an empty Workspace before activating the separately host-owned Cycle20 contract.
 
-The 68-case rejection matrix passed. It combines actual construction/rename/maintenance TypeScript bridge denials and schema rejections with 25 continuation bundle/artifact/anchor attacks. The tamper tests fail closed before a maintenance transaction can be authorized. Restart tests confirmed that an uncommitted preview is process-local: after stopping and restarting, the revision remained unchanged and a new preview had a different transaction ID.
+The 69-case rejection matrix passed. It combines actual construction/rename/maintenance TypeScript bridge denials and schema rejections with 26 continuation bundle/artifact/anchor attacks, including changing the bundle and its internal digest while the separate host anchor remains unchanged. The tamper tests fail closed before a maintenance transaction can be authorized. Restart tests confirmed that an uncommitted preview is process-local: after stopping and restarting, the revision remained unchanged and a new preview had a different transaction ID.
 
 ## Longitudinal and bounded stress
 
@@ -42,9 +42,9 @@ Seven interruption points were covered for both missions. Two points were active
 - **Level 2 — Complete Mission A:** met.
 - **Level 3 — Complete Mission B:** met.
 - **Level 4 — Replay and identity integrity:** met for both recorded streams and prefixes.
-- **Level 5 — Security and recovery:** 68 rejection cases passed; all seven declared cut points recorded, with preview interruptions actively exercised and committed cuts recovered by replay.
+- **Level 5 — Security and recovery:** 69 rejection cases passed; all seven declared cut points recorded, with preview interruptions actively exercised and committed cuts recovered by replay.
 - **Level 6 — Production integration:** met for both full primary workflows through existing TypeScript→JSONL handlers; full historical suite green.
 - **Level 7 — Bounded robustness:** partially met. Twelve deterministic replay/oracle variants and metamorphic controls passed, but the variants changed portable operation streams and were not each run through a separate host authorization contract. The two primary missions did traverse the full production authorization path.
 - **Level 8 — Measured architectural reuse:** met narrowly: one host continuation adapter, zero Mission B production delta, no new mutation/transaction/replay mechanism. The added verifier cost and boundary replay overhead are material and documented.
 
-See `AUDIT.md`, `ARCHITECTURE.md`, `TRUST-BOUNDARIES.md`, `METRICS.md`, `REGRESSION.md`, and `REPRODUCE.md` for detail. No historical raw evidence was rewritten and no commit was pushed.
+The first complete attempt (07) revealed that its host anchor was colocated with the evidence bundle. That run is preserved as diagnostic evidence. Attempt 08 writes the host anchor outside the mutable evidence package and is the final accepted run. See `AUDIT.md`, `ARCHITECTURE.md`, `TRUST-BOUNDARIES.md`, `METRICS.md`, `REGRESSION.md`, and `REPRODUCE.md` for detail. No historical raw evidence was rewritten and no commit was pushed.

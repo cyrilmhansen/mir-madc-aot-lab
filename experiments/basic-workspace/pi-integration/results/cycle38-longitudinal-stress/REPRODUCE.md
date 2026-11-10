@@ -24,4 +24,4 @@ python3 -m unittest experiments.basic-workspace.tests.test_cycle38_verified_cont
 python3 -m unittest discover -s experiments/basic-workspace/tests -v
 ```
 
-The committed evidence used `production-bridge-attempt-07`; attempts 01–06 are retained and must not be overwritten. The stress scripts use deterministic host configurations and do not start Pi or Sushi. `cycle38_security_matrix.py` creates its isolated copies under `/var/tmp` with automatic cleanup. The repository test uses a `TemporaryDirectory` under `/var/tmp` and cleans it on exit.
+The final accepted evidence is `production-bridge-attempt-08`; attempts 01–07 are retained and must not be overwritten. Attempt 07 is diagnostic because its anchor was colocated with the evidence bundle; attempt 08 keeps the host anchor outside that mutable bundle. The stress scripts use deterministic host configurations and do not start Pi or Sushi. `cycle38_security_matrix.py` creates its isolated copies under `/var/tmp` with automatic cleanup. The repository test uses a `TemporaryDirectory` under `/var/tmp` and cleans it on exit.

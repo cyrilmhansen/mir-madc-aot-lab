@@ -15,7 +15,7 @@ The Cycle36 creation handoff remains creation-only. The continuation does not ac
 
 The strict bundle records the creation sequence ID/revision, final revision and semantic fingerprint, exact rename and destination contract IDs/digests, live and retired portable handles, signatures, dependency edges, and digests/relative paths for the source handoff/anchor/evidence, rename contract/stream/history/validation/baseline, and destination contract.
 
-A distinct host trust anchor binds the continuation bundle digest, source handoff and source anchor digests, rename contract, destination contract, final revision and fingerprint. The receiver checks the external anchor before semantic activation. Rehashing a modified bundle or changing its internal digests cannot replace the separately protected anchor.
+A distinct host trust anchor is written outside the evidence package and binds the continuation bundle digest, source handoff and source anchor digests, rename contract, destination contract, final revision and fingerprint. The receiving host supplies that separately protected path; the mutable evidence package does not contain the anchor. Rehashing a modified bundle or changing its internal digests cannot replace the separately protected anchor.
 
 ## Receiver checks
 

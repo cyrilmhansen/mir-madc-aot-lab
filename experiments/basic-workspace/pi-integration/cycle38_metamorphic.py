@@ -17,7 +17,7 @@ from basic_workspace.portable_replay import PortableReplay
 from basic_workspace.projection import build_projection, projection_semantics
 from cycle20_gateway import senior
 
-ATTEMPT = HERE / "results/cycle38-longitudinal-stress/production-bridge-attempt-07"
+ATTEMPT = HERE / "results/cycle38-longitudinal-stress/production-bridge-attempt-08"
 EXECUTOR = MirExecutionService(timeout=20)
 
 

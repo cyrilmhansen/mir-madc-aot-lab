@@ -17,7 +17,7 @@ from basic_workspace.mir_execution import MirExecutionService
 from basic_workspace.portable_replay import replay_constructive_stream
 from verified_rename_continuation import verify_rename_continuation
 
-ATTEMPT = HERE / "results/cycle38-longitudinal-stress/production-bridge-attempt-07"
+ATTEMPT = HERE / "results/cycle38-longitudinal-stress/production-bridge-attempt-08"
 
 
 def stats(values):
@@ -39,7 +39,7 @@ def main():
     for mission in ("mission-a", "mission-b"):
         src = ATTEMPT / mission
         package = src / "continuation-package"
-        bundle, anchor, contract = (package / "continuation.json", package / "host-trust-anchor.json",
+        bundle, anchor, contract = (package / "continuation.json", src / "continuation-package-host-trust-anchor.json",
             package / "maintenance-contract.json")
         auth = []
         for _ in range(4):

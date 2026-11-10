@@ -34,12 +34,12 @@ Repeated measurements in `performance.json` use the same local machine, Python r
 
 | Operation | Mission A median (range) ms | Mission B median (range) ms | Samples |
 |---|---:|---:|---:|
-| Empty Workspace initialization | 0.024 (0.022–0.053) | 0.024 (0.022–0.134) | 8 each |
-| Complete six/five-operation fresh replay | 22.989 (22.935–24.963) | 15.804 (15.600–16.858) | 8 each |
-| Continuation verification incl. nested evidence verification, replay and MIR checks | 775.232 (759.636–787.915) | 536.519 (533.044–552.625) | 4 each |
-| MIR interpreter corpus | 169.375 (167.760–170.991) | 95.957 (94.247–97.667) | 2 each |
-| MIR JIT corpus | 266.618 (265.978–267.258) | 145.008 (144.221–145.795) | 2 each |
+| Empty Workspace initialization | 0.023 (0.020–0.045) | 0.025 (0.020–0.172) | 8 each |
+| Complete six/five-operation fresh replay | 22.774 (22.592–23.799) | 15.949 (15.388–19.478) | 8 each |
+| Continuation verification incl. nested evidence verification, replay and MIR checks | 774.759 (767.292–788.379) | 534.513 (528.103–550.955) | 4 each |
+| MIR interpreter corpus | 173.585 (171.770–175.400) | 95.474 (94.555–96.393) | 2 each |
+| MIR JIT corpus | 259.188 (257.179–261.197) | 140.757 (139.606–141.909) | 2 each |
 
-Actual gateway timing journals are preserved per stage under attempt 07. They include repeated authorization denials, accepted previews, commit, duplicate-commit rejection and validation; values are retained raw because some aggregate validation calls include MIR startup and replay. Construction validation grows with revision/function count, so the two missions' host-validation durations should not be read as authorization-only latency. Cycle38 adds a replay/attestation pass at the receiving boundary, visible in the ~0.54–0.78 s continuation verification samples. There is no apples-to-apples prior continuation benchmark.
+Actual gateway timing journals are preserved per stage under attempt 08. They include repeated authorization denials, accepted previews, commit, duplicate-commit rejection and validation; values are retained raw because some aggregate validation calls include MIR startup and replay. Construction validation grows with revision/function count, so the two missions' host-validation durations should not be read as authorization-only latency. Cycle38 adds a replay/attestation pass at the receiving boundary, visible in the ~0.53–0.77 s continuation verification samples. There is no apples-to-apples prior continuation benchmark.
 
-The twelve generated variants each replayed a five/six-operation stream in a median 23.6 ms overall (the raw per-variant samples are in `generated-workloads.json`). These are bounded canonical replay/oracle stress cases, not twelve additional TypeScript authorization campaigns.
+The twelve generated variants each replayed a five/six-operation stream in a median 24.7 ms overall (the raw per-variant samples are in `generated-workloads.json`). These are bounded canonical replay/oracle stress cases, not twelve additional TypeScript authorization campaigns.
