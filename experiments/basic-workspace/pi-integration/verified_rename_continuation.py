@@ -302,6 +302,9 @@ def build_rename_continuation(*, creation_handoff: Path, creation_anchor: Path, 
     package_root = package_root.resolve()
     if package_root.exists() and any(package_root.iterdir()):
         raise WorkspaceError("CONTINUATION_OUTPUT_EXISTS", "Refusing to overwrite continuation evidence")
+    host_anchor_path = package_root.parent / f"{package_root.name}-host-trust-anchor.json"
+    if host_anchor_path.exists():
+        raise WorkspaceError("CONTINUATION_OUTPUT_EXISTS", "Refusing to overwrite the separately held host trust anchor")
     package_root.mkdir(parents=True, exist_ok=True)
     (package_root / "source/evidence").parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(creation_handoff, package_root / "source/handoff.json")
@@ -346,9 +349,9 @@ def build_rename_continuation(*, creation_handoff: Path, creation_anchor: Path, 
         "rename_contract_id": bundle["rename_contract_id"], "rename_contract_sha256": bundle["rename_contract_sha256"],
         "destination_contract_id": bundle["destination_contract_id"], "destination_contract_sha256": bundle["destination_contract_sha256"],
         "final_revision": bundle["final_revision"], "semantic_fingerprint": bundle["semantic_fingerprint"]}
-    _write(package_root / "host-trust-anchor.json", anchor)
+    _write(host_anchor_path, anchor)
     # Verify the packaged artifact in the same way as the receiving process.
-    verified = verify_rename_continuation(package_root / "continuation.json", package_root / "host-trust-anchor.json",
+    verified = verify_rename_continuation(package_root / "continuation.json", host_anchor_path,
         package_root, package_root / "maintenance-contract.json")
     return {"checked": checked, "verified": verified, "bundle_path": package_root / "continuation.json",
-        "anchor_path": package_root / "host-trust-anchor.json", "evidence_root": package_root}
+        "anchor_path": host_anchor_path, "evidence_root": package_root}
