@@ -1,0 +1,317 @@
+{
+  "case_id": "cycle41-410000-11",
+  "seed": 591545,
+  "family": "sequential_override",
+  "constructors": [
+    {
+      "operation": "create_numeric_function",
+      "portable_handle": "case019_credit.function",
+      "arguments": {
+        "name": "CASE019_CREDIT",
+        "parameters": [
+          "X"
+        ],
+        "body": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "number",
+              "value": 0
+            }
+          },
+          {
+            "kind": "if",
+            "condition": {
+              "kind": "binary",
+              "operator": ">=",
+              "left": {
+                "kind": "local_ref",
+                "name": "X"
+              },
+              "right": {
+                "kind": "number",
+                "value": 0
+              }
+            },
+            "then": [
+              {
+                "kind": "assign",
+                "target": {
+                  "kind": "result"
+                },
+                "expression": {
+                  "kind": "number",
+                  "value": 1
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "operation": "create_numeric_function",
+      "portable_handle": "case019_minor.function",
+      "arguments": {
+        "name": "CASE019_MINOR",
+        "parameters": [
+          "X"
+        ],
+        "body": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "number",
+              "value": 0
+            }
+          },
+          {
+            "kind": "if",
+            "condition": {
+              "kind": "binary",
+              "operator": "<",
+              "left": {
+                "kind": "local_ref",
+                "name": "X"
+              },
+              "right": {
+                "kind": "number",
+                "value": 25
+              }
+            },
+            "then": [
+              {
+                "kind": "assign",
+                "target": {
+                  "kind": "result"
+                },
+                "expression": {
+                  "kind": "number",
+                  "value": 1
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "operation": "create_numeric_function",
+      "portable_handle": "case019_eligible.function",
+      "arguments": {
+        "name": "CASE019_ELIGIBLE",
+        "parameters": [
+          "X"
+        ],
+        "body": [
+          {
+            "kind": "assign",
+            "target": {
+              "kind": "result"
+            },
+            "expression": {
+              "kind": "number",
+              "value": 0
+            }
+          },
+          {
+            "kind": "if",
+            "condition": {
+              "kind": "binary",
+              "operator": ">=",
+              "left": {
+                "kind": "call",
+                "function_handle": "case019_credit.function",
+                "arguments": [
+                  {
+                    "kind": "local_ref",
+                    "name": "X"
+                  }
+                ]
+              },
+              "right": {
+                "kind": "number",
+                "value": 1
+              }
+            },
+            "then": [
+              {
+                "kind": "assign",
+                "target": {
+                  "kind": "result"
+                },
+                "expression": {
+                  "kind": "number",
+                  "value": 1
+                }
+              }
+            ]
+          },
+          {
+            "kind": "if",
+            "condition": {
+              "kind": "binary",
+              "operator": ">=",
+              "left": {
+                "kind": "call",
+                "function_handle": "case019_minor.function",
+                "arguments": [
+                  {
+                    "kind": "local_ref",
+                    "name": "X"
+                  }
+                ]
+              },
+              "right": {
+                "kind": "number",
+                "value": 1
+              }
+            },
+            "then": [
+              {
+                "kind": "assign",
+                "target": {
+                  "kind": "result"
+                },
+                "expression": {
+                  "kind": "number",
+                  "value": 0
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "names": [
+    "CASE019_CREDIT",
+    "CASE019_MINOR",
+    "CASE019_ELIGIBLE"
+  ],
+  "handles": [
+    "case019_credit.function",
+    "case019_minor.function",
+    "case019_eligible.function"
+  ],
+  "initial_rules": {
+    "case019_credit.function": {
+      "kind": "predicate",
+      "source": "x",
+      "operator": ">=",
+      "threshold": 0
+    },
+    "case019_minor.function": {
+      "kind": "predicate",
+      "source": "x",
+      "operator": "<",
+      "threshold": 25
+    },
+    "case019_eligible.function": {
+      "kind": "sequential",
+      "initial": 0,
+      "steps": [
+        {
+          "source": "case019_credit.function",
+          "operator": ">=",
+          "threshold": 1,
+          "value": 1
+        },
+        {
+          "source": "case019_minor.function",
+          "operator": ">=",
+          "threshold": 1,
+          "value": 0
+        }
+      ]
+    }
+  },
+  "final_rules": {
+    "case019_credit.function": {
+      "kind": "predicate",
+      "source": "x",
+      "operator": ">=",
+      "threshold": 0
+    },
+    "case019_minor.function": {
+      "kind": "predicate",
+      "source": "x",
+      "operator": "<",
+      "threshold": 26
+    },
+    "case019_eligible.function": {
+      "kind": "sequential",
+      "initial": 0,
+      "steps": [
+        {
+          "source": "case019_credit.function",
+          "operator": ">=",
+          "threshold": 1,
+          "value": 1
+        },
+        {
+          "source": "case019_minor.function",
+          "operator": ">=",
+          "threshold": 2,
+          "value": 0
+        }
+      ]
+    }
+  },
+  "mutations": [
+    {
+      "handle": "case019_minor.function",
+      "body_index": 1,
+      "expected": 25,
+      "replacement": 26,
+      "label": "minor threshold"
+    },
+    {
+      "handle": "case019_eligible.function",
+      "body_index": 2,
+      "expected": 1,
+      "replacement": 2,
+      "label": "override condition"
+    }
+  ],
+  "inputs": [
+    -25,
+    -24,
+    -17,
+    -1,
+    0,
+    1,
+    2,
+    3,
+    13,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    46,
+    49,
+    100,
+    101
+  ],
+  "edges": [
+    {
+      "caller_handle": "case019_eligible.function",
+      "callee_handle": "case019_credit.function"
+    },
+    {
+      "caller_handle": "case019_eligible.function",
+      "callee_handle": "case019_minor.function"
+    }
+  ],
+  "rename_target": "case019_credit.function",
+  "rename_old_name": "CASE019_CREDIT",
+  "rename_new_name": "CASE019_CREDIT_RENAMED"
+}
