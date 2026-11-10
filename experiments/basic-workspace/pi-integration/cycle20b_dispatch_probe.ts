@@ -27,7 +27,7 @@ async function run() {
   if (!inPath || !outPath) throw new Error("probe input/output paths are required");
   const request = JSON.parse(await Bun.file(inPath).text());
   const authoringMode = request.authoring_mode || "semantic_edit";
-  if (!["semantic_edit", "atomic_create", "structural_edit", "rename", "conditional_edit", "block_replace"].includes(authoringMode)) throw new Error("unsupported authoring_mode");
+  if (!["semantic_edit", "semantic_edit_multi", "atomic_create", "structural_edit", "rename", "conditional_edit", "block_replace"].includes(authoringMode)) throw new Error("unsupported authoring_mode");
   process.env.BASIC_WS_AUTHORING_MODE = authoringMode;
   const { default: workspaceExtension } = await import("./extension.ts");
   workspaceExtension(pi);

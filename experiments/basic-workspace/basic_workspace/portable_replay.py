@@ -257,9 +257,20 @@ class PortableReplay:
                 {"revision": applied["revision"], "event": "created", "portable_handle": h, "workspace_id": self.aliases[h]}
                 for h in [handle, param_handle] + [f"{stem}.statement.{n}" for n in range(len(stmt_ids))]])
         elif kind == "edit_numeric_literals":
-            if set(item) != {"operation", "mission_id", "function_handle", "edits"} or not isinstance(item["edits"], list) or not item["edits"]:
+            legacy_shape = {"operation", "mission_id", "function_handle", "edits"}
+            scoped_shape = {"operation", "mission_id", "scope_mode", "edits"}
+            if set(item) == legacy_shape:
+                # Historical v1 envelope: retained byte-for-byte for existing streams.
+                legacy_function_handle = item["function_handle"]
+                self._require_live(legacy_function_handle, "edit function")
+            elif set(item) == scoped_shape and item.get("scope_mode") == "per_target":
+                # V2 makes each edit's portable function handle authoritative.
+                # No single envelope handle may stand in for target resolution.
+                legacy_function_handle = None
+            else:
+                raise WorkspaceError("REPLAY_OPERATION_INVALID", "Numeric edit operation has an invalid portable shape or scope mode")
+            if not isinstance(item["edits"], list) or not item["edits"]:
                 raise WorkspaceError("REPLAY_OPERATION_INVALID", "Numeric edit operation has an invalid portable shape")
-            self._require_live(item["function_handle"], "edit function")
             ops = []
             for edit in item["edits"]:
                 if not isinstance(edit, dict) or set(edit) != {"target", "expected_value", "replacement_value"}:
@@ -271,6 +282,8 @@ class PortableReplay:
                 if target_keys not in ({"function_handle","expression_path","control_path"},
                                        {"function_handle","expression_path","statement_handle"}):
                     raise WorkspaceError("REPLAY_TARGET_INVALID", "Numeric edit target has unknown, missing or conflicting fields")
+                if legacy_function_handle is not None and target["function_handle"] != legacy_function_handle:
+                    raise WorkspaceError("REPLAY_TARGET_INVALID", "Legacy numeric edit targets must match their envelope function_handle")
                 if not isinstance(edit["expected_value"],(int,float)) or isinstance(edit["expected_value"],bool) or not math.isfinite(float(edit["expected_value"])) or \
                         not isinstance(edit["replacement_value"],(int,float)) or isinstance(edit["replacement_value"],bool) or not math.isfinite(float(edit["replacement_value"])):
                     raise WorkspaceError("REPLAY_TARGET_INVALID", "Numeric edit values must be finite numbers")

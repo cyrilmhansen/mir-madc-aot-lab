@@ -14,10 +14,12 @@ const DRAFT_TOOLS = [...COMMON_TOOLS, "workspace_begin_function_draft", "workspa
   "workspace_inspect_function_draft", "workspace_preview_function_draft"];
 const TOOL_NAMES = process.env.BASIC_WS_AUTHORING_MODE === "incremental" ? DRAFT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit" ? SEMANTIC_EDIT_TOOLS :
+  process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit_multi" ? SEMANTIC_EDIT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "structural_edit" ? STRUCTURAL_EDIT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "rename" ? RENAME_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "conditional_edit" ? CONDITIONAL_EDIT_TOOLS :
   process.env.BASIC_WS_AUTHORING_MODE === "block_replace" ? BLOCK_REPLACE_TOOLS : ATOMIC_TOOLS;
+const MULTI_EDIT_MODE = process.env.BASIC_WS_AUTHORING_MODE === "semantic_edit_multi";
 const MAX_RESPONSE = 1024 * 1024;
 
 const OPERATORS = ["+", "-", "*", "/", "=", "<>", "<", "<=", ">", ">="] as const;
@@ -163,9 +165,14 @@ export default function (pi: ExtensionAPI) {
       return toolResult(await gateway.call("preview_create_function", params, 30000, toolCallId));
     }});
   pi.registerTool({ name: "workspace_preview_semantic_edit", label: "Preview semantic literal edit",
-    description: "Preview one bounded atomic group of authorized numeric literal edits. First discover functions and inspect the gateway-provided typed target paths. A target uses its discovered function_handle plus either a control_path and expression_path for an IF comparison operand, or a discovered statement_handle and explicit expression_path (use [] for the assignment RHS root). Include expected_value preconditions. Preview never changes committed BASIC; commit only an accepted transaction. The host-owned mission contract enforces edit count, scope, values and invariants.",
-    parameters: Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
-      edits: Type.Array(SEMANTIC_EDIT, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }),
+    description: MULTI_EDIT_MODE
+      ? "Preview one atomic numeric-literal edit batch across discovered functions. Each edit carries its own authorized function_handle and inspected typed target path. Use scope_mode per_target; there is deliberately no global function handle. Include exact expected_value preconditions. The host contract authorizes the complete target set and the transaction commits as one revision."
+      : "Preview one bounded atomic group of authorized numeric literal edits. First discover functions and inspect the gateway-provided typed target paths. A target uses its discovered function_handle plus either a control_path and expression_path for an IF comparison operand, or a discovered statement_handle and explicit expression_path (use [] for the assignment RHS root). Include expected_value preconditions. Preview never changes committed BASIC; commit only an accepted transaction. The host-owned mission contract enforces edit count, scope, values and invariants.",
+    parameters: MULTI_EDIT_MODE
+      ? Type.Object({ expected_revision: Type.Integer(), scope_mode: Type.Literal("per_target"),
+          edits: Type.Array(SEMANTIC_EDIT, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false })
+      : Type.Object({ expected_revision: Type.Integer(), function_handle: Type.String(),
+          edits: Type.Array(SEMANTIC_EDIT, { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }),
     async execute(toolCallId, params) {
       return toolResult(await gateway.call("preview_semantic_edit", params, 30000, toolCallId));
     }});

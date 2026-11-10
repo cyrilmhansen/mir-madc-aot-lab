@@ -148,10 +148,18 @@ class Cycle20Gateway:
             "execution_profile_id", "allowed_function_handles", "authorized_targets", "minimum_edits",
             "maximum_edits", "unchanged_function_handles", "required_dependency_edges",
             "revision_increment", "validation"}
-        if not isinstance(contract, dict) or set(contract) != required:
+        if not isinstance(contract, dict):
+            raise WorkspaceError("MISSION_CONTRACT_INVALID", "Maintenance contract must be an object")
+        version = contract.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise WorkspaceError("MISSION_CONTRACT_VERSION", "Maintenance contract version must be an integer")
+        expected = required | ({"scope_mode"} if version == 2 else set())
+        if set(contract) != expected:
             raise WorkspaceError("MISSION_CONTRACT_INVALID", "Maintenance contract has missing or unsupported fields")
-        if contract["schema"] != "basic-workspace.numeric-literal-maintenance-contract" or contract["version"] != 1:
+        if contract["schema"] != "basic-workspace.numeric-literal-maintenance-contract" or version not in (1, 2):
             raise WorkspaceError("MISSION_CONTRACT_VERSION", "Unsupported numeric-literal maintenance contract")
+        if version == 2 and contract["scope_mode"] != "per_target":
+            raise WorkspaceError("MISSION_CONTRACT_SCOPE", "Version 2 contracts require per_target scope")
         if (not isinstance(contract["mission_id"], str) or not contract["mission_id"]
                 or not isinstance(contract["objective"], str) or not contract["objective"]):
             raise WorkspaceError("MISSION_CONTRACT_INVALID", "Mission identifier and objective are required")
@@ -777,22 +785,23 @@ class Cycle20Gateway:
             operations.append(op)
         return operations
 
-    def _make_workspace_operations(self, request):
-        if set(request) != {"expected_revision", "function_handle", "edits"}:
-            raise WorkspaceError("INVALID_EDIT_REQUEST", "Edit request requires expected_revision, function_handle, and edits")
-        revision = request["expected_revision"]
-        if revision != self.ws.get_revision(self.doc):
-            raise WorkspaceError("STALE_REVISION", "Edit base revision is stale")
-        if self.committed:
-            raise WorkspaceError("MISSION_EDIT_LIMIT", "Contract permits one committed atomic edit")
-        handle = request["function_handle"]
-        if handle not in self.discovered:
-            raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover the target function before proposing an edit")
-        if handle not in self.contract["allowed_function_handles"]:
-            raise WorkspaceError("MISSION_EDIT_SCOPE", "Target function is outside the mission's allowed scope")
-        edits = request["edits"]
+    def _authorize_edit_batch(self, edits, *, scope_handle=None):
+        """Shared v1/v2 authorization for the complete host-authorized target set."""
         if not isinstance(edits, list) or not self.contract["minimum_edits"] <= len(edits) <= self.contract["maximum_edits"]:
             raise WorkspaceError("MISSION_EDIT_COUNT", "Edit count is outside the mission contract bounds")
+        for edit in edits:
+            if not isinstance(edit, dict) or set(edit) != {"target", "expected_value", "replacement_value"}:
+                raise WorkspaceError("INVALID_EDIT_REQUEST", "Each edit requires exactly target, expected_value, and replacement_value")
+            for field in ("expected_value", "replacement_value"):
+                value = edit[field]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise WorkspaceError("INVALID_LITERAL_EDIT", f"{field} must be a finite number")
+            target = edit["target"]
+            if not isinstance(target, dict) or "function_handle" not in target or "expression_path" not in target:
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Target requires a function handle and explicit expression_path")
+            if set(target) not in ({"function_handle", "control_path", "expression_path"},
+                                   {"function_handle", "statement_handle", "expression_path"}):
+                raise WorkspaceError("MISSION_EDIT_TARGETS", "Target must be one exact typed control-path or statement-handle form")
         actual = [edit.get("target") for edit in edits if isinstance(edit, dict)]
         if len(actual) != len(edits):
             raise WorkspaceError("INVALID_EDIT_REQUEST", "Each edit requires a typed target")
@@ -802,15 +811,44 @@ class Cycle20Gateway:
         target_map = {json.dumps(row["target"], sort_keys=True): row for row in self.edit_targets}
         if set(target_keys) != set(target_map):
             raise WorkspaceError("MISSION_EDIT_TARGETS", "Candidate must select exactly the authorized semantic literal targets")
+        allowed = set(self.contract["allowed_function_handles"])
         for edit, key in zip(edits, target_keys):
             target_spec = target_map[key]
-            if edit["target"]["function_handle"] != handle:
-                raise WorkspaceError("MISSION_EDIT_SCOPE", "Every edit must target the selected discovered function")
+            target_handle = edit["target"].get("function_handle") if isinstance(edit["target"], dict) else None
+            if target_handle not in allowed:
+                raise WorkspaceError("MISSION_EDIT_SCOPE", "Edit target function is outside the mission's allowed function set")
+            if target_handle not in self.discovered:
+                raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover every edited function before proposing an edit")
+            if scope_handle is not None and target_handle != scope_handle:
+                raise WorkspaceError("MISSION_EDIT_SCOPE", "Every legacy edit must target the selected function")
             if edit["expected_value"] != target_spec["expected_value"]:
                 raise WorkspaceError("MISSION_LITERAL_VALUES", "Expected old value does not match the contract precondition")
             if edit["replacement_value"] not in target_spec["replacement_constraint"]["values"]:
                 raise WorkspaceError("MISSION_LITERAL_VALUES", "Replacement value violates the host-owned mission constraint")
         return self._workspace_operations_for_edits(edits, self.aliases)
+
+    def _make_workspace_operations(self, request):
+        if not isinstance(request, dict):
+            raise WorkspaceError("INVALID_EDIT_REQUEST", "Edit request must be an object")
+        if self.contract["version"] == 1:
+            if set(request) != {"expected_revision", "function_handle", "edits"}:
+                raise WorkspaceError("INVALID_EDIT_REQUEST", "Version 1 requires expected_revision, function_handle, and edits")
+            handle = request["function_handle"]
+            if handle not in self.discovered:
+                raise WorkspaceError("FUNCTION_NOT_DISCOVERED", "Discover the target function before proposing an edit")
+            if handle not in self.contract["allowed_function_handles"]:
+                raise WorkspaceError("MISSION_EDIT_SCOPE", "Target function is outside the mission's allowed scope")
+            scope_handle = handle
+        else:
+            if set(request) != {"expected_revision", "scope_mode", "edits"} or request.get("scope_mode") != "per_target":
+                raise WorkspaceError("INVALID_EDIT_REQUEST", "Version 2 requires expected_revision, scope_mode per_target, and edits")
+            scope_handle = None
+        revision = request["expected_revision"]
+        if revision != self.ws.get_revision(self.doc):
+            raise WorkspaceError("STALE_REVISION", "Edit base revision is stale")
+        if self.committed:
+            raise WorkspaceError("MISSION_EDIT_LIMIT", "Contract permits one committed atomic edit")
+        return self._authorize_edit_batch(request["edits"], scope_handle=scope_handle)
 
     def _authorize_candidate(self, request):
         if self.ws.get_revision(self.doc) != request["expected_revision"]:
@@ -879,7 +917,7 @@ class Cycle20Gateway:
             "provenance": "Genuine Pi semantic edit proposal · MissionGateway preview accepted",
             "title": f"{len(params['edits'])}-location numeric edit preview",
             "description": f"Candidate changes {len(params['edits'])} authorized numeric literal(s). Committed code remains at revision {revision} until commit.",
-            "focus": {"handles": [params["function_handle"]] + [edit["target"].get("statement_handle") for edit in params["edits"] if edit["target"].get("statement_handle")],
+            "focus": {"handles": sorted({edit["target"]["function_handle"] for edit in params["edits"]}) + [edit["target"].get("statement_handle") for edit in params["edits"] if edit["target"].get("statement_handle")],
                 "mapping": "verified_function_boundary"},
             "preview": {"status": "accepted", "diff": preview.get("diff"),
                 "edits": params["edits"], "candidate_revision": revision + 1},
@@ -916,9 +954,14 @@ class Cycle20Gateway:
         except WorkspaceError as exc:
             return {"ok": False, "committed": False, "code": exc.code, "message": str(exc),
                 "revision": revision, "authoritative_workspace_changed": False}
-        self.constructive_ops.append({"operation": "edit_numeric_literals", "mission_id": self.mission_id,
-            "function_handle": pending["metadata"]["request"]["function_handle"],
-            "edits": pending["metadata"]["request"]["edits"]})
+        recorded_request = pending["metadata"]["request"]
+        constructive_edit = {"operation": "edit_numeric_literals", "mission_id": self.mission_id,
+            "edits": recorded_request["edits"]}
+        if "function_handle" in recorded_request:
+            constructive_edit["function_handle"] = recorded_request["function_handle"]
+        else:
+            constructive_edit["scope_mode"] = "per_target"
+        self.constructive_ops.append(constructive_edit)
         self.write_json(self.output / "constructive-operations.json", {
             "schema": "basic-workspace.constructive-metafile", "version": 1,
             "execution_profile_id": PROFILE_ID,
