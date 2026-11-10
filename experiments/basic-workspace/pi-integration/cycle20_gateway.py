@@ -86,7 +86,10 @@ class Cycle20Gateway:
                  baseline_validation_path: Path | None = None,
                  verified_handoff_path: Path | None = None,
                  handoff_anchor_path: Path | None = None,
-                 handoff_evidence_root: Path | None = None):
+                 handoff_evidence_root: Path | None = None,
+                 verified_rename_continuation_path: Path | None = None,
+                 continuation_anchor_path: Path | None = None,
+                 continuation_evidence_root: Path | None = None):
         self.output = output.resolve()
         self.output.mkdir(parents=True, exist_ok=True)
         self.baseline_dir = baseline_dir.resolve()
@@ -95,7 +98,49 @@ class Cycle20Gateway:
         self._validate_contract_shape(self.contract)
         self.mission_id = self.contract["mission_id"]
         handoff_args = (verified_handoff_path, handoff_anchor_path, handoff_evidence_root)
-        if any(value is not None for value in handoff_args):
+        continuation_args = (verified_rename_continuation_path, continuation_anchor_path, continuation_evidence_root)
+        self.verified_continuation = None
+        if any(value is not None for value in continuation_args):
+            if (not all(value is not None for value in continuation_args)
+                    or any(value is not None for value in (*handoff_args, baseline_stream_path,
+                        baseline_history_path, baseline_validation_path))):
+                raise WorkspaceError("CONTINUATION_ARGUMENTS", "Verified continuation requires bundle, separate host anchor, evidence root, and no parallel baseline inputs")
+            from verified_rename_continuation import verify_rename_continuation
+            verified = verify_rename_continuation(Path(verified_rename_continuation_path),
+                Path(continuation_anchor_path), Path(continuation_evidence_root), self.contract_path)
+            adapter_dir = self.output / "verified-continuation-adapter"
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            stream = copy.deepcopy(verified["source_stream"])
+            history = copy.deepcopy(verified["source_history"])
+            final_revision = verified["revision"]
+            final_commits = [row for row in history if row.get("event") == "transaction_committed"
+                and row.get("resulting_revision") == final_revision]
+            if len(final_commits) != 1:
+                raise WorkspaceError("CONTINUATION_RENAME_COMMIT", "Verified continuation did not yield one final rename commit")
+            final_commits[0]["semantic_snapshot"] = copy.deepcopy(verified["normalized"])
+            observed_by_handle = verified["observations_by_handle"]
+            observed_by_contract_key = {engine: {value: {
+                spec["result_key"]: row[spec["function_handle"]]
+                for spec in self.contract["validation"]["functions"]}
+                for value, row in rows.items()} for engine, rows in observed_by_handle.items()}
+            validation = {"schema": "basic-workspace.cycle38-maintenance-baseline-attestation", "version": 1,
+                "mission_complete": True, "revision": final_revision, "executed_revision": final_revision,
+                "expectation_source": "Cycle38 authenticated construction and rename continuation replay",
+                "observed_results": observed_by_contract_key,
+                "replay": {"passed": True, "structural_equivalence": True,
+                    "binding_equivalence": True, "behavioral_equivalence": True, "engines_agree": True}}
+            baseline_stream_path = adapter_dir / "constructive-operations.json"
+            baseline_history_path = adapter_dir / "history.jsonl"
+            baseline_validation_path = adapter_dir / "validation.json"
+            self.write_json(baseline_stream_path, stream)
+            baseline_history_path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for row in history), encoding="utf-8")
+            self.write_json(baseline_validation_path, validation)
+            self.verified_continuation = {key: value for key, value in verified.items()
+                if key not in {"source_stream", "source_history", "source_validation", "normalized", "base_normalized",
+                    "base_observations_by_handle", "observations_by_handle", "aliases"}}
+            self.write_json(self.output / "verified-rename-continuation.json", self.verified_continuation)
+        elif any(value is not None for value in handoff_args):
             if (not all(value is not None for value in handoff_args)
                     or any(value is not None for value in (baseline_stream_path, baseline_history_path, baseline_validation_path))):
                 raise WorkspaceError("HANDOFF_ARGUMENTS", "Verified handoff requires bundle, separate anchor, evidence root, and no parallel baseline paths")
@@ -1206,15 +1251,22 @@ def main():
     parser.add_argument("--verified-handoff", type=Path)
     parser.add_argument("--handoff-anchor", type=Path)
     parser.add_argument("--handoff-evidence-root", type=Path)
+    parser.add_argument("--verified-rename-continuation", type=Path)
+    parser.add_argument("--continuation-anchor", type=Path)
+    parser.add_argument("--continuation-evidence-root", type=Path)
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
     service = Cycle20Gateway(args.output, args.baseline, contract_path=args.contract,
         baseline_stream_path=args.baseline_stream, baseline_history_path=args.baseline_history,
         baseline_validation_path=args.baseline_validation, verified_handoff_path=args.verified_handoff,
-        handoff_anchor_path=args.handoff_anchor, handoff_evidence_root=args.handoff_evidence_root)
+        handoff_anchor_path=args.handoff_anchor, handoff_evidence_root=args.handoff_evidence_root,
+        verified_rename_continuation_path=args.verified_rename_continuation,
+        continuation_anchor_path=args.continuation_anchor,
+        continuation_evidence_root=args.continuation_evidence_root)
     with Server(("127.0.0.1", args.port), service) as server:
         print(json.dumps({"ready": True, "host": "127.0.0.1", "port": server.server_address[1],
             "revision": service.ws.get_revision(service.doc), "baseline_verified": True,
+            "continuation_verified": service.verified_continuation is not None,
             "mission_id": service.mission_id, "contract_verified": True,
             "checkpoint_fingerprint": getattr(service, "revision2_fingerprint", None)}), flush=True)
         server.serve_forever()
