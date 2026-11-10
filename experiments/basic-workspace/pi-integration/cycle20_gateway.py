@@ -83,7 +83,10 @@ class Cycle20Gateway:
                  contract_path: Path = DEFAULT_CONTRACT,
                  baseline_stream_path: Path | None = None,
                  baseline_history_path: Path | None = None,
-                 baseline_validation_path: Path | None = None):
+                 baseline_validation_path: Path | None = None,
+                 verified_handoff_path: Path | None = None,
+                 handoff_anchor_path: Path | None = None,
+                 handoff_evidence_root: Path | None = None):
         self.output = output.resolve()
         self.output.mkdir(parents=True, exist_ok=True)
         self.baseline_dir = baseline_dir.resolve()
@@ -91,6 +94,19 @@ class Cycle20Gateway:
         self.contract = json.loads(self.contract_path.read_text(encoding="utf-8"))
         self._validate_contract_shape(self.contract)
         self.mission_id = self.contract["mission_id"]
+        handoff_args = (verified_handoff_path, handoff_anchor_path, handoff_evidence_root)
+        if any(value is not None for value in handoff_args):
+            if (not all(value is not None for value in handoff_args)
+                    or any(value is not None for value in (baseline_stream_path, baseline_history_path, baseline_validation_path))):
+                raise WorkspaceError("HANDOFF_ARGUMENTS", "Verified handoff requires bundle, separate anchor, evidence root, and no parallel baseline paths")
+            from verified_handoff import verify_handoff
+            handoff_verification = verify_handoff(Path(verified_handoff_path), Path(handoff_anchor_path),
+                Path(handoff_evidence_root), self.contract_path)
+            baseline_stream_path = Path(handoff_verification["source_stream"])
+            baseline_history_path = Path(handoff_verification["source_history"])
+            baseline_validation_path = Path(handoff_verification["source_validation"])
+            (self.output / "verified-handoff.json").write_text(
+                json.dumps(handoff_verification, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         self.baseline_stream_path = baseline_stream_path.resolve() if baseline_stream_path else None
         self.baseline_history_path = baseline_history_path.resolve() if baseline_history_path else None
         self.baseline_validation_path = baseline_validation_path.resolve() if baseline_validation_path else None
@@ -1187,11 +1203,15 @@ def main():
     parser.add_argument("--baseline-stream", type=Path)
     parser.add_argument("--baseline-history", type=Path)
     parser.add_argument("--baseline-validation", type=Path)
+    parser.add_argument("--verified-handoff", type=Path)
+    parser.add_argument("--handoff-anchor", type=Path)
+    parser.add_argument("--handoff-evidence-root", type=Path)
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
     service = Cycle20Gateway(args.output, args.baseline, contract_path=args.contract,
         baseline_stream_path=args.baseline_stream, baseline_history_path=args.baseline_history,
-        baseline_validation_path=args.baseline_validation)
+        baseline_validation_path=args.baseline_validation, verified_handoff_path=args.verified_handoff,
+        handoff_anchor_path=args.handoff_anchor, handoff_evidence_root=args.handoff_evidence_root)
     with Server(("127.0.0.1", args.port), service) as server:
         print(json.dumps({"ready": True, "host": "127.0.0.1", "port": server.server_address[1],
             "revision": service.ws.get_revision(service.doc), "baseline_verified": True,

@@ -1,0 +1,141 @@
+{
+  "schema": "basic-workspace.numeric-literal-maintenance-contract",
+  "version": 2,
+  "scope_mode": "per_target",
+  "mission_id": "cycle36.mission-b.maintenance.v1",
+  "objective": "Cap NORMALIZED_AGE at 60 and set IS_SENIOR's threshold to 55 in one atomic edit.",
+  "base_document_revision": 4,
+  "execution_profile_id": "basic-workspace.numeric-composition.v1",
+  "allowed_function_handles": [
+    "normalized_age.function",
+    "is_senior.function"
+  ],
+  "authorized_targets": [
+    {
+      "target": {
+        "function_handle": "normalized_age.function",
+        "control_path": [
+          {
+            "block": "body",
+            "index": 2
+          }
+        ],
+        "expression_path": [
+          1
+        ]
+      },
+      "expected_original_value": 100,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          60
+        ]
+      },
+      "label": "NORMALIZED_AGE upper comparison"
+    },
+    {
+      "target": {
+        "function_handle": "normalized_age.function",
+        "statement_handle": "normalized_age.statement.2",
+        "expression_path": []
+      },
+      "expected_original_value": 100,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          60
+        ]
+      },
+      "label": "NORMALIZED_AGE upper result"
+    },
+    {
+      "target": {
+        "function_handle": "is_senior.function",
+        "control_path": [
+          {
+            "block": "body",
+            "index": 1
+          }
+        ],
+        "expression_path": [
+          1
+        ]
+      },
+      "expected_original_value": 65,
+      "replacement_constraint": {
+        "kind": "one_of",
+        "values": [
+          55
+        ]
+      },
+      "label": "IS_SENIOR threshold"
+    }
+  ],
+  "minimum_edits": 3,
+  "maximum_edits": 3,
+  "unchanged_function_handles": [
+    "senior_flag.function"
+  ],
+  "required_dependency_edges": [
+    {
+      "caller_handle": "is_senior.function",
+      "callee_handle": "normalized_age.function"
+    },
+    {
+      "caller_handle": "senior_flag.function",
+      "callee_handle": "is_senior.function"
+    }
+  ],
+  "revision_increment": 1,
+  "validation": {
+    "inputs": [
+      -10,
+      -1,
+      0,
+      18,
+      54,
+      55,
+      59,
+      60,
+      61,
+      64,
+      65,
+      80,
+      100,
+      150
+    ],
+    "functions": [
+      {
+        "function_handle": "normalized_age.function",
+        "result_key": "normalized_age",
+        "oracle": {
+          "kind": "clamp",
+          "minimum": 0,
+          "maximum": 60
+        }
+      },
+      {
+        "function_handle": "is_senior.function",
+        "result_key": "is_senior",
+        "oracle": {
+          "kind": "threshold_call",
+          "callee_handle": "is_senior.function",
+          "threshold": 1,
+          "true_value": 1,
+          "false_value": 0
+        }
+      },
+      {
+        "function_handle": "senior_flag.function",
+        "result_key": "senior_flag",
+        "oracle": {
+          "kind": "threshold_call",
+          "callee_handle": "is_senior.function",
+          "threshold": 1,
+          "true_value": 1,
+          "false_value": 0
+        }
+      }
+    ]
+  }
+}
