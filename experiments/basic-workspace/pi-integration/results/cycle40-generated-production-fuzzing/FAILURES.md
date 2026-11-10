@@ -1,0 +1,7 @@
+# Failures and reductions
+
+No semantic, MIR, replay, authorization, or provenance defect was observed in the successful 16+8 production workflows. `attempt-01` and `attempt-02` failed in the experiment adapter before the relevant downstream stage: the Cycle36 creation return record lacked the extra `portable_handles` key expected by the Cycle37 helper; then the Cycle38 maintenance wrapper called the customized contract constructor with its four-argument adapter signature. The adapter was corrected and the failure attempts remain preserved. These are harness-integration failures, not product findings.
+
+Creation, rename and maintenance dispatch records include deterministic invalid proposals (stale revision, unauthorized signature/dependency/name/target, incomplete and malformed edit batches), and the Cycle37/Cycle38 historical drivers preserve their exact failure codes. `attempt-07` additionally tampers copied construction-handoff and rename-continuation bundles while leaving their external anchors unchanged; both are rejected at the corresponding provenance verifier. No invalid mutation changed the accepted committed state.
+
+The bounded reducer was not applied to a genuine product mismatch because none occurred. The campaign therefore does not claim successful minimization of a production defect. The preserved adapter failures are reproducible from their attempt artifacts but were fixed by correcting call plumbing rather than by general counterexample reduction.

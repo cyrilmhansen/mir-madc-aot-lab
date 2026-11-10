@@ -1,0 +1,7 @@
+# Coverage
+
+The frozen primary run passed 16/16 complete production workflows. The second configuration passed 8/8. One separately labeled exploratory workflow also passed, renaming a leaf function with no direct callers. Function counts across all runs: six 2-function, thirteen 3-function and six 4-function graphs. The four confirmatory topologies occurred six times each, with one extra chain-shaped case. A total of 584 deterministic rejections were observed across TypeScript schema, construction, rename, maintenance, construction handoff and rename continuation boundaries.
+
+The selected complete histories were executed through Cycle19, Cycle37 and Cycle20 TypeScript/JSONL handlers. Across 25 workflows there were 75 constructor commits, 25 rename commits and 25 atomic three-literal maintenance commits, 25 creation handoffs and 25 rename continuations. All prefixes/revision checkpoints were validated by the existing campaign helpers.
+
+The campaign counts are in `coverage-matrix.json`; per-case seeds and abstract specifications are in `generated-cases.jsonl`. The frozen cases rename the provider, with one to three direct callers; the supplemental leaf case tests a second rename position with zero callers. Four Cycle39 template families are outside the complete workflow due to the existing Cycle20 oracle vocabulary; standalone clamp cases are partial. The production-compatible subset does not include arbitrary independent raw-input predicates or multiple call operands in a single function.

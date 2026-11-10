@@ -1,0 +1,5 @@
+# Performance
+
+The production path launches separate Python gateway processes and repeated TypeScript/Bun probes per constructor, rename and maintenance stage. Wall-clock campaign duration is therefore dominated by process startup and MIR checks; it is not a direct measure of authorization algorithm cost. Across the 25 same-machine workflow samples, the artifact-mtime end-to-end envelope had median 14.305 s, minimum 4.346 s, and maximum 24.873 s. This envelope includes contract generation, process startup, MIR validation and file writes; it must not be read as isolated gateway latency.
+
+The primary 16-case run and per-stage gateway timing evidence are in `attempt-07`; the second eight-seed run is in `attempt-05`; the exploratory leaf-rename case is in attempt 08. Gateway tool timing JSONL files are retained per workflow. No thresholded product performance regression was reported. The registered suspicious threshold was 2x same-shape median, requiring repeat confirmation. A clean isolated repeated benchmark was not completed, so scaling performance remains unconfirmed.

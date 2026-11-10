@@ -1,0 +1,5 @@
+# Security and provenance
+
+Agent proposals traverse the existing TypeScript schema, JSONL bridge, and gateway authorization. Host contracts and trust anchors are generated outside the request path. Creation progression remains host-only. Rename and maintenance use separately bound contracts. Maintenance preview and commit use the existing transaction kernel. Across 25 workflows, 584 invalid proposals and tampered artifacts were rejected: 275 construction, 125 rename, 150 maintenance, 17 construction-handoff and 17 continuation-verifier rejections. Request-level gateway records report unchanged revision/state; TypeScript schema rejections happen before gateway dispatch; provenance rejections happen before baseline activation.
+
+The primary `attempt-07` creates copied tampered construction handoffs and copied tampered rename continuations. The original evidence and external anchors remain unchanged. Both tampered bundles are rejected. Per-step authorization negative requests are retained in each dispatch input/output record. Direct Workspace replay is used for verification only, never as a substitute for a live authorized commit.
