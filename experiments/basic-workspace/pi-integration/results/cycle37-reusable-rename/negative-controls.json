@@ -1,0 +1,47 @@
+{
+  "schema": "basic-workspace.cycle37-rename-negative-controls",
+  "version": 1,
+  "inference_performed": false,
+  "authoritative_mutation_on_rejection": false,
+  "production_bridge": {
+    "source": "production-bridge-attempt-05/bridge-validation.json",
+    "per_mission": {
+      "unknown_or_unauthorized_handle": "MISSION_RENAME_SCOPE",
+      "wrong_expected_source_name": "RENAME_PRECONDITION_FAILED",
+      "unauthorized_new_name": "MISSION_RENAME_NAME",
+      "unauthorized_second_target": "MISSION_RENAME_SCOPE",
+      "stale_revision": "STALE_REVISION",
+      "unknown_semantic_field": "schema validation rejection",
+      "duplicate_commit": "STALE_REVISION"
+    },
+    "preview_non_mutating": true,
+    "revision_after_accepted_commit": 6
+  },
+  "deterministic_unit_tests": [
+    {"case": "target not discovered", "expected": "FUNCTION_NOT_DISCOVERED", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "invented portable handle", "expected": "MISSION_RENAME_SCOPE", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "unauthorized function target", "expected": "MISSION_RENAME_SCOPE", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "wrong old name", "expected": "RENAME_PRECONDITION_FAILED", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "unauthorized replacement", "expected": "MISSION_RENAME_NAME", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "stale revision", "expected": "STALE_REVISION", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "unknown request field", "expected": "INVALID_RENAME_REQUEST", "test": "test_rename_policy_denies_unseen_wrong_scope_wrong_old_new_stale_and_extra_fields"},
+    {"case": "name collision", "expected": "NAME_COLLISION", "test": "test_workspace_collision_and_invalid_identifier_are_canonical_denials"},
+    {"case": "invalid identifier", "expected": "INVALID_NAME", "test": "test_workspace_collision_and_invalid_identifier_are_canonical_denials"},
+    {"case": "changed request after accepted preview", "expected": "RENAME_PRECONDITION_FAILED", "test": "test_contract_and_candidate_changes_after_preview_do_not_commit"},
+    {"case": "contract bytes changed after accepted preview", "expected": "RENAME_CONTRACT_CHANGED", "test": "test_contract_and_candidate_changes_after_preview_do_not_commit"},
+    {"case": "intervening target mutation", "expected": "STALE_REVISION", "test": "test_intervening_target_change_causes_stale_preview_and_preserves_raced_state"},
+    {"case": "wrong destination contract", "expected": "HANDOFF_TRUST_BINDING or HANDOFF_DESTINATION_MISMATCH", "test": "test_handoff_bundle_contract_and_source_artifact_tampering_fail_closed"},
+    {"case": "bundle and internal fingerprint altered without trusted anchor", "expected": "HANDOFF_TRUST_ANCHOR_MISMATCH", "test": "test_handoff_bundle_contract_and_source_artifact_tampering_fail_closed"},
+    {"case": "source construction stream altered", "expected": "HANDOFF_ARTIFACT_DIGEST", "test": "test_handoff_bundle_contract_and_source_artifact_tampering_fail_closed"},
+    {"case": "missing verified-handoff arguments", "expected": "HANDOFF_ARGUMENTS", "test": "test_handoff_bundle_contract_and_source_artifact_tampering_fail_closed"},
+    {"case": "unsupported contract version", "expected": "RENAME_CONTRACT_VERSION", "test": "test_wrong_contract_version_and_unknown_fields_fail_closed"},
+    {"case": "unknown contract field", "expected": "RENAME_CONTRACT_SCHEMA", "test": "test_wrong_contract_version_and_unknown_fields_fail_closed"}
+  ],
+  "metamorphic_controls": [
+    "A to B rename preserved MIR observations and portable mapping",
+    "A to B to A restored canonical source byte-for-byte and preserved outputs",
+    "rename of a function with multiple bound references preserved those references",
+    "both mission histories replayed in fresh workspaces with equivalent normalized state"
+  ],
+  "scope_note": "Historical retired-handle behavior is delegated to the existing Cycle31/Cycle30 replay tests; Cycle37 creates no retired handles. No claim is made that every listed handoff tampering variant was repeated in the production bridge. The direct Cycle36 trust-anchor suite and the Cycle37 destination-binding tests cover the authenticated boundary."
+}
