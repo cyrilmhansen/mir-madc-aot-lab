@@ -1,0 +1,48 @@
+{
+  "injected": true,
+  "failure_class": "injected_overflow_branch_jit_mismatch",
+  "affected_backend": "jit observation comparator",
+  "original_ops": 3,
+  "reduced_ops": 0,
+  "steps": [
+    {
+      "removed": [
+        {
+          "dst": "n0",
+          "text": "add n0, a, 17"
+        },
+        {
+          "dst": "n2",
+          "text": "sub n2, n0, n1"
+        }
+      ],
+      "remaining": 1
+    },
+    {
+      "removed": [
+        {
+          "dst": "n1",
+          "text": "mul n1, b, 9"
+        }
+      ],
+      "remaining": 0
+    }
+  ],
+  "fresh_process_reproduction": {
+    "command": "mir-reduce-runner <generated.mir> <inputs>",
+    "reduced_observation": {
+      "actual": {
+        "interp": 1,
+        "jit": 1
+      },
+      "observed": {
+        "interp": 1,
+        "jit": 0
+      },
+      "expected": 1,
+      "failure_class": "injected_overflow_branch_jit_mismatch"
+    }
+  },
+  "original_mir": "reduce_mod: module\nreduce_case: func i64, i64:a, i64:b\n  local i64:n0, i64:n1, i64:n2, i64:result, i64:ov\n  add n0, a, 17\n  mul n1, b, 9\n  sub n2, n0, n1\n  addo ov, a, b\n  bo overflow\n  mov result, 0\n  jmp finish\noverflow:\n  mov result, 1\nfinish:\n  ret result\n  endfunc\n  endmodule\n",
+  "reduced_mir": "reduce_mod: module\nreduce_case: func i64, i64:a, i64:b\n  local i64:result, i64:ov\n\n  addo ov, a, b\n  bo overflow\n  mov result, 0\n  jmp finish\noverflow:\n  mov result, 1\nfinish:\n  ret result\n  endfunc\n  endmodule\n"
+}
