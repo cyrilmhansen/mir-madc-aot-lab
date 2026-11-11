@@ -79,6 +79,19 @@ static MIR_context_t construct(void) {
     MIR_append_insn(ctx,f,MIR_new_ret_insn(ctx,1,MIR_new_reg_op(ctx,r)));
     MIR_finish_func(ctx);
   }
+  {
+    MIR_type_t rettype=MIR_T_I64; MIR_item_t f=MIR_new_func(ctx,"bounded_count_loop",1,&rettype,1,MIR_T_I64,"limit");
+    MIR_reg_t limit=MIR_reg(ctx,"limit",f->u.func), count=MIR_new_func_reg(ctx,f->u.func,MIR_T_I64,"count");
+    MIR_label_t done=MIR_new_label(ctx), again=MIR_new_label(ctx);
+    MIR_append_insn(ctx,f,MIR_new_insn(ctx,MIR_MOV,MIR_new_reg_op(ctx,count),MIR_new_int_op(ctx,0)));
+    MIR_append_insn(ctx,f,MIR_new_insn(ctx,MIR_BGE,MIR_new_label_op(ctx,done),MIR_new_reg_op(ctx,count),MIR_new_reg_op(ctx,limit)));
+    MIR_append_insn(ctx,f,again);
+    MIR_append_insn(ctx,f,MIR_new_insn(ctx,MIR_ADD,MIR_new_reg_op(ctx,count),MIR_new_reg_op(ctx,count),MIR_new_int_op(ctx,1)));
+    MIR_append_insn(ctx,f,MIR_new_insn(ctx,MIR_BLT,MIR_new_label_op(ctx,again),MIR_new_reg_op(ctx,count),MIR_new_reg_op(ctx,limit)));
+    MIR_append_insn(ctx,f,done);
+    MIR_append_insn(ctx,f,MIR_new_ret_insn(ctx,1,MIR_new_reg_op(ctx,count)));
+    MIR_finish_func(ctx);
+  }
   MIR_finish_module(ctx); return ctx;
 }
 
@@ -112,6 +125,17 @@ static int run(MIR_context_t ctx, int jit, int emit) {
     else {got_i=res[0].i;if(jit){typedef int64_t(*fn_t)(double,double);fn_t fn=(fn_t)MIR_gen(ctx,it);int64_t actual=fn(a,b);if(actual!=want_i){fprintf(stderr,"f64 compare JIT mismatch %s\n",name);return 15;}}if(got_i!=want_i){fprintf(stderr,"f64 compare interp mismatch %s\n",name);return 16;}}
     if(emit){if(fops[i].kind<4)printf("{\"case\":\"%s\",\"a\":\"%a\",\"b\":\"%a\",\"expected_f64\":\"%a\",\"interp_f64\":\"%a\",\"jit\":\"agree\"}\n",name,a,b,want,got);else printf("{\"case\":\"%s\",\"a\":\"%a\",\"b\":\"%a\",\"expected_i64\":%" PRId64 ",\"interp_i64\":%" PRId64 ",\"jit\":\"agree\"}\n",name,a,b,want_i,got_i);}
     count++;
+  }
+  {
+    MIR_item_t it=find_func(ctx,"bounded_count_loop"); int64_t x;
+    if(!it)return 17;
+    for(x=-3;x<=5;x++){
+      MIR_val_t args[1],res[1]; int64_t want=x>0?x:0; args[0].i=x; MIR_interp_arr(ctx,it,res,1,args);
+      if(res[0].i!=want){fprintf(stderr,"loop interpreter mismatch x=%" PRId64 "\n",x);return 18;}
+      if(jit){typedef int64_t(*fn_t)(int64_t);fn_t fn=(fn_t)MIR_gen(ctx,it);int64_t got=fn(x);if(got!=want){fprintf(stderr,"loop JIT mismatch x=%" PRId64 "\n",x);return 19;}}
+      if(emit)printf("{\"case\":\"bounded_count_loop\",\"x\":\"%" PRId64 "\",\"expected_i64\":%" PRId64 ",\"interp_i64\":%" PRId64 ",\"jit\":\"agree\"}\n",x,want,res[0].i);
+      count++;
+    }
   }
   if (jit) MIR_gen_finish(ctx);
   fprintf(stderr,"PASS direct MIR cases=%zu interpreters=%zu jit=%s\n",count,count,jit?"yes":"no");

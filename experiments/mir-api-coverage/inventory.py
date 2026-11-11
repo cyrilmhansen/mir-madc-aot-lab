@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Inventory pinned MIR declarations, library exports, types and opcodes."""
-import json, pathlib, re, subprocess, platform
+import json, pathlib, re, subprocess, platform, hashlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MIR = ROOT / "madc/third_party/mir"
 LIB = ROOT / "madc/obj/mir/host/libmir.a"
@@ -41,16 +41,17 @@ families = {
 familied = set(sum(families.values(), []))
 families["other"] = [x for x in ops if x not in familied and x != "INSN_BOUND"]
 data = {"source": "pinned checkout headers and current host libmir.a", "library": str(LIB.relative_to(ROOT)),
+ "artifact_sha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in [LIB, MIR / "mir.h", MIR / "mir-gen.h", MIR / "mir-debug.h"]},
  "current_execution_target": {"system": platform.system(), "machine": platform.machine(), "python": platform.python_version()},
  "prior_lab_target_evidence": ["Linux x86-64", "Linux AArch64 under QEMU", "macOS arm64"],
  "declared_api": [{"name":n,"headers":files,"library_exported":n in symbols,"status":"exported" if n in symbols else ("header_inline" if any("(inline)" in f for f in files) else "declared_without_library_symbol")} for n,files in sorted(declared.items())],
  "exported_mir_symbols_count": len([s for s in symbols if s.startswith("MIR_")]),
  "types": types, "instruction_count_excluding_bound": len([x for x in ops if x!="INSN_BOUND"]),
- "instructions": [{"name":x,"family":next((k for k,v in families.items() if x in v),"other"),"header_enumerated":True,"execution_support":"direct_interp_and_jit_tested" if x in {o for o in ["ADD","SUB","MUL","DIV","MOD","AND","OR","XOR","LSH","RSH","URSH","EQ","LT","ULT","GE","UGE","EXT8","UEXT8","DADD","DSUB","DMUL","DDIV","DEQ","DLT","DGE"]} else "not_probed_by_cycle42"} for x in ops if x!="INSN_BOUND"],
+ "instructions": [{"name":x,"family":next((k for k,v in families.items() if x in v),"other"),"header_enumerated":True,"execution_support":"direct_interp_and_jit_tested" if x in {o for o in ["ADD","SUB","MUL","DIV","MOD","AND","OR","XOR","LSH","RSH","URSH","EQ","LT","ULT","GE","UGE","EXT8","UEXT8","DADD","DSUB","DMUL","DDIV","DEQ","DLT","DGE","MOV","BGE","BLT","LABEL","RET"]} else "not_probed_by_cycle42"} for x in ops if x!="INSN_BOUND"],
  "families": {k:v for k,v in families.items() if v}}
 out = ROOT / "results/cycle42-mir-api-coverage/mir-api-inventory.json"
 out.parent.mkdir(parents=True, exist_ok=True)
-direct_api = {"MIR_init","MIR_new_module","MIR_new_func","MIR_reg","MIR_new_func_reg","MIR_new_insn","MIR_new_ret_insn","MIR_append_insn","MIR_finish_func","MIR_finish_module","MIR_interp_arr","MIR_load_module","MIR_gen_init","MIR_link","MIR_gen","MIR_gen_finish","MIR_output","MIR_write","MIR_read","MIR_scan_string"}
+direct_api = {"MIR_init","MIR_finish","MIR_new_module","MIR_new_func","MIR_reg","MIR_new_func_reg","MIR_new_insn","MIR_new_ret_insn","MIR_new_reg_op","MIR_new_int_op","MIR_append_insn","MIR_finish_func","MIR_finish_module","MIR_new_label","MIR_new_label_op","MIR_interp_arr","MIR_load_module","MIR_gen_init","MIR_link","MIR_gen","MIR_gen_finish","MIR_output","MIR_write","MIR_read","MIR_scan_string","MIR_item_name"}
 for entry in data["declared_api"]:
     entry["current_target_status"] = "available_header_inline" if entry["status"] == "header_inline" else ("available_exported_symbol" if entry["library_exported"] else "unavailable_missing_symbol")
     entry["cycle42_direct_coverage"] = "called_by_harness" if entry["name"] in direct_api else "not_called_by_new_harness"
@@ -62,7 +63,8 @@ coverage = {"denominator": data["instruction_count_excluding_bound"],
             "tested_type_signatures": [
                 {"instructions": ["ADD","SUB","MUL","DIV","MOD","AND","OR","XOR","LSH","RSH","URSH","EQ","LT","ULT","GE","UGE","EXT8","UEXT8"], "operands": ["MIR_T_I64","MIR_T_I64"], "result": "MIR_T_I64"},
                 {"instructions": ["DADD","DSUB","DMUL","DDIV"], "operands": ["MIR_T_D","MIR_T_D"], "result": "MIR_T_D"},
-                {"instructions": ["DEQ","DLT","DGE"], "operands": ["MIR_T_D","MIR_T_D"], "result": "MIR_T_I64"}],
+                {"instructions": ["DEQ","DLT","DGE"], "operands": ["MIR_T_D","MIR_T_D"], "result": "MIR_T_I64"},
+                {"instructions": ["MOV","BGE","BLT","LABEL","RET"], "operands": ["MIR_T_I64"], "result": "MIR_T_I64", "note": "bounded loop / branch labels"}],
             "type_combination_denominator": "not claimed: MIR legality is opcode and operand-slot specific; the 18 type enumerators do not form a valid Cartesian semantic matrix",
             "instructions": data["instructions"], "families": data["families"]}
 (out.parent / "instruction-coverage.json").write_text(json.dumps(coverage, indent=2)+"\n")
