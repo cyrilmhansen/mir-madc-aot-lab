@@ -1,0 +1,22 @@
+{
+  "campaign": "cycle44-mir-calling-conventions-abi-linking",
+  "frozen_before_execution": true,
+  "target": "Linux x86-64 System V ABI; current checked-out MIR headers and archive",
+  "primary_matrix": {
+    "distinct_signature_shapes": 48,
+    "input_seeds_per_signature": 5,
+    "expected_core_observations": 240,
+    "native_client_seeds_per_signature": 3,
+    "types": ["I64", "U64", "I32", "F", "D"],
+    "arity_targets": [0,1,2,4,5,6,7,8,9,10],
+    "categories": ["integer-only", "double-only", "alternating mixed", "integer then double", "double then integer", "mixed-width"],
+    "execution_paths": ["MIR interpreter", "MIR JIT through exact C prototypes", "fresh text", "fresh binary", "system-linked ET_REL client", "shared library plus dlopen", "MIR_object_load"]
+  },
+  "additional_calls": ["8-argument MIR internal call", "nested internal call with caller-live values", "8-argument imported C integer call", "mixed integer/double imported C call", "pointer buffer mutation", "two-result MIR call via a single-result caller"],
+  "negative_controls_target": 24,
+  "repetitions": {"warmup": 1, "confirmatory_process_runs": 2},
+  "timeouts": {"per_child_seconds": 10},
+  "arithmetic": "small bounded values; weighted checksums avoid integer overflow; floating values are exact binary fractions and compared exactly",
+  "scope_exclusions": ["variadic calls deferred pending target/API contract review", "JMP/JRET nonstandard ABI not treated as ordinary C call", "no mismatched C prototypes are invoked", "no cross-target execution in the initial campaign"],
+  "performance_preregistration": {"samples": 7, "suspicion_threshold": "Investigate a backend route only if its median per-call route exceeds 2x the same function's JIT repeated-call median; do not infer from one sample."}
+}
