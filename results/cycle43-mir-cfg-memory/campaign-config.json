@@ -1,0 +1,121 @@
+{
+  "campaign": "cycle43-control-flow-memory-differential",
+  "pre_registered_before_new_cfg_memory_execution": true,
+  "root_expected": "c57ffbbe",
+  "actual_madc": "868847a76434058483bade03ead09ba6acb9d771",
+  "mir_source_tree": "a635f2d12959ceda27c31e6a440aa273e76ab9a0",
+  "archive_sha256": "a1e6f02f014b11796dadcc3628e369a3c0bb0039c604b6fe8b36c8a081f52bb8",
+  "generator": "experiments/mir-api-coverage/mir-cfg-memory.c",
+  "determinism": "fixed case tables; no random generation",
+  "targets": {
+    "control_flow_cases": 120,
+    "memory_cases": 120,
+    "control_flow_families": [
+      "diamond",
+      "multi-way decision",
+      "bounded counting loop",
+      "accumulating loop",
+      "nested conditions",
+      "nested bounded loops",
+      "multiple early returns",
+      "signed versus unsigned branches",
+      "equivalent CFG forms"
+    ],
+    "memory_families": [
+      "aligned load",
+      "store then load",
+      "indexed scale 1/2/4/8",
+      "signed I8 load",
+      "unsigned U8 load",
+      "narrow store/readback",
+      "overlap alias",
+      "loop-indexed update"
+    ],
+    "cfg_max_blocks": 32,
+    "loop_bound": 8,
+    "memory_region_bytes": 64,
+    "canary_bytes_each_side": 8,
+    "invalid_controls": 32,
+    "confirmation_cases": 40,
+    "representative_independent_repeats": 2
+  },
+  "execution_paths": [
+    "MIR interpreter",
+    "MIR JIT",
+    "fresh MIR text parse",
+    "fresh MIR binary decode"
+  ],
+  "reference_rules": {
+    "integer": "bounded signed 64-bit with overflow excluded",
+    "memory": "initialized byte buffers and memcpy-based host references",
+    "memory_endianness": "host native; recorded in audit",
+    "exceptions": "no invalid pointers or uninitialized reads"
+  },
+  "timeout_policy": "per-case process timeout 10s; corpus process timeout 120s",
+  "reduction": {
+    "cfg": [
+      "remove unreachable blocks",
+      "remove unused statements",
+      "simplify branches",
+      "reduce inputs",
+      "reduce loop bounds"
+    ],
+    "memory": [
+      "remove operations",
+      "reduce offsets and values",
+      "reduce buffer while preserving bounds",
+      "reduce widths where failure persists"
+    ]
+  },
+  "performance": "exploratory only unless same-host repeated thresholds are frozen before confirmatory measurements",
+  "performance_preregistration": {
+    "registered_before_confirmatory_measurement": true,
+    "samples_per_route": 7,
+    "warmup_runs_per_route": 2,
+    "routes": [
+      "direct construction+interpreter+JIT",
+      "fresh text parse+interpreter+JIT",
+      "fresh binary decode+interpreter+JIT"
+    ],
+    "suspicion_threshold": "Investigate only if the median end-to-end process time of a persistence route exceeds 2.0x the direct route median across the same 256 cases; no single-sample regression claim.",
+    "limitations": "This harness does not instrument MIR construction, interpreter, JIT compile, first call, repeated calls, parse/decode, or worker startup separately. These timings are exploratory end-to-end process measurements."
+  },
+  "supplemental_memory_extension": {
+    "frozen_before_supplemental_execution": true,
+    "purpose": "Increase legal typed memory-form coverage from the initial 13 distinct access tuples to at least 24 after concrete coverage audit.",
+    "added_templates": [
+      "I16 signed load",
+      "U16 zero-extending load",
+      "I32 signed load",
+      "U32 zero-extending load",
+      "I16 store/U16 reload",
+      "I32 store/U32 reload",
+      "I16 indexed load scales 1/2/4/8",
+      "U16 indexed load scales 1/2/4"
+    ],
+    "added_case_target": 156,
+    "included_in_final_corpus": true,
+    "preserved_initial_attempts": [
+      "initial-256-differential.jsonl",
+      "initial-256-text-roundtrip.jsonl",
+      "initial-256-binary-roundtrip.jsonl",
+      "initial-256-confirmation.jsonl"
+    ]
+  },
+  "campaign_outcomes": {
+    "valid_cases": 412,
+    "control_flow_cases": 124,
+    "memory_cases": 288,
+    "distinct_new_opcodes": 4,
+    "memory_typed_operation_address_tuples": 25,
+    "invalid_controls_rejected": 32,
+    "separate_random_seed_campaign": "not run; fixed tables are deterministic and a fresh-process repeat of the complete 412-case corpus was run instead",
+    "native_object_functions": 2,
+    "genuine_mir_defects": 0,
+    "planned_shortfalls": [
+      "20 new opcode target not met (4 new names); memory operand-mode diversity is reported separately and no opcode count was inflated.",
+      "No cross-target/QEMU, shared-library, PIE or MIR_object_load execution.",
+      "Reducer does not rewrite MIR graph or operation sequences."
+    ]
+  }
+}

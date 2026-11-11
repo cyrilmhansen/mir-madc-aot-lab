@@ -1,0 +1,350 @@
+cycle43_cfg_memory:	module
+cfg_diamond:	func	i64, i64:x, i64:y
+	local	i64:r
+
+# 2 args, 1 local, 0 globals
+	blt	L1, x, 0
+	add	r, x, 10
+	jmp	L2
+L1:
+	sub	r, 0, x
+L2:
+	ret	r
+	endfunc
+cfg_multiway:	func	i64, i64:x, i64:y
+	local	i64:r
+
+# 2 args, 1 local, 0 globals
+	blt	L3, x, 0
+	blt	L4, x, 5
+	mov	r, 2
+	jmp	L5
+L4:
+	mov	r, 0
+	jmp	L5
+L3:
+	mov	r, -2
+L5:
+	ret	r
+	endfunc
+cfg_count_loop:	func	i64, i64:x, i64:y
+	local	i64:i
+
+# 2 args, 1 local, 0 globals
+	mov	i, 0
+L6:
+	bge	L7, i, x
+	add	i, i, 1
+	jmp	L6
+L7:
+	ret	i
+	endfunc
+cfg_accum_loop:	func	i64, i64:x, i64:y
+	local	i64:i, i64:s
+
+# 2 args, 2 locals, 0 globals
+	mov	i, 0
+	mov	s, 0
+L8:
+	bge	L9, i, x
+	add	s, s, i
+	add	i, i, 1
+	jmp	L8
+L9:
+	ret	s
+	endfunc
+cfg_nested_if:	func	i64, i64:x, i64:y
+	local	i64:r
+
+# 2 args, 1 local, 0 globals
+	blt	L10, x, 0
+	bgt	L12, x, 5
+	mov	r, 3
+	jmp	L13
+L12:
+	mov	r, 4
+	jmp	L13
+L10:
+	blt	L11, x, -5
+	mov	r, 1
+	jmp	L13
+L11:
+	mov	r, 2
+L13:
+	ret	r
+	endfunc
+cfg_nested_loops:	func	i64, i64:x, i64:y
+	local	i64:i, i64:j, i64:s
+
+# 2 args, 3 locals, 0 globals
+	mov	i, 0
+	mov	s, 0
+L14:
+	bge	L17, i, x
+	mov	j, 0
+L15:
+	bge	L16, j, y
+	add	s, s, i
+	add	s, s, j
+	add	j, j, 1
+	jmp	L15
+L16:
+	add	i, i, 1
+	jmp	L14
+L17:
+	ret	s
+	endfunc
+cfg_early_returns:	func	i64, i64:x, i64:y
+
+# 2 args, 0 locals, 0 globals
+	blt	L20, x, 0
+	beq	L18, x, 0
+	blt	L19, x, 10
+	ret	2
+L19:
+	ret	1
+L18:
+	ret	0
+L20:
+	ret	-1
+	endfunc
+cfg_signed_unsigned:	func	i64, i64:x, i64:y
+	local	i64:r, i64:s, i64:o
+
+# 2 args, 3 locals, 0 globals
+	blt	L21, x, 0
+	mov	r, 0
+	jmp	L22
+L21:
+	mov	r, 1
+L22:
+	ublt	L23, x, 9223372036854775808
+	mov	s, 0
+	jmp	L24
+L23:
+	mov	s, 1
+L24:
+	mul	o, s, 2
+	add	o, o, r
+L25:
+	ret	o
+	endfunc
+cfg_equiv_a:	func	i64, i64:x, i64:y
+	local	i64:r
+
+# 2 args, 1 local, 0 globals
+	blt	L26, x, 0
+	bgt	L27, x, 10
+	mov	r, x
+	jmp	L28
+L26:
+	mov	r, 0
+	jmp	L28
+L27:
+	mov	r, 10
+L28:
+	ret	r
+	endfunc
+cfg_equiv_b:	func	i64, i64:x, i64:y
+	local	i64:r
+
+# 2 args, 1 local, 0 globals
+	bgt	L30, x, 10
+	bge	L29, x, 0
+	mov	r, 0
+	jmp	L31
+L30:
+	mov	r, 10
+	jmp	L31
+L29:
+	mov	r, x
+L31:
+	ret	r
+	endfunc
+mem_load64:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i64:(p)
+	ret	r
+	endfunc
+mem_store_reload64:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	i64:(p), x
+	mov	r, i64:(p)
+	ret	r
+	endfunc
+mem_index_s1:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i64:(p, y)
+	ret	r
+	endfunc
+mem_index_s2:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i64:(p, y, 2)
+	ret	r
+	endfunc
+mem_index_s4:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i64:(p, y, 4)
+	ret	r
+	endfunc
+mem_index_s8:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i64:(p, y, 8)
+	ret	r
+	endfunc
+mem_signed_i8:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i8:1(p)
+	ret	r
+	endfunc
+mem_unsigned_u8:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, u8:1(p)
+	ret	r
+	endfunc
+mem_store_i8_load_u8:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	i8:1(p), x
+	mov	r, u8:1(p)
+	ret	r
+	endfunc
+mem_alias64_u8:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	i64:8(p), x
+	mov	r, u8:8(p)
+	ret	r
+	endfunc
+mem_loop_update:	func	i64, p:p, i64:x, i64:y
+	local	i64:r, i64:i, i64:v, i64:s
+
+# 3 args, 4 locals, 0 globals
+	mov	i, 0
+	mov	s, 0
+L32:
+	bge	L33, i, x
+	mov	v, i64:(p, i, 8)
+	add	v, v, 1
+	mov	i64:(p, i, 8), v
+	add	s, s, v
+	add	i, i, 1
+	jmp	L32
+L33:
+	mov	r, s
+	ret	r
+	endfunc
+mem_signed_i16:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i16:2(p)
+	ret	r
+	endfunc
+mem_unsigned_u16:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, u16:2(p)
+	ret	r
+	endfunc
+mem_signed_i32:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i32:4(p)
+	ret	r
+	endfunc
+mem_unsigned_u32:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, u32:4(p)
+	ret	r
+	endfunc
+mem_store_i16_load_u16:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	i16:2(p), x
+	mov	r, u16:2(p)
+	ret	r
+	endfunc
+mem_store_i32_load_u32:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	i32:4(p), x
+	mov	r, u32:4(p)
+	ret	r
+	endfunc
+mem_index_i16_s1:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i16:(p, y)
+	ret	r
+	endfunc
+mem_index_i16_s2:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i16:(p, y, 2)
+	ret	r
+	endfunc
+mem_index_i16_s4:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i16:(p, y, 4)
+	ret	r
+	endfunc
+mem_index_i16_s8:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i16:(p, y, 8)
+	ret	r
+	endfunc
+mem_index_u16_s1:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, i16:(p, y)
+	ret	r
+	endfunc
+mem_index_u16_s2:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, u16:(p, y, 2)
+	ret	r
+	endfunc
+mem_index_u16_s4:	func	i64, p:p, i64:x, i64:y
+	local	i64:r
+
+# 3 args, 1 local, 0 globals
+	mov	r, u16:(p, y, 4)
+	ret	r
+	endfunc
+	export	cfg_diamond
+	export	mem_store_reload64
+	endmodule
