@@ -3,14 +3,15 @@
 ## Outcome
 
 The first direct, deterministic MIR differential tranche passed. A standalone
-C client built 344 functions programmatically through MIR's public API and
-compared the interpreter and JIT against an independent arithmetic reference.
+C client built 344 arithmetic functions and one loop function programmatically
+through MIR's public API, then compared the interpreter and JIT against an independent arithmetic reference.
 The exact same module was serialized as MIR text and binary, then parsed in
-fresh processes and executed through JIT. All 1,032 emitted result rows agree;
+fresh processes and executed through JIT. All 1,059 emitted result rows agree;
 the three JSONL result streams are byte-identical.
 
-This establishes direct semantic and persistence checks for 25 instructions across I64 and D. It is not comprehensive MIR coverage: the pinned enum has
-248 concrete opcodes and 18 type enumerators, while this corpus exercises 25
+This establishes direct semantic and persistence checks for 30 instructions
+across I64 and D. It is not comprehensive MIR coverage: the pinned enum has
+248 concrete opcodes and 18 type enumerators, while this corpus exercises 30
 opcodes and two types. The requested broad control-flow, floating-point, ABI
 and negative API campaign is not complete; the float slice uses only finite
 exactly representable values. A strict-C11 compile probe also
@@ -41,6 +42,7 @@ symbols. Inventory detail is machine-readable in `mir-api-inventory.json`.
 - Fresh binary decode + JIT: 344/344 agree.
 - MADC object-load regression: 9 cases / 142 assertions pass.
 - MADC native shared regression: 5 cases / 169 assertions pass.
+- Workspace pytest regression: 303 cases / 148 subtests pass.
 - Full Workspace suite was run during this cycle; its final count is recorded
   in `REGRESSION.md`.
 - New MIR/MADC production code: zero.
@@ -56,11 +58,12 @@ issue and the initial zero-divisor harness defect are described in
 - Level 0 API availability: pass with qualification (archive is from the
   checked-out MADC descendant, not a verified fresh f541 build).
 - Level 1 API inventory: pass.
-- Level 2 independent direct semantic corpus: pass for the bounded I64/D slice.
+- Level 2 independent direct semantic corpus: pass for the bounded
+  I64/D/control-flow slice.
 - Level 3 differential execution: pass for interpreter, JIT, text and binary
   paths in that slice.
-- Level 4 control-flow and ABI: prior lab evidence exists, but new diversified
-  Cycle42 generation is incomplete.
+- Level 4 control-flow: one bounded loop shape passes; diversified CFG and new
+  ABI coverage remain incomplete.
 - Level 5 AOT/persistence: persistence passes here; prior selected AOT paths
   are documented, not rerun.
 - Level 6 robustness: incomplete; no new broad invalid-input campaign.

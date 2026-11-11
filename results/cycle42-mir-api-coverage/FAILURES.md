@@ -1,6 +1,6 @@
 # Failures and limitations
 
-No semantic mismatch occurred in the final 344-case direct corpus or its text
+No semantic mismatch occurred in the final 353-case direct corpus or its text
 and binary round trips. A minimized compile-only reproducer found that direct
 inclusion of `mir.h` fails strict ISO C11 because the public
 `MIR_interp_arr_varg` declaration uses `va_list` without including
@@ -24,6 +24,6 @@ systematically test aborting API errors. Existing API-error and object-loader
 observations remain separately documented in historical lab evidence.
 
 The principal coverage limitation is that this campaign directly tests only
-25 of 248 concrete opcodes, using I64 and D. Control flow,
-memory, vectors, multi-return, varargs, and the full object-loader relocation
+30 of 248 concrete opcodes, using I64 and D, plus one bounded loop. Broader
+control flow, memory, vectors, multi-return, varargs, and the full object-loader relocation
 surface still require direct generated fixtures.

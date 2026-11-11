@@ -15,7 +15,9 @@ does not modify the MIR subtree. The submodule was not reset or updated.
 Consequently this report's linked archive is the available archive from that
 checkout, not a freshly rebuilt artifact proven to come from the exact f541
 commit. The archive and headers were inspected and the direct harness linked
-successfully.
+successfully. The `third_party/mir` subtree is byte-identical between f541 and
+the checked-out descendant. SHA-256 digests for the archive and inspected
+headers are recorded in `mir-api-inventory.json`.
 
 Host: Linux x86-64, GCC 16.2.1. The tested archive is
 `madc/obj/mir/host/libmir.a`.
@@ -43,9 +45,9 @@ must not be treated as usable from this build. The generated inventory is in
 `mir-api-inventory.json`.
 
 The instruction enum contains 248 concrete instructions (excluding the bound
-sentinel), across 18 MIR types. The initial differential harness covers 18
-integer instructions and only `MIR_T_I64`; this is a measured first slice,
-not broad opcode coverage. Most vector, floating, memory, call and control-flow
+sentinel), across 18 MIR types. The final differential harness covers 18 integer instructions, 7 double
+instructions and one small loop shape across I64 and D; this is a measured
+first slice, not broad opcode coverage. Most vector, memory, call and control-flow
 instruction/type combinations remain untested by the new harness.
 
 ## API surface observed

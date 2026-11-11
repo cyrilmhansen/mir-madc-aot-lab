@@ -24,6 +24,27 @@ cmp results/cycle42-mir-api-coverage/differential-results.jsonl \
     results/cycle42-mir-api-coverage/binary-roundtrip.jsonl
 ```
 
+The strict header reproducer is expected to fail without the `stdarg.h`
+workaround and pass with it:
+
+```sh
+cc -std=c11 -fsyntax-only -I madc/third_party/mir \
+  experiments/mir-api-coverage/header-probe.c
+cc -std=c11 -include stdarg.h -fsyntax-only -I madc/third_party/mir \
+  experiments/mir-api-coverage/header-probe.c
+```
+
+The existing standalone smoke was also compiled and run in both text and
+binary modes using:
+
+```sh
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -include stdarg.h -O2 -Wall -Wextra -Werror \
+  -I madc/third_party/mir src/microbench/libmir_smoke.c \
+  madc/obj/mir/host/libmir.a -lm -o experiments/mir-api-coverage/build/libmir-smoke
+(cd experiments/mir-api-coverage/build && ./libmir-smoke write program.bmir)
+(cd experiments/mir-api-coverage/build && ./libmir-smoke read program.bmir)
+```
+
 The MADC host tests run in this environment with:
 
 ```sh
